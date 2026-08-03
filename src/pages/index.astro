@@ -53,8 +53,18 @@ const description =
         flex-shrink: 0;
       }
 
-      .mock { position: relative; perspective: 1100px; }
+      /* Screen on top, two controllers underneath — the setup as it actually looks in a room. */
+      .mock {
+        position: relative;
+        perspective: 1100px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: clamp(16px, 2.4vw, 26px);
+      }
       .tv {
+        position: relative;
+        width: 100%;
         aspect-ratio: 16/10;
         border-radius: 16px;
         background: linear-gradient(155deg, #131a30, #070912);
@@ -62,7 +72,6 @@ const description =
         box-shadow: 0 40px 90px rgba(0,0,0,.6), inset 0 0 90px rgba(53,240,224,.06);
         padding: 20px;
         display: flex; flex-direction: column; gap: 13px;
-        transform: rotateY(-9deg) rotateX(3deg);
         overflow: hidden;
       }
       .tv::after {
@@ -77,37 +86,129 @@ const description =
         text-align: center; padding-top: 6px;
       }
       .tv-label { text-align: center; font-family: var(--font-mono); font-size: 9.5px; letter-spacing: .22em; text-transform: uppercase; color: var(--text-faint); }
-      .tv-bars { display: flex; flex-direction: column; gap: 8px; margin-top: auto; }
-      .tv-bar { height: 11px; border-radius: 999px; background: rgba(255,255,255,.07); overflow: hidden; }
-      .tv-bar span {
-        display: block; height: 100%; border-radius: 999px;
-        background: linear-gradient(90deg, var(--glow), var(--hot));
-        animation: race 3.4s ease-in-out infinite alternate;
-      }
-      .tv-bar:nth-child(2) span { animation-delay: .5s; }
-      .tv-bar:nth-child(3) span { animation-delay: 1s; }
-      @keyframes race { from { width: 18%; } to { width: 88%; } }
 
+      /* Two joined players, shown the same way the real code bar shows them. */
+      .tv-players { display: flex; justify-content: center; gap: 10px; margin-top: auto; }
+      .tv-player {
+        width: 26px; height: 26px;
+        border-radius: 50%;
+        display: grid; place-items: center;
+        font-weight: 700; font-size: 12px; line-height: 1;
+        color: #05060d;
+      }
+      .tv-player.hot  { background: var(--hot); color: #fff; }
+      .tv-player.cool { background: var(--glow); }
+
+      /* The pair rides up over the screen's bottom edge, so the three pieces read as one
+         object rather than a stack. The lift is a percentage of .mock's width, so the overlap
+         scales with the mock instead of drifting between viewport sizes. */
+      .phones {
+        display: flex;
+        justify-content: center;
+        gap: clamp(20px, 4vw, 48px);
+        width: 100%;
+        margin-top: -8%;
+        position: relative;
+        z-index: 1;
+      }
+      /* Held sideways: landscape, d-pad left, buttons right. */
       .phone {
-        position: absolute; right: -6px; bottom: -34px;
-        width: 27%; min-width: 96px; aspect-ratio: 9/17;
-        border-radius: 18px;
+        position: relative;
+        width: clamp(112px, 30%, 168px);
+        aspect-ratio: 17/9;
+        border-radius: 14px;
         background: linear-gradient(165deg, #1b2340, #090c16);
         border: 1px solid var(--line);
         box-shadow: 0 26px 54px rgba(0,0,0,.65);
-        padding: 13px 10px;
-        display: flex; flex-direction: column;
-        transform: rotate(6deg);
+        padding: 8px;
+        display: flex;
       }
-      .phone-pad {
-        flex: 1; border-radius: 12px;
-        background: linear-gradient(135deg, var(--hot), #a81a58);
-        box-shadow: var(--bloom-hot);
-        display: grid; place-items: center;
-        font-weight: 700; font-size: 12px; color: #fff; letter-spacing: .08em;
-        animation: tap 1.7s ease-in-out infinite;
+
+      /* Signal going up to the screen: three nested arcs per phone. Each is a circle showing
+         only its top border, so what's drawn is the crown of the arc — pointing at the screen.
+         Counter-rotated against the phone's tilt so the signal stays vertical regardless. */
+      .waves {
+        position: absolute;
+        left: 50%; bottom: 100%;
+        width: 0; height: 0;
+        margin-bottom: 4px;
+        pointer-events: none;
       }
-      @keyframes tap { 0%,100% { transform: scale(1); } 50% { transform: scale(.94); } }
+      .waves i {
+        position: absolute;
+        left: 0; bottom: 0;
+        border: 1.5px solid transparent;
+        border-top-color: currentColor;
+        border-radius: 50%;
+        transform: translate(-50%, 50%);
+      }
+      .waves i:nth-child(1) { width: 26px; height: 26px; opacity: .8; }
+      .waves i:nth-child(2) { width: 46px; height: 46px; opacity: .45; }
+      .waves i:nth-child(3) { width: 66px; height: 66px; opacity: .2; }
+
+      /* The tilt lives on .phone, so cancel it here or the arcs would lean off-target. */
+      .phone:first-child .waves { transform: rotate(5deg); }
+      .phone:last-child  .waves { transform: rotate(-5deg); }
+
+      .phone.p1 .waves { color: var(--hot); }
+      .phone.p2 .waves { color: var(--glow); }
+      /* A slight outward tilt so the pair reads as two people holding them, not a product shot. */
+      .phone:first-child { transform: rotate(-5deg); }
+      .phone:last-child  { transform: rotate(5deg); }
+
+      .phone-label {
+        font-family: var(--font-mono);
+        font-size: 7.5px;
+        letter-spacing: .16em;
+        text-transform: uppercase;
+        color: var(--text-faint);
+        white-space: nowrap;
+      }
+      /* The controller face: d-pad on the left, action buttons on the right, label between —
+         static, since the hero shouldn't have anything blinking in it. */
+      .phone-face {
+        flex: 1;
+        border-radius: 9px;
+        background: rgba(255,255,255,.04);
+        border: 1px solid rgba(255,255,255,.07);
+        display: flex; flex-direction: row;
+        align-items: center; justify-content: space-between;
+        padding: 0 9px;
+        gap: 6px;
+      }
+
+      .dpad {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        grid-template-rows: repeat(3, 1fr);
+        height: 58%;
+        aspect-ratio: 1;
+        flex-shrink: 0;
+      }
+      .dpad i {
+        background: rgba(255,255,255,.16);
+        border-radius: 2px;
+      }
+      /* Plus shape: the four arms and the hub, corners left empty. */
+      .dpad i:nth-child(1) { grid-area: 1 / 2; border-radius: 3px 3px 0 0; }
+      .dpad i:nth-child(2) { grid-area: 2 / 1; border-radius: 3px 0 0 3px; }
+      .dpad i:nth-child(3) { grid-area: 2 / 2; border-radius: 0; }
+      .dpad i:nth-child(4) { grid-area: 2 / 3; border-radius: 0 3px 3px 0; }
+      .dpad i:nth-child(5) { grid-area: 3 / 2; border-radius: 0 0 3px 3px; }
+
+      /* Offset diagonally the way face buttons actually sit, not in a flat row. */
+      .phone-buttons { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+      .phone-buttons b {
+        width: 13px; height: 13px;
+        border-radius: 50%;
+        display: block;
+      }
+      .phone-buttons b:first-child { transform: translateY(5px); }
+      .phone-buttons b:last-child  { transform: translateY(-5px); }
+      .phone.p1 .phone-buttons b:first-child { background: var(--hot); box-shadow: var(--bloom-hot); }
+      .phone.p1 .phone-buttons b:last-child  { background: rgba(255,46,136,.32); }
+      .phone.p2 .phone-buttons b:first-child { background: var(--glow); box-shadow: var(--bloom-glow); }
+      .phone.p2 .phone-buttons b:last-child  { background: rgba(53,240,224,.32); }
 
       /* ---------------------------------------------------------------- session */
       /* Once a room is open the page becomes the console: a thin code bar, and everything
@@ -344,13 +445,29 @@ const description =
             <div class="tv">
               <div class="tv-label">Room code</div>
               <div class="tv-code">K7QP</div>
-              <div class="tv-bars">
-                <div class="tv-bar"><span></span></div>
-                <div class="tv-bar"><span></span></div>
-                <div class="tv-bar"><span></span></div>
+              <div class="tv-players">
+                <span class="tv-player hot">A</span>
+                <span class="tv-player cool">S</span>
               </div>
             </div>
-            <div class="phone"><div class="phone-pad">TAP</div></div>
+            <div class="phones">
+              <div class="phone p1">
+                <div class="waves"><i></i><i></i><i></i></div>
+                <div class="phone-face">
+                  <div class="dpad"><i></i><i></i><i></i><i></i><i></i></div>
+                  <div class="phone-label">P1</div>
+                  <div class="phone-buttons"><b></b><b></b></div>
+                </div>
+              </div>
+              <div class="phone p2">
+                <div class="waves"><i></i><i></i><i></i></div>
+                <div class="phone-face">
+                  <div class="dpad"><i></i><i></i><i></i><i></i><i></i></div>
+                  <div class="phone-label">P2</div>
+                  <div class="phone-buttons"><b></b><b></b></div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </section>
