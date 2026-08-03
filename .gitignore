@@ -23,3 +23,5 @@ pubsub-debug.log
 .env.local
 *.local
 .DS_Store
+
+dist/
