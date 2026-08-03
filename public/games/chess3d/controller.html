@@ -1,0 +1,728 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<title>Gambit — Controller</title>
+<link rel="stylesheet" href="/console.css" />
+<style>
+  * { -webkit-tap-highlight-color: transparent; user-select: none; }
+  /* height:100% alone does not bound the body when a flex child wants to be taller than
+     the viewport — the body simply grows and the board ends up scrolled off the bottom.
+     Fixing the height and hiding overflow is what actually pins the layout to one screen. */
+  html, body { height: 100%; max-height: 100%; overflow: hidden; }
+  body {
+    display: flex; flex-direction: column;
+    touch-action: manipulation; overscroll-behavior: none;
+  }
+
+  .bar {
+    display: flex; align-items: center; gap: 10px;
+    padding: max(12px, env(safe-area-inset-top)) 16px 8px;
+  }
+  .side-dot {
+    width: 26px; height: 26px; border-radius: 8px; flex-shrink: 0;
+    border: 2px solid var(--line);
+  }
+  .side-dot.w { background: #e8eefc; }
+  .side-dot.b { background: #171d33; }
+  .bar-txt { flex: 1; min-width: 0; line-height: 1.25; }
+  .bar-side {
+    font-family: var(--font-mono); font-size: 10px; letter-spacing: .16em;
+    text-transform: uppercase; color: var(--text-faint);
+  }
+  #status { font-size: 15px; color: var(--text); }
+  #status.yours { color: var(--glow); text-shadow: 0 0 14px rgba(53,240,224,.45); }
+
+  /* Captured pieces, small, above the board. */
+  #taken { font-size: 15px; line-height: 1; min-height: 15px; color: var(--text-dim); padding: 0 16px 6px; }
+
+  /* The board fills whatever square fits, and is rotated for Black so the player's own
+     pieces are always nearest to them. */
+  .board-wrap {
+    flex: 1; display: flex; align-items: center; justify-content: center;
+    padding: 6px 12px; min-height: 0;
+  }
+  /* The board is a square that must fit both dimensions of whatever is left over. Sizing
+     it from the viewport height alone leaves it stranded at one end on tall phones, which
+     is exactly what a first attempt at this did — hence min() against both axes and a
+     flex parent that centres it. */
+  #board {
+    width: min(100%, 92vw);
+    max-height: 100%;
+    aspect-ratio: 1;
+    display: grid;
+    grid-template-columns: repeat(8, 1fr);
+    grid-template-rows: repeat(8, 1fr);
+    border-radius: 12px; overflow: hidden;
+    border: 1px solid var(--line);
+    box-shadow: 0 10px 40px rgba(0,0,0,.5);
+    transition: transform .5s ease;
+  }
+  #board.flip { transform: rotate(180deg); }
+  #board.flip .sq { transform: rotate(180deg); }
+
+  .sq {
+    position: relative;
+    display: grid; place-items: center;
+    font-size: min(7.6vw, 30px); line-height: 1;
+    transition: background-color .18s;
+  }
+  /* Both squares sit in the upper-middle range on purpose. A hollow white glyph needs a
+     mid-tone under it to read as white, and a solid black glyph needs the same to read as
+     black — a very dark board makes White's outline vanish and Black's fill merge in. */
+  .sq.light { background: #6b7aa6; }
+  .sq.dark  { background: #3b4670; }
+  .sq .glyph { position: relative; z-index: 2; pointer-events: none; }
+  /* White uses the HOLLOW glyphs (♙♖♘), black the SOLID ones (♟♜♞).
+     The two sets differ in shape, not just colour, which is what actually separates the
+     armies at phone size. Do not go back to solid-for-both plus a dark text-shadow to fake
+     White's outline: a pawn glyph is thin enough that a 2-3px shadow bleeds across its
+     whole body and the piece renders black. That is precisely why it was always the pawns
+     that looked like the wrong colour while the chunkier back rank looked fine. */
+  .sq.wp {
+    color: #ffffff;
+    /* A tight dark rim for separation from the light squares — under 1px, so it traces
+       the glyph's edge instead of filling it. */
+    text-shadow: 0 0 1px rgba(0,0,0,.9), 0 1px 1px rgba(0,0,0,.55);
+  }
+  .sq.bp {
+    color: #05070f;
+    text-shadow: 0 0 1px rgba(205,216,240,.85), 0 0 4px rgba(180,196,232,.55);
+  }
+
+  /* Selection and hints, mirroring what the screen shows in 3D. */
+  .sq.sel { background: #1c7f77; box-shadow: inset 0 0 0 3px var(--glow); }
+  .sq.last::after {
+    content: ""; position: absolute; inset: 0;
+    background: rgba(157,255,79,.16); z-index: 1;
+  }
+  .sq.check { background: #7a1740; box-shadow: inset 0 0 0 3px var(--hot); }
+
+  /* An empty destination gets a dot; an occupied one gets a ring around the piece. */
+  .sq.move::before {
+    content: ""; position: absolute;
+    width: 30%; height: 30%; border-radius: 50%;
+    background: rgba(53,240,224,.75); z-index: 1;
+  }
+  .sq.take::before {
+    content: ""; position: absolute; inset: 8%;
+    border-radius: 50%; border: 3px solid var(--hot);
+    z-index: 1;
+  }
+
+  /* "Not your turn" is shown by desaturating the BOARD, never by fading the pieces.
+     Reducing opacity on a square fades its glyph too, and a white glyph is only white
+     because of the dark outline around it — at 62% the outline wins and White's whole army
+     reads as black. This was the bug where the waiting player saw two black armies. */
+  #board.waiting { filter: saturate(.55) brightness(.72); }
+
+  /* Promotion picker, over the board. */
+  #promo {
+    position: fixed; inset: 0; z-index: 20;
+    display: none; align-items: center; justify-content: center;
+    background: rgba(5,6,13,.88); backdrop-filter: blur(3px);
+  }
+  #promo.show { display: flex; }
+  .promo-card {
+    background: var(--ink-700); border: 1px solid var(--line-bright);
+    border-radius: 18px; padding: 18px; text-align: center;
+    box-shadow: 0 0 40px rgba(53,240,224,.2);
+  }
+  .promo-card h3 { margin: 0 0 12px; font-size: 15px; color: var(--text-dim); font-weight: 400; }
+  .promo-row { display: flex; gap: 10px; }
+  .promo-btn {
+    width: 62px; height: 62px; border-radius: 14px; border: 1px solid var(--line);
+    background: var(--ink-600); font-size: 34px; line-height: 1; cursor: pointer;
+    display: grid; place-items: center; color: #f2f6ff;
+  }
+  .promo-btn:active { background: var(--ink-500); transform: scale(.95); }
+
+  /* Spectator / waiting veil. */
+  #veil {
+    position: fixed; inset: 0; z-index: 15;
+    display: none; align-items: center; justify-content: center;
+    flex-direction: column; gap: 10px; text-align: center; padding: 30px;
+    background: rgba(5,6,13,.9);
+  }
+  #veil.show { display: flex; }
+  #veil h2 { font-size: 24px; margin: 0; }
+  #veil p { color: var(--text-dim); font-size: 14px; margin: 0; }
+
+  /* Camera pad, under the board. It steers the 3D view on the TV, so it is only ever
+     live for the player whose seat that view is showing. */
+  #campad {
+    padding: 4px 16px max(14px, env(safe-area-inset-bottom));
+    display: flex; flex-direction: column; align-items: center; gap: 5px;
+    flex-shrink: 0;
+  }
+  .cam-label {
+    font-family: var(--font-mono); font-size: 9.5px; letter-spacing: .18em;
+    text-transform: uppercase; color: var(--text-faint);
+  }
+  .cam-row { display: flex; gap: 8px; }
+  .cam-btn {
+    width: 54px; height: 44px; border-radius: 12px;
+    border: 1px solid var(--line);
+    background: var(--ink-600); color: var(--text);
+    font-size: 17px; line-height: 1; cursor: pointer;
+    display: grid; place-items: center;
+    transition: transform .07s, background .15s, opacity .15s, border-color .15s;
+  }
+  .cam-btn:active:not(:disabled) {
+    transform: scale(.93);
+    background: var(--ink-500); border-color: var(--line-bright);
+  }
+  .cam-reset { font-size: 19px; }
+  /* Disabled covers both "not your turn" and "this direction has hit its limit". Kept
+     visible rather than hidden so the pad does not jump around between turns. */
+  .cam-btn:disabled { opacity: .3; cursor: default; }
+  /* The whole pad recedes when it is not your turn, matching the board's own dim. */
+  #campad.off .cam-label { opacity: .45; }
+</style>
+</head>
+<body>
+
+<div class="bar">
+  <div class="side-dot" id="sideDot"></div>
+  <div class="bar-txt">
+    <div class="bar-side" id="sideLabel">Connecting</div>
+    <div id="status">Joining the table…</div>
+  </div>
+</div>
+
+<div id="taken"></div>
+
+<div class="board-wrap">
+  <div id="board"></div>
+</div>
+
+<!-- Camera pad. Only live on your own turn, because the screen is showing your seat. -->
+<div id="campad">
+  <div class="cam-label">View</div>
+  <div class="cam-row">
+    <button class="cam-btn" data-dir="left"  aria-label="Rotate view left">↺</button>
+    <button class="cam-btn" data-dir="down"  aria-label="Lower the camera">▼</button>
+    <button class="cam-btn cam-reset" data-dir="reset" aria-label="Reset the view">⌖</button>
+    <button class="cam-btn" data-dir="up"    aria-label="Raise the camera">▲</button>
+    <button class="cam-btn" data-dir="right" aria-label="Rotate view right">↻</button>
+  </div>
+</div>
+
+<div id="promo">
+  <div class="promo-card">
+    <h3>Promote to</h3>
+    <div class="promo-row" id="promoRow"></div>
+  </div>
+</div>
+
+<div id="veil">
+  <h2 id="veilTitle">Watching</h2>
+  <p id="veilNote">Two players are already at the table.</p>
+</div>
+
+<script src="/sdk.js"></script>
+<script type="module">
+/**
+ * Gambit — controller.
+ *
+ * A flat top-down board. The screen is authoritative, so this page never applies a move
+ * to its own board: it sends intent and redraws from whatever the screen broadcasts back.
+ *
+ * It does run the rules engine locally, for one reason — to show legal destinations the
+ * instant a piece is tapped, without waiting for a round trip. The screen validates the
+ * same move again when it arrives, and its broadcast overrides anything shown here.
+ */
+import {
+  initialState, legalMoves, colorOf, kindOf, squareName,
+  WHITE, BLACK, fileOf, rankOf,
+} from "/games/chess3d/chess.js?v=1";
+
+const freeconsole = new FreeConsole({ orientation: "portrait" });
+
+/**
+ * Diagnostic logging for the connect / reconnect path.
+ *
+ * Every message is prefixed so it can be filtered in a console with `[GC]`, and timestamped
+ * relative to page load so the ORDER and GAPS are visible — which is what matters when the
+ * bug is a race between the shell's handshake and the screen's reply.
+ */
+const T0 = Date.now();
+const LOG = (...args) => console.log(
+  `[GC +${String(Date.now() - T0).padStart(5)}ms]`,
+  // Objects are serialised here so they survive as readable text in a console transcript,
+  // where a live object would render as an unhelpful "Object".
+  ...args.map((a) => (a && typeof a === "object" ? JSON.stringify(a) : a))
+);
+
+LOG("controller script start", { url: location.href });
+window.addEventListener("error", (e) => LOG("WINDOW ERROR", e.message, e.filename + ":" + e.lineno));
+window.addEventListener("unhandledrejection", (e) => LOG("UNHANDLED REJECTION", String(e.reason)));
+
+// White gets the hollow glyphs, Black the solid ones — the conventional pairing, and the
+// one that survives being shrunk to a phone square. Filling White's glyph with a dark
+// outline instead (solid glyph + text-shadow) collapses thin pieces like the pawn to a
+// black blob, so the two armies stay distinguished by SHAPE here, not only by colour.
+const GLYPH = {
+  wk: "♔", wq: "♕", wr: "♖", wb: "♗", wn: "♘", wp: "♙",
+  bk: "♚", bq: "♛", br: "♜", bb: "♝", bn: "♞", bp: "♟",
+};
+
+const boardEl = document.getElementById("board");
+const statusEl = document.getElementById("status");
+const sideLabel = document.getElementById("sideLabel");
+const sideDot = document.getElementById("sideDot");
+const takenEl = document.getElementById("taken");
+const veil = document.getElementById("veil");
+const promoEl = document.getElementById("promo");
+
+/**
+ * Local mirror of the screen's position.
+ *
+ * `state` is a full rules-engine state so legalMoves() works, but only the fields the
+ * screen sends are trustworthy — castling rights and en passant are reconstructed as
+ * best we can, and the screen is the one that decides.
+ */
+let state = initialState();
+let mySide = null;      // "w" | "b" | null when spectating
+let phase = "lobby";
+// Set while a seated player is away (reloading). The position is intact and seats are
+// held, but nobody may move until they are back.
+let paused = false;
+let selected = null;
+let pendingPromo = null;
+const squares = [];
+
+/* -------------------------------------------------------------- the board */
+
+for (let i = 0; i < 64; i++) {
+  const el = document.createElement("div");
+  el.className = "sq " + ((fileOf(i) + rankOf(i)) % 2 === 0 ? "light" : "dark");
+  el.dataset.i = String(i);
+  const glyph = document.createElement("span");
+  glyph.className = "glyph";
+  el.appendChild(glyph);
+  boardEl.appendChild(el);
+  squares.push(el);
+}
+
+/** Whose move it is, from this phone's point of view. */
+const myTurn = () => phase === "playing" && !paused && mySide !== null && state.turn === mySide;
+
+function render() {
+  const legal = selected !== null ? legalMoves(state, selected) : [];
+  const targets = new Set();
+  const captures = new Set();
+  for (const m of legal) {
+    (state.board[m.to] || m.enPassant !== undefined ? captures : targets).add(m.to);
+  }
+
+  for (let i = 0; i < 64; i++) {
+    const el = squares[i];
+    const piece = state.board[i];
+
+    el.firstChild.textContent = piece ? GLYPH[piece] : "";
+    el.classList.toggle("wp", colorOf(piece) === WHITE);
+    el.classList.toggle("bp", colorOf(piece) === BLACK);
+    el.classList.toggle("sel", i === selected);
+    el.classList.toggle("move", targets.has(i));
+    el.classList.toggle("take", captures.has(i));
+    el.classList.toggle("last", !!state.lastMove && (i === state.lastMove.from || i === state.lastMove.to));
+    el.classList.toggle("check", !!state.check && piece === state.turn + "k");
+  }
+
+  // Black sees the board from their own side.
+  boardEl.classList.toggle("flip", mySide === BLACK);
+  // The whole board dims while the opponent thinks, so it is obvious at a glance whether
+  // it is your turn without reading the status line.
+  boardEl.classList.toggle("waiting", !myTurn());
+}
+
+/* ---------------------------------------------------------------- input */
+
+boardEl.addEventListener("pointerdown", (ev) => {
+  const el = ev.target.closest(".sq");
+  if (!el) return;
+  ev.preventDefault();
+  tapSquare(Number(el.dataset.i));
+});
+
+function tapSquare(i) {
+  if (!myTurn() || awaitingScreen) return;
+
+  // Second tap: if it completes a legal move, send it.
+  if (selected !== null) {
+    const moves = legalMoves(state, selected).filter((m) => m.to === i);
+    if (moves.length) {
+      // A promotion offers four moves onto the same square, so ask which piece.
+      if (moves.some((m) => m.promo)) {
+        pendingPromo = { from: selected, to: i };
+        openPromo();
+        return;
+      }
+      sendMove(selected, i);
+      return;
+    }
+    if (i === selected) { select(null); return; }
+  }
+
+  // Otherwise this is a pick-up — but only of your own piece.
+  select(colorOf(state.board[i]) === mySide ? i : null);
+}
+
+/**
+ * Set the local selection and tell the screen.
+ *
+ * The screen needs this to highlight the piece and its legal moves in 3D, which is the
+ * whole point of sending it: the player at the table sees what the player holding the
+ * phone is thinking about.
+ */
+function select(i) {
+  if (selected === i) return;
+  selected = i;
+  render();
+  // Re-sent on every change rather than only on the first pick, so a selection the screen
+  // dropped while it was busy is corrected by the next tap instead of leaving the two
+  // views disagreeing about what is held.
+  freeconsole.message(FreeConsole.SCREEN, { type: "select", square: i });
+  if (i !== null) freeconsole.vibrate(8);
+}
+
+/**
+ * True between sending a move and hearing back. Taps are ignored while it is set, so a
+ * double tap cannot send the same move twice.
+ */
+let awaitingScreen = false;
+let awaitingTimer = null;
+
+function sendMove(from, to, promo) {
+  freeconsole.message(FreeConsole.SCREEN, { type: "move", from, to, promo: promo || null });
+  selected = null;
+  awaitingScreen = true;
+  freeconsole.vibrate(18);
+  statusEl.textContent = "Moving…";
+  statusEl.classList.remove("yours");
+  render();
+
+  // Never wait forever. The screen answers every move — with a new board, or with a nack
+  // if it was busy — but a dropped message would otherwise leave this phone showing
+  // "Moving…" with a dead board for the rest of the game. Recovering on a timer means the
+  // worst case is a moment of confusion rather than a controller that has to be reloaded.
+  clearTimeout(awaitingTimer);
+  awaitingTimer = setTimeout(() => {
+    if (!awaitingScreen) return;
+    clearAwaiting();
+    renderStatus();
+    render();
+    renderCamPad();
+  }, 6000);
+}
+
+/** Stop waiting on the screen, whatever the outcome was. */
+function clearAwaiting() {
+  awaitingScreen = false;
+  clearTimeout(awaitingTimer);
+  awaitingTimer = null;
+}
+
+/* ----------------------------------------------------------- camera pad */
+
+/**
+ * Which camera directions are still available.
+ *
+ * The screen owns the real camera and tells us what it will accept; we only mirror that
+ * onto the buttons. Starting all-true means the pad is usable on the very first turn even
+ * if the first limits message is still in flight.
+ */
+let viewLimits = { canLeft: true, canRight: true, canUp: true, canDown: false, centred: true };
+
+const campad = document.getElementById("campad");
+const camButtons = Array.from(document.querySelectorAll(".cam-btn"));
+
+for (const btn of camButtons) {
+  btn.addEventListener("pointerdown", (ev) => {
+    ev.preventDefault();
+    if (btn.disabled) return;
+    freeconsole.message(FreeConsole.SCREEN, { type: "view", dir: btn.dataset.dir });
+    freeconsole.vibrate(6);
+  });
+}
+
+/**
+ * Enable or disable each button.
+ *
+ * Two separate reasons to be off: it is not your turn at all, or that particular
+ * direction has run out of travel. Both render the same way, because to the player they
+ * mean the same thing — pressing it will do nothing.
+ */
+function renderCamPad() {
+  const live = myTurn();
+  campad.classList.toggle("off", !live);
+  for (const btn of camButtons) {
+    const dir = btn.dataset.dir;
+    let allowed = true;
+    if (dir === "left") allowed = viewLimits.canLeft;
+    else if (dir === "right") allowed = viewLimits.canRight;
+    else if (dir === "up") allowed = viewLimits.canUp;
+    else if (dir === "down") allowed = viewLimits.canDown;
+    else if (dir === "reset") allowed = !viewLimits.centred;
+    btn.disabled = !live || !allowed;
+  }
+}
+
+/* ------------------------------------------------------------- promotion */
+
+const promoRow = document.getElementById("promoRow");
+for (const kind of ["q", "r", "b", "n"]) {
+  const btn = document.createElement("button");
+  btn.className = "promo-btn";
+  btn.dataset.kind = kind;
+  promoRow.appendChild(btn);
+  btn.addEventListener("pointerdown", (ev) => {
+    ev.preventDefault();
+    if (!pendingPromo) return;
+    const { from, to } = pendingPromo;
+    pendingPromo = null;
+    promoEl.classList.remove("show");
+    sendMove(from, to, kind);
+  });
+}
+
+function openPromo() {
+  // Show the pieces in this player's colour.
+  for (const btn of promoRow.children) {
+    btn.textContent = GLYPH[(mySide || WHITE) + btn.dataset.kind];
+  }
+  promoEl.classList.add("show");
+}
+
+/* --------------------------------------------------------------- status */
+
+function renderStatus() {
+  if (mySide === null) {
+    sideLabel.textContent = "Spectator";
+    sideDot.className = "side-dot";
+    statusEl.textContent = phase === "playing" ? "Watching the game" : "Waiting for a seat";
+    statusEl.classList.remove("yours");
+    veil.classList.add("show");
+    document.getElementById("veilTitle").textContent =
+      phase === "playing" ? "Watching" : "Waiting";
+    document.getElementById("veilNote").textContent =
+      phase === "playing"
+        ? "Two players are already at the table. You're up next game."
+        : "You'll be seated when a place opens.";
+    return;
+  }
+
+  veil.classList.remove("show");
+  sideLabel.textContent = mySide === WHITE ? "You are White" : "You are Black";
+  sideDot.className = "side-dot " + mySide;
+
+  if (phase === "lobby") {
+    statusEl.textContent = "Waiting for an opponent…";
+    statusEl.classList.remove("yours");
+  } else if (phase === "over") {
+    statusEl.textContent = "Game over";
+    statusEl.classList.remove("yours");
+  } else if (paused) {
+    // Your seat is still yours; the other player is away, usually mid-reload.
+    statusEl.textContent = "Waiting for your opponent to reconnect…";
+    statusEl.classList.remove("yours");
+  } else if (myTurn()) {
+    statusEl.textContent = state.check ? "You're in check!" : "Your move";
+    statusEl.classList.add("yours");
+  } else {
+    statusEl.textContent = "Opponent thinking…";
+    statusEl.classList.remove("yours");
+  }
+}
+
+function renderTaken(taken) {
+  if (!taken || mySide === null) { takenEl.textContent = ""; return; }
+  // Show what this player has captured.
+  const mine = (taken[mySide] || []).map((p) => GLYPH[p]).join("");
+  const theirs = (taken[mySide === WHITE ? "b" : "w"] || []).map((p) => GLYPH[p]).join("");
+  takenEl.textContent = (mine ? "You took " + mine : "") + (theirs ? "   ·   Lost " + theirs : "");
+}
+
+/* ------------------------------------------------------------ from screen */
+
+freeconsole.onMessage = (deviceId, data) => {
+  LOG("MSG in", { from: deviceId, type: data && data.type });
+  // Only the screen is authoritative.
+  if (Number(deviceId) !== FreeConsole.SCREEN || !data) {
+    LOG("  ignored (not from screen or empty)");
+    return;
+  }
+
+  // The screen refused the move — it was still animating the last one, or it is no longer
+  // this phone's turn. Hand the board straight back rather than leaving it inert.
+  if (data.type === "nack") {
+    clearAwaiting();
+    renderStatus();
+    render();
+    renderCamPad();
+    return;
+  }
+
+  // The screen just came up (or came back). Ask again immediately — our earlier request
+  // may have been sent while it had no handler attached to hear it.
+  if (data.type === "screen-ready") {
+    haveBoard = false;
+    boardRequests = 0;
+    requestBoard();
+    return;
+  }
+
+  // How far the camera can still travel, so spent directions grey out.
+  if (data.type === "view") {
+    viewLimits = {
+      canLeft: !!data.canLeft, canRight: !!data.canRight,
+      canUp: !!data.canUp, canDown: !!data.canDown,
+      centred: !!data.centred,
+    };
+    renderCamPad();
+    return;
+  }
+
+  if (data.type !== "board") return;
+
+  stopRequestingBoard();
+  // Tell the screen to stop resending. Each board it sends clears this phone selection,
+  // so a resend burst running under a player mid-move would cancel their pick.
+  freeconsole.message(FreeConsole.SCREEN, { type: "got-board" });
+  clearAwaiting();
+  const me = freeconsole.getDeviceId();
+  const prevSide = mySide;
+  const prevTurn = state.turn;
+  mySide = data.seats.w === me ? WHITE : data.seats.b === me ? BLACK : null;
+  phase = data.phase;
+  // THE critical line for the reconnect bug: if myDeviceId is not in seats, this phone is
+  // treated as a spectator and the board stays locked.
+  LOG("BOARD applied", { myDeviceId: me, seats: data.seats, mySide,
+    phase, turn: data.turn, paused: !!data.paused,
+    match: mySide === null ? "NO SEAT -> spectator" : "seated OK" });
+
+  state.board = data.board;
+  state.turn = data.turn;
+  state.check = data.check;
+  state.lastMove = data.last;
+  // Castling rights and the en passant square cannot be inferred from the layout, so the
+  // screen sends them. Falling back to "no rights" is the safe default: it can only hide
+  // a legal move for one tap, never offer an illegal one.
+  paused = !!data.paused;
+  state.castling = data.castling || { wk: false, wq: false, bk: false, bq: false };
+  state.enPassant = data.enPassant === undefined ? null : data.enPassant;
+
+  // Drop the selection only when it has genuinely become invalid: the seat changed hands,
+  // it stopped being our turn, or the selected square no longer holds one of our pieces.
+  //
+  // Deliberately NOT "on every board received". The screen resends the board to recover a
+  // reconnecting phone, and a resend landing between a player's two taps would silently
+  // cancel their pick — they tap a piece, tap a destination, and nothing happens.
+  if (selected !== null) {
+    const stillValid =
+      prevSide === mySide &&
+      state.turn === mySide &&
+      colorOf(state.board[selected]) === mySide;
+    if (!stillValid) selected = null;
+  }
+  if (!myTurn()) { pendingPromo = null; promoEl.classList.remove("show"); }
+
+  // The screen recentres the camera whenever the seat changes hands, so assume a fresh
+  // view here too. The screen sends the authoritative limits right after this board, which
+  // corrects the guess almost immediately — but without it the pad would briefly offer
+  // "reset" on an already-centred view.
+  if (prevTurn !== state.turn) {
+    viewLimits = { canLeft: true, canRight: true, canUp: true, canDown: false, centred: true };
+  }
+
+  render();
+  renderStatus();
+  renderCamPad();
+  renderTaken(data.taken);
+};
+
+freeconsole.onReady = () => {
+  LOG("onReady FIRED", { deviceId: freeconsole.getDeviceId(),
+    controllers: freeconsole.getControllerDeviceIds() });
+  renderStatus();
+  render();
+  renderCamPad();
+  // Ask the screen for the position rather than waiting to be told.
+  //
+  // A broadcast only reaches devices already in the room, and the screen sends one the
+  // moment it notices a connection — which can be BEFORE this page has finished its own
+  // handshake. That race is why a reloaded or late-joining phone would sit on "Joining the
+  // table…" and then fall back to the spectator message while a game it belonged to was
+  // running. Pulling the state removes the dependency on timing entirely.
+  requestBoard();
+};
+
+/**
+ * Ask the screen to send the current board to this device.
+ *
+ * Keeps asking until a board arrives — it does NOT give up.
+ *
+ * This is the whole reconnect mechanism, so every way it could quietly stop has to be
+ * closed off. A phone with no board is a dead controller showing the spectator message
+ * while its own game is on the table; retrying forever costs one tiny message every few
+ * seconds and makes that state unreachable. The interval backs off so a genuinely absent
+ * screen is not polled hard.
+ */
+let boardRequests = 0;
+let boardRequestTimer = null;
+let haveBoard = false;
+/** When the last board arrived, so a screen that goes silent can be detected. */
+let lastBoardAt = 0;
+
+function requestBoard() {
+  clearTimeout(boardRequestTimer);
+  if (haveBoard) return;
+  boardRequests++;
+  // The SDK queues anything sent before the handshake completes, so this is safe to call
+  // immediately on load — it does not need to wait for onReady.
+  LOG("hello ->screen", { attempt: boardRequests, deviceId: freeconsole.getDeviceId() });
+  freeconsole.message(FreeConsole.SCREEN, { type: "hello" });
+  // 400ms for the first few tries, easing out to 1.5s.
+  //
+  // Capped tighter than it looks like it needs to be: after a reload the peer connection
+  // is still renegotiating and EVERY message sent in that window is silently dropped, so
+  // these early attempts are mostly lost. What matters is having an attempt land soon
+  // after the pipe opens, which a long backoff would delay by seconds.
+  const delay = boardRequests < 5 ? 400 : 1500;
+  boardRequestTimer = setTimeout(requestBoard, delay);
+}
+
+/** A board arrived, so stop asking. */
+function stopRequestingBoard() {
+  if (!haveBoard) LOG("first board received after", boardRequests, "hello(s)");
+  haveBoard = true;
+  lastBoardAt = Date.now();
+  clearTimeout(boardRequestTimer);
+  boardRequestTimer = null;
+}
+
+/**
+ * If the screen ever goes quiet again — it reloaded, or a message was lost — start asking
+ * once more. Without this a phone that loses touch after its first board never recovers.
+ */
+setInterval(() => {
+  if (!haveBoard) return;
+  if (Date.now() - lastBoardAt < 20000) return;
+  LOG("watchdog: no board for 20s, asking again");
+  haveBoard = false;
+  boardRequests = 0;
+  requestBoard();
+}, 5000);
+
+render();
+renderStatus();
+renderCamPad();
+// Ask immediately on load rather than waiting for onReady. If the shell's welcome arrives
+// before this script runs, onReady may already have fired and would never fire again —
+// which would leave a reloaded phone with no board and no way to ask for one.
+requestBoard();
+</script>
+</body>
+</html>

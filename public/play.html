@@ -1,0 +1,675 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="theme-color" content="#05060d" />
+<title>Join a game — FreeConsole</title>
+<link rel="stylesheet" href="/console.css" />
+<style>
+  html, body { height: 100%; }
+  body { overscroll-behavior: none; touch-action: manipulation; }
+  .nav { display: none; }
+
+  /* ---------------------------------------------------------------- join */
+  .join-wrap {
+    min-height: 100dvh;
+    display: flex; flex-direction: column; justify-content: center;
+    padding: max(24px, env(safe-area-inset-top)) 22px max(24px, env(safe-area-inset-bottom));
+    max-width: 460px; margin: 0 auto;
+  }
+  .join-wrap.hidden { display: none; }
+  .join-brand { display: flex; align-items: center; gap: 10px; justify-content: center; margin-bottom: 30px; text-decoration: none; }
+  .join-brand .brand-name { font-size: 25px; }
+  .join-title { font-size: 25px; text-align: center; margin-bottom: 5px; }
+  .join-sub { text-align: center; color: var(--text-dim); font-size: 14.5px; margin-bottom: 26px; }
+
+  /* Four real boxes, each drawing its own character.
+     The previous version faked slots with letter-spacing on a single input, which drifted
+     out of alignment at any font size and overlapped the boxes. Here the input is fully
+     transparent and only captures typing/paste/autofill; the visible characters are
+     rendered per-slot, so they can never overlap. */
+  .code-field { position: relative; margin-bottom: 4px; }
+  .code-slots { display: grid; grid-template-columns: repeat(4, 1fr); gap: 9px; }
+  .code-slot {
+    aspect-ratio: 3 / 4;
+    max-height: 92px;
+    border: 1.5px solid var(--line);
+    border-radius: 11px;
+    background: rgba(5,6,13,.6);
+    display: grid;
+    place-items: center;
+    font-family: var(--font-mono);
+    font-size: clamp(28px, 9vw, 40px);
+    font-weight: 700;
+    color: var(--glow);
+    text-shadow: 0 0 18px rgba(53,240,224,.5);
+    transition: border-color .18s, box-shadow .18s, transform .12s;
+    user-select: none;
+  }
+  .code-slot.filled { border-color: var(--glow-dim); }
+  .code-slot.active {
+    border-color: var(--glow);
+    box-shadow: 0 0 0 3px rgba(53,240,224,.14), 0 0 22px rgba(53,240,224,.28);
+  }
+  /* Blinking caret in the slot awaiting input. */
+  .code-slot.active:empty::after {
+    content: "";
+    width: 2px; height: 44%;
+    background: var(--glow);
+    border-radius: 2px;
+    animation: caret 1.05s steps(2, start) infinite;
+  }
+  @keyframes caret { 50% { opacity: 0; } }
+
+  /* Invisible but focusable, sitting over the boxes so tapping anywhere opens the keyboard. */
+  #code {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    opacity: 0;
+    border: 0; padding: 0; margin: 0;
+    font-size: 16px;           /* >=16px stops iOS zooming on focus */
+    background: transparent;
+    -webkit-appearance: none;
+  }
+  #go { margin-top: 22px; }
+
+  /* ---------------------------------------------------------------- stage */
+  /* In a game the frame owns the whole phone: no chrome, no scroll. */
+  #stage { display: none; }
+  #stage.active { display: block; position: fixed; inset: 0; z-index: 60; background: #000; }
+  #stage .game-frame { width: 100%; height: 100%; border: 0; display: block; }
+
+  /* Master's exit control, layered above the game frame.
+     Deliberately small and semi-transparent: it must be reachable at any moment without
+     competing with the game for the screen or for a stray thumb. Only the master sees it,
+     because only the master can navigate the room. */
+  #exitGame { display: none; }
+  #exitGame.show {
+    display: flex;
+    position: fixed;
+    top: max(10px, env(safe-area-inset-top));
+    right: 12px;
+    z-index: 65;
+    align-items: center;
+    gap: 7px;
+    padding: 9px 14px;
+    border-radius: 999px;
+    border: 1px solid rgba(120,160,220,.3);
+    background: rgba(5,6,13,.72);
+    backdrop-filter: blur(10px);
+    color: var(--text-dim);
+    font-family: var(--font-display);
+    font-size: 12.5px;
+    font-weight: 700;
+    letter-spacing: .04em;
+    cursor: pointer;
+    opacity: .58;
+    transition: opacity .16s, border-color .16s, color .16s, transform .1s;
+  }
+  #exitGame.show:active {
+    transform: scale(.95);
+    opacity: 1;
+    color: var(--glow);
+    border-color: var(--line-bright);
+  }
+  #exitGame .crown { font-size: 13px; }
+
+  /* ---------------------------------------------------------------- store remote */
+  .remote-view { display: none; }
+  .remote-view.active {
+    display: flex; flex-direction: column;
+    min-height: 100dvh;
+    padding: max(16px, env(safe-area-inset-top)) 16px 0;
+    max-width: 560px; margin: 0 auto;
+  }
+
+  .remote-bar {
+    display: flex; align-items: center; gap: 10px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--line);
+    margin-bottom: 14px;
+  }
+  .remote-me { flex: 1; min-width: 0; }
+  .remote-me .who { font-weight: 700; font-size: 15px; display: flex; align-items: center; gap: 6px; }
+  .remote-me .room { font-family: var(--font-mono); font-size: 11px; color: var(--text-faint); }
+  .crown { color: var(--amber); }
+
+  .master-banner {
+    display: flex; align-items: center; gap: 12px;
+    padding: 13px 15px;
+    border-radius: var(--radius-sm);
+    border: 1px solid rgba(255,194,71,.45);
+    background: linear-gradient(135deg, rgba(255,194,71,.13), rgba(255,194,71,.03));
+    margin-bottom: 14px;
+  }
+  .master-banner .crown { font-size: 22px; flex-shrink: 0; }
+  .master-banner-t { font-weight: 700; font-size: 15px; }
+  .master-banner-d { color: var(--text-dim); font-size: 12.5px; margin-top: 1px; }
+
+  .who-list { display: flex; gap: 7px; flex-wrap: wrap; margin-bottom: 16px; }
+  .who-chip {
+    display: flex; align-items: center; gap: 6px;
+    padding: 6px 12px; border-radius: 999px;
+    border: 1px solid var(--line); background: rgba(255,255,255,.04);
+    font-size: 12.5px; font-weight: 600;
+  }
+  .who-chip.off { opacity: .35; }
+  .who-chip.me { border-color: var(--line-bright); }
+
+  /* Poster grid the master scrolls through. */
+  .pick-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 12px; padding-bottom: 12px; }
+  .pick {
+    position: relative; display: block; padding: 0; border: 0;
+    border-radius: 12px; overflow: hidden;
+    background: none; color: inherit; font: inherit; text-align: left;
+    cursor: pointer;
+    transition: transform .18s cubic-bezier(.2,.8,.3,1.3), box-shadow .18s;
+  }
+  .pick:active { transform: scale(.96); }
+  .pick .art {
+    position: relative; aspect-ratio: 3/4;
+    background: linear-gradient(150deg, rgba(53,240,224,.3), rgba(255,46,136,.3));
+    display: grid; place-items: center; overflow: hidden;
+  }
+  .pick .art img { width: 100%; height: 100%; object-fit: cover; }
+  .pick .art .letter {
+    font-family: var(--font-marquee); font-size: 46px;
+    color: var(--glow); text-shadow: var(--bloom-glow); padding-top: 8px;
+  }
+  .pick .art::after {
+    content: ""; position: absolute; inset: 0;
+    background: repeating-linear-gradient(to bottom, rgba(0,0,0,.18) 0 1px, transparent 1px 3px);
+  }
+  .pick .plate {
+    position: absolute; left: 0; right: 0; bottom: 0; z-index: 1;
+    padding: 22px 10px 9px;
+    background: linear-gradient(to top, rgba(5,6,13,.96) 30%, transparent);
+  }
+  .pick .t { font-weight: 700; font-size: 13.5px; line-height: 1.2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pick .d { font-family: var(--font-mono); font-size: 9.5px; letter-spacing: .06em; color: var(--text-faint); margin-top: 2px; }
+  .pick.selected .art { outline: 2px solid var(--glow); outline-offset: -2px; }
+  .pick.selected { box-shadow: 0 0 22px rgba(53,240,224,.3); }
+
+  .remote-pad {
+    position: sticky; bottom: 0;
+    margin: 12px -16px 0;
+    padding: 11px 16px max(11px, env(safe-area-inset-bottom));
+    background: rgba(5,6,13,.95);
+    backdrop-filter: blur(12px);
+    border-top: 1px solid var(--line);
+    display: grid; grid-template-columns: 54px 1fr 54px; gap: 9px;
+  }
+  .remote-pad .btn { padding: 13px 0; }
+  .remote-arrow { font-size: 21px; line-height: 1; }
+
+  .waiting-box { text-align: center; padding: 34px 16px; color: var(--text-dim); flex: 1; }
+  .waiting-box .ring {
+    width: 34px; height: 34px; border-radius: 50%;
+    border: 2px solid rgba(53,240,224,.2); border-top-color: var(--glow);
+    animation: spin 1s linear infinite; margin: 0 auto 14px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .connecting { position: fixed; inset: 0; z-index: 70; display: none; place-items: center; background: var(--ink-900); }
+  .connecting.show { display: grid; }
+  .connecting .ring {
+    width: 46px; height: 46px; border-radius: 50%;
+    border: 2px solid rgba(53,240,224,.2); border-top-color: var(--glow);
+    animation: spin .8s linear infinite; margin: 0 auto 16px;
+  }
+</style>
+</head>
+<body>
+
+<div class="shell join-wrap" id="joinView">
+  <a class="join-brand" href="/">
+    <span class="brand-mark" aria-hidden="true">FC</span>
+    <span class="brand-name">FreeConsole</span>
+  </a>
+
+  <h1 class="join-title reveal" style="--i:0">Join the game</h1>
+  <p class="join-sub reveal" style="--i:1">Enter the code shown on the big screen.</p>
+
+  <div class="reveal" style="--i:2">
+    <div class="code-field">
+      <div class="code-slots" aria-hidden="true">
+        <div class="code-slot"></div><div class="code-slot"></div>
+        <div class="code-slot"></div><div class="code-slot"></div>
+      </div>
+      <input id="code" maxlength="4" autocomplete="one-time-code" autocapitalize="characters"
+             autocorrect="off" spellcheck="false" inputmode="text" aria-label="Room code" />
+    </div>
+
+    <div class="field" style="margin-top:22px">
+      <label class="label" for="name">Your name</label>
+      <input class="input" id="name" maxlength="24" autocomplete="nickname" placeholder="Player" />
+    </div>
+
+    <button class="btn btn-primary btn-lg btn-block" id="go">Join game</button>
+    <div class="msg msg-error" id="error"></div>
+  </div>
+
+  <p class="faint reveal" style="--i:3; text-align:center; font-size:12.5px; margin-top:26px">
+    No account needed — just a name.
+  </p>
+</div>
+
+<div class="connecting" id="connecting">
+  <div style="text-align:center">
+    <div class="ring"></div>
+    <div class="eyebrow">Connecting…</div>
+  </div>
+</div>
+
+<!-- Store remote: shown whenever the room is at the store. -->
+<div class="shell remote-view" id="remoteView">
+  <div class="remote-bar">
+    <div class="remote-me">
+      <div class="who" id="meName">You</div>
+      <div class="room" id="meRoom"></div>
+    </div>
+  </div>
+
+  <div id="masterBanner" hidden>
+    <div class="master-banner">
+      <span class="crown">♛</span>
+      <div>
+        <div class="master-banner-t">You're in charge</div>
+        <div class="master-banner-d">Pick a game — it starts for everyone.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="who-list" id="whoList"></div>
+
+  <div id="masterPanel" hidden>
+    <div class="pick-grid" id="pickList"></div>
+    <div class="remote-pad">
+      <button class="btn btn-ghost remote-arrow" id="prevGame" type="button" aria-label="Previous game">‹</button>
+      <button class="btn btn-primary" id="startGame" type="button">Start</button>
+      <button class="btn btn-ghost remote-arrow" id="nextGame" type="button" aria-label="Next game">›</button>
+    </div>
+  </div>
+
+  <div id="guestPanel">
+    <div class="waiting-box">
+      <div class="ring"></div>
+      <div id="guestNote">Waiting for the first player to pick a game.</div>
+    </div>
+  </div>
+</div>
+
+<div id="stage"></div>
+
+<!-- Only the master controller sees this: it ends the game for the whole room. -->
+<button id="exitGame" type="button" aria-label="Back to the game list">
+  <span class="crown">♛</span> Game list
+</button>
+
+<script type="module">
+import { ref, get } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-database.js";
+import { collection, getDocs, getFirestore } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-firestore.js";
+import { app, db, ensureAuth } from "./relay.js?v=202608012300";
+import { startSession, STORE_LOCATION, gameUrl } from "./session.js?v=202608012300";
+import { masterControllerId } from "./room.js?v=202608012200";
+
+const firestore = getFirestore(app);
+const $ = (id) => document.getElementById(id);
+const params = new URLSearchParams(location.search);
+
+const codeInput = $("code");
+const nameInput = $("name");
+const errorBox = $("error");
+const slots = [...document.querySelectorAll(".code-slot")];
+
+const catalog = new Map();
+let session = null;
+let roomCode = null;
+let myName = null;
+let browsingId = null;   // which poster this device highlights (master only)
+
+nameInput.value = localStorage.getItem("console:name") || "";
+
+/* ---------------------------------------------------------------- join */
+
+/** Draws the current value into the four boxes. */
+function paintSlots() {
+  const value = codeInput.value;
+  const focused = document.activeElement === codeInput;
+  slots.forEach((slot, i) => {
+    slot.textContent = value[i] || "";
+    slot.classList.toggle("filled", i < value.length);
+    // The caret sits in the next empty slot, or the last one when full.
+    slot.classList.toggle("active", focused && i === Math.min(value.length, slots.length - 1));
+  });
+}
+
+function setCode(next) {
+  codeInput.value = String(next || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 4);
+  paintSlots();
+}
+
+codeInput.addEventListener("input", () => {
+  setCode(codeInput.value);
+  if (codeInput.value.length === 4) {
+    // Complete code: go, or collect the name first if we don't have one.
+    if (nameInput.value.trim()) join();
+    else nameInput.focus();
+  }
+});
+
+// Keep the caret at the end so typing always appends, however the field was tapped.
+codeInput.addEventListener("focus", () => {
+  requestAnimationFrame(() => {
+    codeInput.setSelectionRange(codeInput.value.length, codeInput.value.length);
+    paintSlots();
+  });
+});
+codeInput.addEventListener("blur", paintSlots);
+codeInput.addEventListener("keyup", paintSlots);
+codeInput.addEventListener("click", () => {
+  codeInput.setSelectionRange(codeInput.value.length, codeInput.value.length);
+});
+
+// Tapping any box focuses the hidden input, so the whole row behaves like one control.
+document.querySelector(".code-slots").addEventListener("click", () => codeInput.focus());
+
+/**
+ * Arriving from the QR code: ?room=CODE.
+ *
+ * The code is known, so the only thing still needed is a name — and if the phone already
+ * remembers one from a previous game, nothing is needed at all and we join immediately.
+ */
+const fromUrl = params.get("room");
+if (fromUrl) {
+  setCode(fromUrl);
+  if (codeInput.value.length === 4) {
+    // The code came from the QR, so say so rather than asking for something already known.
+    document.querySelector(".join-sub").textContent = nameInput.value.trim()
+      ? "Joining…"
+      : "Just pick a name to join.";
+    if (nameInput.value.trim()) join();
+    else nameInput.focus();
+  } else {
+    paintSlots();
+    codeInput.focus();
+  }
+} else {
+  paintSlots();
+  codeInput.focus();
+}
+
+function showError(message) {
+  errorBox.textContent = message;
+  errorBox.classList.add("show");
+}
+
+async function join() {
+  const code = codeInput.value.trim().toUpperCase();
+  const name = (nameInput.value.trim() || "Player").slice(0, 24);
+
+  if (!/^[A-Z0-9]{4}$/.test(code)) {
+    showError("Room codes are 4 characters.");
+    codeInput.focus();
+    return;
+  }
+
+  $("go").disabled = true;
+  $("go").classList.add("loading");
+  errorBox.classList.remove("show");
+  $("connecting").classList.add("show");
+
+  try {
+    const user = await ensureAuth();
+
+    const roomSnap = await get(ref(db, `rooms/${code}`));
+    if (!roomSnap.exists()) {
+      $("connecting").classList.remove("show");
+      showError("No room found with that code. Check the screen and try again.");
+      $("go").disabled = false;
+      $("go").classList.remove("loading");
+      return;
+    }
+
+    localStorage.setItem("console:name", name);
+    roomCode = code;
+    myName = name;
+
+    await loadCatalog();
+
+    session = await startSession({
+      roomCode,
+      uid: user.uid,
+      isScreen: false,
+      nickname: name,
+      stage: $("stage"),
+      // At the store this page renders the remote itself; anything else loads the game.
+      resolveUrl: (home) => (gameUrl(home) === STORE_LOCATION ? null : controllerUrlFor(home)),
+      onState: renderState,
+    });
+
+    $("joinView").classList.add("hidden");
+    $("connecting").classList.remove("show");
+    $("meRoom").textContent = "room " + roomCode + " · player " + session.deviceId;
+  } catch (err) {
+    console.error(err);
+    $("connecting").classList.remove("show");
+    showError(err.message || "Could not join.");
+    $("go").disabled = false;
+    $("go").classList.remove("loading");
+  }
+}
+
+async function loadCatalog() {
+  try {
+    const snap = await getDocs(collection(firestore, "games"));
+    catalog.clear();
+    snap.forEach((d) => catalog.set(d.id, d.data()));
+  } catch (err) {
+    console.error("catalog load failed", err);
+  }
+}
+
+function controllerUrlFor(home) {
+  const id = gameUrl(home).replace(/^\/games\//, "").replace(/\/$/, "");
+  const game = catalog.get(id);
+  if (game && game.controllerUrl) return game.controllerUrl;
+  return `/games/${id}/controller.html`;
+}
+
+/* ---------------------------------------------------------------- views */
+
+function renderState(state) {
+  const atStore = gameUrl(state.home) === STORE_LOCATION;
+  const master = masterControllerId(state.devices, state.home);
+  const amMaster = master === session.deviceId;
+
+  $("remoteView").classList.toggle("active", atStore);
+  $("stage").classList.toggle("active", !atStore);
+
+  // The exit control belongs to the master, and only while a game is running - it's the
+  // only way back to the store once the game frame owns the screen.
+  $("exitGame").classList.toggle("show", !atStore && amMaster);
+
+  if (!atStore) return;
+
+  const me = state.devices[session.deviceId] || {};
+
+  $("meName").textContent = "";
+  if (amMaster) {
+    const crown = document.createElement("span");
+    crown.className = "crown";
+    crown.textContent = "♛";
+    $("meName").appendChild(crown);
+  }
+  $("meName").appendChild(document.createTextNode(me.nickname || myName || "You"));
+
+  $("masterBanner").hidden = !amMaster;
+  $("masterPanel").hidden = !amMaster;
+  $("guestPanel").hidden = amMaster;
+
+  if (!amMaster) {
+    const masterDevice = master !== undefined ? state.devices[master] : null;
+    $("guestNote").textContent = masterDevice
+      ? `${masterDevice.nickname || `Player ${master}`} is choosing a game.`
+      : "Waiting for the first player to pick a game.";
+  }
+
+  renderWhoList(state, master);
+
+  if (amMaster) {
+    if (browsingId === null) {
+      browsingId = me.custom?.browsing || [...catalog.keys()][0] || null;
+    }
+    renderPicker();
+  }
+}
+
+function renderWhoList(state, master) {
+  const host = $("whoList");
+  host.innerHTML = "";
+
+  for (let slot = 1; slot < state.devices.length; slot++) {
+    const device = state.devices[slot];
+    if (!device) continue;
+
+    const chip = document.createElement("div");
+    chip.className = "who-chip" +
+      (device.connected ? "" : " off") +
+      (slot === session.deviceId ? " me" : "");
+
+    if (slot === master) {
+      const crown = document.createElement("span");
+      crown.className = "crown";
+      crown.textContent = "♛";
+      chip.appendChild(crown);
+    }
+    chip.appendChild(document.createTextNode(device.nickname || `Player ${slot}`));
+    host.appendChild(chip);
+  }
+}
+
+/* ---------------------------------------------------------------- remote */
+
+function renderPicker() {
+  const host = $("pickList");
+  host.innerHTML = "";
+
+  if (catalog.size === 0) {
+    const empty = document.createElement("div");
+    empty.className = "waiting-box";
+    empty.textContent = "No games in the catalog yet.";
+    host.appendChild(empty);
+    return;
+  }
+
+  for (const [id, game] of catalog) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "pick" + (id === browsingId ? " selected" : "");
+    btn.dataset.gameId = id;
+    btn.setAttribute("aria-label", `Select ${game.name || id}`);
+
+    const art = document.createElement("div");
+    art.className = "art";
+    const letter = () => {
+      const span = document.createElement("span");
+      span.className = "letter";
+      span.textContent = (game.name || id).charAt(0).toUpperCase();
+      return span;
+    };
+    if (game.thumbnailUrl) {
+      const img = document.createElement("img");
+      img.src = game.thumbnailUrl;
+      img.alt = "";
+      img.loading = "lazy";
+      img.addEventListener("error", () => { art.innerHTML = ""; art.appendChild(letter()); });
+      art.appendChild(img);
+    } else {
+      art.appendChild(letter());
+    }
+
+    const plate = document.createElement("div");
+    plate.className = "plate";
+    const t = document.createElement("div");
+    t.className = "t";
+    t.textContent = game.name || id;
+    const d = document.createElement("div");
+    d.className = "d";
+    d.textContent = `${game.minPlayers ?? 1}–${game.maxPlayers ?? 8} players`;
+    plate.append(t, d);
+
+    btn.append(art, plate);
+    // First tap highlights on the TV, second tap launches - browse then commit.
+    btn.addEventListener("click", () => {
+      if (browsingId === id) launch(id);
+      else browse(id);
+    });
+    host.appendChild(btn);
+  }
+}
+
+/**
+ * Moves the highlight.
+ *
+ * The highlight lives in this device's custom device state rather than a room-level field:
+ * it belongs to the master, every device can already read it, and it needs no extra rule.
+ */
+function browse(id) {
+  browsingId = id;
+  for (const el of $("pickList").querySelectorAll(".pick")) {
+    el.classList.toggle("selected", el.dataset.gameId === id);
+  }
+  session.setCustomState({ browsing: id }).catch((err) => console.error("browse failed", err));
+}
+
+function step(delta) {
+  const ids = [...catalog.keys()];
+  if (ids.length === 0) return;
+  const at = ids.indexOf(browsingId);
+  const next = at === -1 ? 0 : (at + delta + ids.length) % ids.length;
+  browse(ids[next]);
+  const card = $("pickList").querySelector(`[data-game-id="${ids[next]}"]`);
+  if (card) card.scrollIntoView({ block: "nearest", behavior: "smooth" });
+}
+
+/** navigateTo: every device follows. */
+function launch(id) {
+  $("startGame").disabled = true;
+  session.navigate(`/games/${id}/`).catch((err) => {
+    $("startGame").disabled = false;
+    alert("Could not start the game: " + err.message);
+  });
+}
+
+/**
+ * navigateHome: ends the game and returns the whole room to the store.
+ *
+ * Confirmed first, because it pulls everyone out of a game in progress, not just the
+ * person tapping. Resetting browsingId means the store opens on whatever the room has,
+ * rather than a stale highlight from before the game started.
+ */
+$("exitGame").addEventListener("click", async () => {
+  if (!confirm("Leave this game and go back to the game list?\n\nThis ends it for everyone.")) return;
+  $("exitGame").disabled = true;
+  try {
+    browsingId = null;
+    await session.navigateHome();
+  } catch (err) {
+    alert("Could not leave the game: " + err.message);
+  } finally {
+    $("exitGame").disabled = false;
+  }
+});
+
+$("prevGame").addEventListener("click", () => step(-1));
+$("nextGame").addEventListener("click", () => step(1));
+$("startGame").addEventListener("click", () => { if (browsingId) launch(browsingId); });
+$("go").addEventListener("click", join);
+nameInput.addEventListener("keydown", (e) => { if (e.key === "Enter") join(); });
+</script>
+</body>
+</html>

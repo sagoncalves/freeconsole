@@ -1,0 +1,25 @@
+node_modules/
+functions/node_modules/
+
+# pnpm lockfiles are committed; these are not
+.pnpm-store/
+.pnpm-debug.log
+
+# Emulator + tooling noise
+*-debug.log
+firebase-debug.log
+firestore-debug.log
+database-debug.log
+ui-debug.log
+pubsub-debug.log
+.firebase/
+.runtimeconfig.json
+
+# Vercel CLI local project state
+.vercel/
+
+# Local overrides
+.env
+.env.local
+*.local
+.DS_Store

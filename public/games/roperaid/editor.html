@@ -1,0 +1,701 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Rope Raid — Map Editor</title>
+<link rel="stylesheet" href="/console.css" />
+<style>
+  body { height: 100vh; overflow: hidden; display: flex; flex-direction: column; }
+
+  .bar {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--line);
+    background: rgba(5,6,13,.9);
+    flex-shrink: 0;
+  }
+  .bar h1 { font-size: 15px; margin-right: 6px; }
+  .bar .btn { padding: 8px 13px; font-size: 13px; }
+  .tool.active { background: var(--glow); color: var(--ink-900); border-color: var(--glow); }
+  .spacer { flex: 1; }
+  .count { font-family: var(--font-mono); font-size: 11.5px; color: var(--text-faint); }
+
+  .stage { flex: 1; position: relative; overflow: hidden; background: #05060d; cursor: crosshair; }
+  canvas { display: block; width: 100%; height: 100%; }
+
+  .hint {
+    position: absolute; left: 14px; bottom: 12px;
+    font-family: var(--font-mono); font-size: 11px; color: var(--text-faint);
+    pointer-events: none; line-height: 1.7;
+  }
+
+  /* Problems that would actually break a course, listed as you build. */
+  .issues {
+    position: absolute; right: 14px; top: 12px;
+    width: 270px; max-height: 60%; overflow-y: auto;
+    background: rgba(10,12,24,.94);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 11px 13px;
+    font-size: 12px; line-height: 1.5;
+  }
+  .issues h3 {
+    font-family: var(--font-mono); font-size: 10px;
+    letter-spacing: .14em; text-transform: uppercase;
+    color: var(--text-faint); margin-bottom: 7px;
+  }
+  .issue { color: #ffa8c8; margin-bottom: 5px; }
+  .issue.warn { color: var(--amber); }
+  .ok { color: var(--lime); }
+
+  dialog {
+    border: 1px solid var(--line); border-radius: 12px;
+    background: var(--ink-800); color: var(--text);
+    padding: 18px; max-width: 620px; width: 90vw;
+  }
+  dialog::backdrop { background: rgba(5,6,13,.8); }
+  dialog textarea {
+    width: 100%; height: 320px;
+    background: rgba(5,6,13,.75);
+    border: 1px solid var(--line); border-radius: 8px;
+    color: var(--text); font-family: var(--font-mono); font-size: 11.5px;
+    padding: 10px; resize: vertical;
+  }
+</style>
+</head>
+<body>
+
+<div class="bar">
+  <h1>Map Editor</h1>
+  <button class="btn btn-ghost tool active" id="toolAnchor" type="button">Anchor</button>
+  <button class="btn btn-ghost tool" id="toolTramp" type="button">Trampoline</button>
+  <button class="btn btn-ghost" id="undo" type="button">Undo</button>
+  <button class="btn btn-ghost" id="clear" type="button">Clear</button>
+  <button class="btn btn-ghost" id="generate" type="button">Generate</button>
+  <label class="count" style="display:flex;align-items:center;gap:6px">
+    angle
+    <input id="angle" type="range" min="-180" max="180" step="15" value="0" style="width:110px" />
+    <span id="angleVal" style="min-width:4ch">0&deg;</span>
+  </label>
+  <label class="count" style="display:flex;align-items:center;gap:6px">
+    width
+    <input id="width" type="range" min="2" max="20" step="0.2" value="5.6" style="width:110px" />
+    <span id="widthVal" style="min-width:5ch">5.6m</span>
+  </label>
+  <span class="spacer"></span>
+  <button class="btn btn-hot" id="testBtn" type="button">▶ Test</button>
+  <span class="count" id="count"></span>
+  <button class="btn btn-ghost" id="importBtn" type="button">Import</button>
+  <button class="btn btn-primary" id="exportBtn" type="button">Export</button>
+</div>
+
+<div class="stage" id="stage">
+  <canvas id="c"></canvas>
+  <div class="issues" id="issues"></div>
+  <div class="hint">
+    click: place &middot; drag: move &middot; right-click / shift-click: delete<br />
+    click any element to select &middot; Ctrl/Cmd+D duplicates &middot; Delete removes<br />
+    click a trampoline to select, then use the angle slider or &larr;/&rarr;<br />
+    scroll: pan &middot; the dashed lines are the top and bottom of what players see
+  </div>
+</div>
+
+<div id="testWrap" style="display:none;position:fixed;inset:0;z-index:200;background:#05060d">
+  <iframe id="testFrame" style="width:100%;height:100%;border:0;display:block"></iframe>
+  <button class="btn btn-ghost" id="testClose" type="button"
+          style="position:absolute;top:12px;right:12px;z-index:2">Back to editor</button>
+</div>
+
+<dialog id="ioDialog">
+  <h3 style="margin-bottom:10px" id="ioTitle">Map JSON</h3>
+  <textarea id="ioText" spellcheck="false"></textarea>
+  <div class="row-gap" style="margin-top:12px">
+    <button class="btn btn-primary" id="ioApply" type="button">Load this map</button>
+    <button class="btn btn-ghost" id="ioCopy" type="button">Copy</button>
+    <button class="btn btn-ghost push" id="ioClose" type="button">Close</button>
+  </div>
+</dialog>
+
+<script type="module">
+/**
+ * Rope Raid map editor.
+ *
+ * Design courses visually instead of guessing at constants. It draws the same world the
+ * game does - same scale, same visible band - and validates the two rules that actually
+ * break a course:
+ *
+ *   1. anchors must be inside the camera's view, or there is nothing on screen to grapple
+ *   2. consecutive anchors must be within rope reach, or the chain breaks and players
+ *      are stranded with nothing to grab
+ *
+ * Both were real bugs found the hard way; the editor now catches them as you build.
+ * Export pastes straight into the MAPS array in screen.html.
+ */
+// Must match screen.html.
+const VIEW_H = 38;              // metres of world height the game shows
+const VIEW_TOP = VIEW_H / 2;    // 19
+const VIEW_BOTTOM = -VIEW_H / 2;
+const ROPE_REACH = 22;
+const SPAWN = { x: 4, y: -6 };
+
+let anchors = [];
+let trampolines = [];
+let tool = "anchor";
+let angleDeg = 0;
+let trampWidth = 5.6;   // width for the next trampoline, or the selected one
+let panX = 0;
+let dragging = null;
+let selected = null;      // the trampoline currently being edited (drives the angle slider)
+// Selection for copy/duplicate/delete. Covers anchors too, which `selected` deliberately
+// does not - the angle slider only ever applies to a trampoline.
+let selection = null;     // { kind: 'anchor'|'tramp', obj }
+let clipboard = null;
+const history = [];
+
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+const stage = document.getElementById("stage");
+const angleInput = document.getElementById("angle");
+
+let W = 0, H = 0, scale = 1;
+
+function resize() {
+  const r = stage.getBoundingClientRect();
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  W = r.width; H = r.height;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  scale = H / VIEW_H;            // pixels per metre, matching the game's framing
+  draw();
+}
+window.addEventListener("resize", resize);
+
+// World <-> screen. World y is up; canvas y is down.
+const toScreenX = (x) => (x - panX) * scale;
+const toScreenY = (y) => H / 2 - y * scale;
+const toWorldX = (px) => px / scale + panX;
+const toWorldY = (py) => (H / 2 - py) / scale;
+
+/* ---------------------------------------------------------------- editing */
+
+function snapshot() {
+  history.push(JSON.stringify({ anchors, trampolines }));
+  if (history.length > 80) history.shift();
+}
+
+function hitTest(wx, wy) {
+  for (let i = anchors.length - 1; i >= 0; i--) {
+    const a = anchors[i];
+    if (Math.hypot(a.x - wx, a.y - wy) < 1.4) return { kind: "anchor", index: i, obj: a };
+  }
+  for (let i = trampolines.length - 1; i >= 0; i--) {
+    const t = trampolines[i];
+    if (Math.abs(t.x - wx) < t.w / 2 && Math.abs(t.y - wy) < 1.6) {
+      return { kind: "tramp", index: i, obj: t };
+    }
+  }
+  return null;
+}
+
+stage.addEventListener("pointerdown", (e) => {
+  const rect = stage.getBoundingClientRect();
+  const wx = toWorldX(e.clientX - rect.left);
+  const wy = toWorldY(e.clientY - rect.top);
+  const hit = hitTest(wx, wy);
+
+  if (e.button === 2 || e.shiftKey) {
+    if (hit) {
+      snapshot();
+      if (hit.kind === "anchor") anchors.splice(hit.index, 1);
+      else trampolines.splice(hit.index, 1);
+      draw();
+    }
+    return;
+  }
+
+  if (hit) {
+    dragging = hit;
+    // Selecting a trampoline points the angle slider at it, so rotation edits the thing
+    // you just clicked rather than only the next one placed.
+    selected = hit.kind === "tramp" ? hit.obj : null;
+    selection = { kind: hit.kind, obj: hit.obj };
+    if (selected) {
+      angleDeg = Math.round((selected.angle || 0) * 180 / Math.PI);
+      angleInput.value = angleDeg;
+      document.getElementById("angleVal").textContent = angleDeg + "\u00b0";
+      trampWidth = selected.w ?? 5.6;
+      document.getElementById("width").value = trampWidth;
+      document.getElementById("widthVal").textContent = trampWidth.toFixed(1) + "m";
+    }
+    snapshot();
+    draw();
+    return;
+  }
+
+  // Clicking empty space clears the selection.
+  selected = null;
+  selection = null;
+
+  snapshot();
+  if (tool === "anchor") {
+    const a = { x: round(wx), y: round(wy) };
+    anchors.push(a);
+    selection = { kind: "anchor", obj: a };
+  } else {
+    const t = { x: round(wx), y: round(wy), w: trampWidth, angle: angleDeg * Math.PI / 180 };
+    trampolines.push(t);
+    selected = t;
+    selection = { kind: "tramp", obj: t };
+  }
+  anchors.sort((a, b) => a.x - b.x);
+  draw();
+});
+
+stage.addEventListener("pointermove", (e) => {
+  if (!dragging) return;
+  const rect = stage.getBoundingClientRect();
+  dragging.obj.x = round(toWorldX(e.clientX - rect.left));
+  dragging.obj.y = round(toWorldY(e.clientY - rect.top));
+  draw();
+});
+
+window.addEventListener("pointerup", () => {
+  if (dragging) { anchors.sort((a, b) => a.x - b.x); dragging = null; draw(); }
+});
+
+stage.addEventListener("contextmenu", (e) => e.preventDefault());
+stage.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  panX = Math.max(0, panX + (e.deltaX || e.deltaY) / scale);
+  draw();
+}, { passive: false });
+
+const round = (v) => Math.round(v * 2) / 2;   // half-metre grid, enough precision
+
+/* ---------------------------------------------------------------- validation */
+
+function validate() {
+  const issues = [];
+
+  for (const a of anchors) {
+    if (a.y > VIEW_TOP - 1) {
+      issues.push({ level: "bad", text: `Anchor at x=${a.x} is above the visible area (y=${a.y}, max ${VIEW_TOP - 1}) — players won't see it.` });
+    }
+    if (a.y < 2) {
+      issues.push({ level: "warn", text: `Anchor at x=${a.x} is very low (y=${a.y}) — players may not get under it to swing.` });
+    }
+  }
+
+  const sorted = [...anchors].sort((a, b) => a.x - b.x);
+  for (let i = 1; i < sorted.length; i++) {
+    const gap = sorted[i].x - sorted[i - 1].x;
+    if (gap > ROPE_REACH) {
+      issues.push({ level: "bad", text: `${gap.toFixed(1)}m gap at x=${sorted[i - 1].x} exceeds the ${ROPE_REACH}m rope reach — the chain breaks here.` });
+    }
+  }
+
+  if (sorted.length && sorted[0].x - SPAWN.x > ROPE_REACH) {
+    issues.push({ level: "bad", text: `First anchor is ${(sorted[0].x - SPAWN.x).toFixed(1)}m from the spawn — out of reach at the start.` });
+  }
+  if (sorted.length < 2) {
+    issues.push({ level: "warn", text: "Add at least a few anchors to make a course." });
+  }
+
+  return issues;
+}
+
+function renderIssues() {
+  const issues = validate();
+  const host = document.getElementById("issues");
+  host.innerHTML = "<h3>Checks</h3>";
+  if (issues.length === 0) {
+    const ok = document.createElement("div");
+    ok.className = "ok";
+    ok.textContent = "✓ Course looks playable.";
+    host.appendChild(ok);
+    return;
+  }
+  for (const issue of issues.slice(0, 12)) {
+    const div = document.createElement("div");
+    div.className = "issue" + (issue.level === "warn" ? " warn" : "");
+    div.textContent = (issue.level === "warn" ? "! " : "× ") + issue.text;
+    host.appendChild(div);
+  }
+}
+
+/* ---------------------------------------------------------------- drawing */
+
+function draw() {
+  saveDraft();
+  ctx.clearRect(0, 0, W, H);
+
+  // The visible band: anything outside these lines is off-screen in the game.
+  ctx.strokeStyle = "rgba(255,46,136,.4)";
+  ctx.setLineDash([6, 6]);
+  ctx.lineWidth = 1;
+  for (const y of [VIEW_TOP, VIEW_BOTTOM]) {
+    ctx.beginPath();
+    ctx.moveTo(0, toScreenY(y));
+    ctx.lineTo(W, toScreenY(y));
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+
+  // Ground line and metre marks.
+  ctx.strokeStyle = "rgba(120,160,220,.14)";
+  ctx.beginPath();
+  ctx.moveTo(0, toScreenY(0));
+  ctx.lineTo(W, toScreenY(0));
+  ctx.stroke();
+
+  ctx.fillStyle = "rgba(120,160,220,.35)";
+  ctx.font = "10px 'Space Mono', monospace";
+  const startM = Math.floor(panX / 10) * 10;
+  for (let m = startM; m < panX + W / scale; m += 10) {
+    const px = toScreenX(m);
+    ctx.fillRect(px, toScreenY(0) - 3, 1, 6);
+    ctx.fillText(m + "m", px + 3, toScreenY(0) + 13);
+  }
+
+  // Spawn.
+  ctx.fillStyle = "rgba(157,255,79,.9)";
+  ctx.beginPath();
+  ctx.arc(toScreenX(SPAWN.x), toScreenY(SPAWN.y), 7, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillText("spawn", toScreenX(SPAWN.x) - 12, toScreenY(SPAWN.y) + 22);
+
+  // Reach chain: green where a swing can continue, red where it breaks.
+  const sorted = [...anchors].sort((a, b) => a.x - b.x);
+  for (let i = 1; i < sorted.length; i++) {
+    const gap = sorted[i].x - sorted[i - 1].x;
+    ctx.strokeStyle = gap > ROPE_REACH ? "rgba(255,46,136,.55)" : "rgba(53,240,224,.18)";
+    ctx.lineWidth = gap > ROPE_REACH ? 2 : 1;
+    ctx.beginPath();
+    ctx.moveTo(toScreenX(sorted[i - 1].x), toScreenY(sorted[i - 1].y));
+    ctx.lineTo(toScreenX(sorted[i].x), toScreenY(sorted[i].y));
+    ctx.stroke();
+  }
+
+  for (const t of trampolines) {
+    const ang = t.angle || 0;
+    ctx.save();
+    ctx.translate(toScreenX(t.x), toScreenY(t.y));
+    ctx.rotate(-ang);                       // canvas y is flipped relative to world y
+    ctx.fillStyle = t === selected ? "#ffc247" : "#ff2e88";
+    ctx.fillRect(-t.w * scale / 2, -3, t.w * scale, 6);
+    if (t === selected) {
+      ctx.strokeStyle = "#ffc247";
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([4, 3]);
+      ctx.strokeRect(-t.w * scale / 2 - 5, -10, t.w * scale + 10, 20);
+      ctx.setLineDash([]);
+    }
+    // Arrows on both faces: a bed bounces either way, and that should be obvious.
+    ctx.strokeStyle = "rgba(255,46,136,.6)";
+    ctx.lineWidth = 1.5;
+    for (const face of [-1, 1]) {
+      ctx.beginPath();
+      ctx.moveTo(0, face * 4);
+      ctx.lineTo(0, face * 13);
+      ctx.moveTo(-4, face * 9);
+      ctx.lineTo(0, face * 13);
+      ctx.lineTo(4, face * 9);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  for (const a of anchors) {
+    const bad = a.y > VIEW_TOP - 1;
+    ctx.fillStyle = bad ? "#ff2e88" : "#35f0e0";
+    ctx.beginPath();
+    ctx.arc(toScreenX(a.x), toScreenY(a.y), 7, 0, Math.PI * 2);
+    ctx.fill();
+    if (selection && selection.kind === "anchor" && selection.obj === a) {
+      ctx.strokeStyle = "#ffc247";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(toScreenX(a.x), toScreenY(a.y), 11, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    // Mast, as the game draws it.
+    ctx.strokeStyle = "rgba(120,160,220,.2)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(toScreenX(a.x), toScreenY(a.y));
+    ctx.lineTo(toScreenX(a.x), 0);
+    ctx.stroke();
+  }
+
+  // Finish line.
+  const length = courseLength();
+  ctx.strokeStyle = "rgba(234,242,255,.5)";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(toScreenX(length), 0);
+  ctx.lineTo(toScreenX(length), H);
+  ctx.stroke();
+
+  document.getElementById("count").textContent =
+    `${anchors.length} anchors · ${trampolines.length} trampolines · ${length}m`;
+  renderIssues();
+}
+
+const courseLength = () =>
+  anchors.length ? Math.round(Math.max(...anchors.map((a) => a.x)) + 8) : 130;
+
+/* ---------------------------------------------------------------- toolbar */
+
+document.getElementById("toolAnchor").addEventListener("click", () => {
+  tool = "anchor";
+  document.getElementById("toolAnchor").classList.add("active");
+  document.getElementById("toolTramp").classList.remove("active");
+});
+document.getElementById("toolTramp").addEventListener("click", () => {
+  tool = "tramp";
+  document.getElementById("toolTramp").classList.add("active");
+  document.getElementById("toolAnchor").classList.remove("active");
+});
+
+// Rotation applies to the selected bed, or to the next one placed.
+angleInput.addEventListener("input", () => {
+  angleDeg = Number(angleInput.value);
+  document.getElementById("angleVal").textContent = angleDeg + "\u00b0";
+  // Rotate whatever is selected; otherwise this becomes the angle for the next bed.
+  if (selected) selected.angle = angleDeg * Math.PI / 180;
+  else if (dragging && dragging.kind === "tramp") dragging.obj.angle = angleDeg * Math.PI / 180;
+  draw();
+});
+
+// Arrow keys nudge the selected bed's angle, for fine adjustment the slider can't reach.
+window.addEventListener("keydown", (e) => {
+  if (!selected) return;
+  if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+  e.preventDefault();
+  angleDeg = Math.round(((selected.angle || 0) * 180 / Math.PI) + (e.key === "ArrowRight" ? 5 : -5));
+  selected.angle = angleDeg * Math.PI / 180;
+  angleInput.value = Math.max(-180, Math.min(180, angleDeg));
+  document.getElementById("angleVal").textContent = angleDeg + "\u00b0";
+  draw();
+});
+
+/**
+ * Duplicate, copy/paste and delete for the selected element.
+ *
+ * Copies land offset to the right rather than exactly on top, otherwise the new element is
+ * invisible under the original and looks like nothing happened.
+ */
+const PASTE_OFFSET = 6;
+
+function addCopy(kind, src, dx = PASTE_OFFSET) {
+  snapshot();
+  const copy = { ...src, x: round(src.x + dx) };
+  if (kind === "anchor") {
+    anchors.push(copy);
+    anchors.sort((a, b) => a.x - b.x);
+    selected = null;
+  } else {
+    trampolines.push(copy);
+    selected = copy;
+  }
+  selection = { kind, obj: copy };
+  draw();
+}
+
+window.addEventListener("keydown", (e) => {
+  // Never hijack keys while typing in the import/export textarea - Backspace there must
+  // edit text, not delete the selected element.
+  const t = e.target;
+  if (t && (t.tagName === "TEXTAREA" || t.tagName === "INPUT")) return;
+
+  const mod = e.ctrlKey || e.metaKey;
+
+  if (mod && e.key.toLowerCase() === "d") {
+    e.preventDefault();
+    if (selection) addCopy(selection.kind, selection.obj);
+    return;
+  }
+  if (mod && e.key.toLowerCase() === "c") {
+    if (selection) clipboard = { kind: selection.kind, obj: { ...selection.obj } };
+    return;
+  }
+  if (mod && e.key.toLowerCase() === "v") {
+    e.preventDefault();
+    if (clipboard) addCopy(clipboard.kind, clipboard.obj);
+    return;
+  }
+  if (e.key === "Delete" || e.key === "Backspace") {
+    if (!selection) return;
+    e.preventDefault();
+    snapshot();
+    const list = selection.kind === "anchor" ? anchors : trampolines;
+    const i = list.indexOf(selection.obj);
+    if (i >= 0) list.splice(i, 1);
+    selection = null;
+    selected = null;
+    draw();
+  }
+});
+
+// Width applies to the selected bed, or becomes the width for the next one placed.
+document.getElementById("width").addEventListener("input", (e) => {
+  trampWidth = Number(e.target.value);
+  document.getElementById("widthVal").textContent = trampWidth.toFixed(1) + "m";
+  if (selected) { selected.w = trampWidth; draw(); }
+});
+
+document.getElementById("undo").addEventListener("click", () => {
+  const prev = history.pop();
+  if (!prev) return;
+  const state = JSON.parse(prev);
+  anchors = state.anchors; trampolines = state.trampolines;
+  draw();
+});
+
+document.getElementById("clear").addEventListener("click", () => {
+  if (!confirm("Clear the whole map?")) return;
+  snapshot();
+  anchors = []; trampolines = []; panX = 0;
+  draw();
+});
+
+// A generated course as a starting point, so you can tweak rather than start blank.
+document.getElementById("generate").addEventListener("click", () => {
+  snapshot();
+  anchors = []; trampolines = [];
+  let x = 10;
+  while (x < 130) {
+    if (Math.random() < 0.22 && x > 40) {
+      trampolines.push({ x: round(x - 3.5), y: round(-16 - Math.random() * 2), w: 5.6 });
+    }
+    anchors.push({ x: round(x), y: round(8 + Math.random() * 5) });
+    x += 7 + Math.random() * 2.5;
+  }
+  panX = 0;
+  draw();
+});
+
+/* ---------------------------------------------------------------- import/export */
+
+const dialog = document.getElementById("ioDialog");
+
+/**
+ * Autosave to the browser.
+ *
+ * Purely so a reload or a stray refresh doesn't lose an afternoon's work - the export is
+ * still what moves a course into the game. No server, no account.
+ */
+const SAVE_KEY = "roperaid.editor.draft";
+
+function saveDraft() {
+  try {
+    localStorage.setItem(SAVE_KEY, JSON.stringify({ anchors, trampolines }));
+  } catch { /* private mode or quota - autosave is a convenience, not a requirement */ }
+}
+
+function restoreDraft() {
+  try {
+    const raw = localStorage.getItem(SAVE_KEY);
+    if (!raw) return false;
+    const d = JSON.parse(raw);
+    if (!Array.isArray(d.anchors) || !Array.isArray(d.trampolines)) return false;
+    if (!d.anchors.length && !d.trampolines.length) return false;
+    anchors = d.anchors;
+    trampolines = d.trampolines;
+    return true;
+  } catch { return false; }
+}
+
+document.getElementById("exportBtn").addEventListener("click", () => {
+  const map = {
+    name: "My course",
+    length: courseLength(),
+    anchors: [...anchors].sort((a, b) => a.x - b.x),
+    trampolines,
+  };
+  document.getElementById("ioTitle").textContent =
+    "Paste this into the MAPS array in screen.html";
+  document.getElementById("ioText").value = JSON.stringify(map, null, 2);
+  dialog.showModal();
+});
+
+document.getElementById("importBtn").addEventListener("click", () => {
+  document.getElementById("ioTitle").textContent = "Paste a map to load it";
+  document.getElementById("ioText").value = "";
+  dialog.showModal();
+});
+
+document.getElementById("ioApply").addEventListener("click", () => {
+  try {
+    const map = JSON.parse(document.getElementById("ioText").value);
+    snapshot();
+    anchors = map.anchors || [];
+    trampolines = map.trampolines || [];
+    panX = 0;
+    dialog.close();
+    draw();
+  } catch (err) {
+    alert("That isn't valid map JSON: " + err.message);
+  }
+});
+
+document.getElementById("ioCopy").addEventListener("click", async () => {
+  const text = document.getElementById("ioText");
+  text.select();
+  try {
+    await navigator.clipboard.writeText(text.value);
+    document.getElementById("ioCopy").textContent = "Copied";
+    setTimeout(() => { document.getElementById("ioCopy").textContent = "Copy"; }, 1400);
+  } catch {
+    document.execCommand("copy");
+  }
+});
+
+document.getElementById("ioClose").addEventListener("click", () => dialog.close());
+
+/* ---------------------------------------------------------------- test mode */
+
+/**
+ * Play the current map without exporting.
+ *
+ * The map is handed to the real game via the URL hash, so this runs the actual
+ * screen.html - same physics, same rendering - rather than a preview that could drift
+ * from it. Designing blind and exporting to find out was the whole problem.
+ */
+document.getElementById("testBtn").addEventListener("click", () => {
+  const issues = validate().filter((i) => i.level === "bad");
+  if (issues.length && !confirm(`This map has ${issues.length} problem(s) that will break play:\n\n${issues.slice(0,3).map(i=>"• "+i.text).join("\n")}\n\nTest anyway?`)) {
+    return;
+  }
+
+  const map = {
+    name: "Test",
+    length: courseLength(),
+    anchors: [...anchors].sort((a, b) => a.x - b.x),
+    trampolines,
+  };
+  const frame = document.getElementById("testFrame");
+  frame.src = "/games/roperaid/screen.html?test=1#" + encodeURIComponent(JSON.stringify(map));
+  document.getElementById("testWrap").style.display = "block";
+});
+
+document.getElementById("testClose").addEventListener("click", () => {
+  document.getElementById("testWrap").style.display = "none";
+  document.getElementById("testFrame").src = "about:blank";
+});
+
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") document.getElementById("testClose").click();
+});
+
+if (restoreDraft()) {
+  document.getElementById("issues").insertAdjacentHTML("afterbegin",
+    '<div class="issue">Restored your last course from this browser. ' +
+    'Clear wipes it.</div>');
+}
+
+resize();
+</script>
+</body>
+</html>

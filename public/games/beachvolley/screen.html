@@ -1,0 +1,705 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Beach Volley — Screen</title>
+<link rel="stylesheet" href="/console.css" />
+<style>
+  body { height: 100vh; overflow: hidden; margin: 0; background: #ffd9a0; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+
+  /* Scoreboard: two team plates either side of the match score. */
+  #hud {
+    position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+    z-index: 8; display: flex; gap: 16px; align-items: stretch;
+    pointer-events: none;
+  }
+  .team {
+    display: flex; flex-direction: column; gap: 7px;
+    padding: 10px 14px; border-radius: 16px; min-width: 168px;
+    background: rgba(12,18,34,.58); border: 1px solid rgba(255,255,255,.16);
+    backdrop-filter: blur(9px);
+    transition: box-shadow .35s, border-color .35s;
+  }
+  .team.serving { border-color: rgba(255,255,255,.5); box-shadow: 0 0 26px rgba(255,214,140,.45); }
+  .team-head {
+    display: flex; align-items: baseline; gap: 8px;
+    font-family: var(--font-mono); font-size: 10px; letter-spacing: .16em;
+    text-transform: uppercase; color: rgba(255,255,255,.66);
+  }
+  .team-head .pts {
+    margin-left: auto; font-family: var(--font-display); font-weight: 700;
+    font-size: 30px; line-height: 1; color: #fff; letter-spacing: 0;
+    text-shadow: 0 2px 14px rgba(0,0,0,.4);
+  }
+  .roster { display: flex; flex-direction: column; gap: 4px; min-height: 18px; }
+  .who { display: flex; align-items: center; gap: 7px; font-size: 13px; color: #fff; }
+  .who .chip {
+    width: 15px; height: 15px; border-radius: 5px; flex-shrink: 0;
+    box-shadow: 0 0 9px rgba(0,0,0,.35) inset;
+  }
+  .who .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 16ch; }
+  .who .em { font-size: 13px; }
+  .empty-slot { font-size: 12px; color: rgba(255,255,255,.45); font-style: italic; }
+
+  #mid {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 4px; padding: 0 4px;
+  }
+  #mid .vs {
+    font-family: var(--font-mono); font-size: 11px; letter-spacing: .2em;
+    color: rgba(255,255,255,.75); text-shadow: 0 1px 8px rgba(0,0,0,.5);
+  }
+  #target {
+    font-family: var(--font-mono); font-size: 9.5px; letter-spacing: .1em;
+    color: rgba(255,255,255,.5);
+  }
+
+  /* Big centre messages: serve countdown, point, winner. */
+  #shout {
+    position: fixed; top: 46%; left: 50%; z-index: 9;
+    transform: translate(-50%,-50%); pointer-events: none; text-align: center;
+    font-family: var(--font-display); font-weight: 800;
+    font-size: clamp(40px, 9vw, 120px); letter-spacing: .06em;
+    color: #fff; text-shadow: 0 4px 30px rgba(0,0,0,.45), 0 0 40px rgba(255,190,110,.7);
+    opacity: 0;
+  }
+  #shout.pop { animation: shoutPop 1.15s ease-out; }
+  @keyframes shoutPop {
+    0% { opacity: 0; transform: translate(-50%,-50%) scale(.55); }
+    16% { opacity: 1; transform: translate(-50%,-50%) scale(1.1); }
+    66% { opacity: 1; transform: translate(-50%,-50%) scale(1); }
+    100% { opacity: 0; transform: translate(-50%,-50%) scale(1.22); }
+  }
+
+  /* Lobby / game-over card. */
+  .overlay {
+    position: fixed; inset: 0; z-index: 10;
+    display: none; align-items: center; justify-content: center;
+    flex-direction: column; gap: 16px; text-align: center;
+    background: rgba(6,10,22,.62); backdrop-filter: blur(5px);
+    padding: 24px;
+  }
+  .overlay.show { display: flex; }
+  .card {
+    background: rgba(10,14,28,.82); border: 1px solid var(--line);
+    border-radius: 22px; padding: 30px 38px; max-width: 640px;
+    box-shadow: 0 24px 80px rgba(0,0,0,.5);
+  }
+  .card h1 { font-size: clamp(30px, 5.4vw, 52px); margin: 0 0 8px; letter-spacing: .02em; }
+  .card .sub { color: var(--text-dim); font-size: 15px; line-height: 1.6; }
+  .joiners { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; margin-top: 20px; }
+  .joiner {
+    display: flex; align-items: center; gap: 8px;
+    background: rgba(255,255,255,.06); border: 1px solid var(--line);
+    border-radius: 12px; padding: 8px 13px; font-size: 14px;
+  }
+  .joiner .chip { width: 16px; height: 16px; border-radius: 5px; }
+  .joiner .ready { font-size: 11px; font-family: var(--font-mono); color: var(--lime); letter-spacing: .1em; }
+  .joiner .waiting { font-size: 11px; font-family: var(--font-mono); color: var(--amber); letter-spacing: .1em; }
+  .joiner .team-tag {
+    font-family: var(--font-mono); font-size: 10px; letter-spacing: .12em;
+    color: var(--text-faint); border: 1px solid var(--line);
+    border-radius: 6px; padding: 1px 5px;
+  }
+
+  /* Countdown before the first serve: a big number over the court. */
+  #count {
+    position: fixed; top: 44%; left: 50%; z-index: 9;
+    transform: translate(-50%,-50%); pointer-events: none; text-align: center;
+    font-family: var(--font-display); font-weight: 800;
+    font-size: clamp(70px, 17vw, 210px); line-height: 1;
+    color: #fff; text-shadow: 0 6px 40px rgba(0,0,0,.5), 0 0 60px rgba(255,190,110,.75);
+    display: none;
+  }
+  #count.show { display: block; }
+  #count .tick { display: block; animation: tickIn .5s ease-out; }
+  @keyframes tickIn {
+    0% { opacity: 0; transform: scale(1.7); }
+    40% { opacity: 1; transform: scale(1); }
+    100% { opacity: 1; transform: scale(1); }
+  }
+  #count .sub {
+    display: block; font-size: 16px; font-weight: 500; letter-spacing: .22em;
+    text-transform: uppercase; color: rgba(255,255,255,.8);
+    text-shadow: 0 2px 12px rgba(0,0,0,.5); margin-top: 6px;
+  }
+  .hintline { margin-top: 18px; font-family: var(--font-mono); font-size: 12px; color: var(--text-faint); letter-spacing: .08em; }
+</style>
+</head>
+<body>
+
+<div id="hud">
+  <div class="team" id="teamA">
+    <div class="team-head"><span>Team A</span><span class="pts" id="ptsA">0</span></div>
+    <div class="roster" id="rosterA"></div>
+  </div>
+  <div id="mid">
+    <div class="vs">VS</div>
+    <div id="target">FIRST TO 7</div>
+  </div>
+  <div class="team" id="teamB">
+    <div class="team-head"><span>Team B</span><span class="pts" id="ptsB">0</span></div>
+    <div class="roster" id="rosterB"></div>
+  </div>
+</div>
+
+<div id="shout"></div>
+<div id="count"></div>
+
+<div class="overlay show" id="overlay">
+  <div class="card">
+    <h1 id="ovTitle">Beach Volley</h1>
+    <div class="sub" id="ovSub">Join on your phone to play. Turn it sideways.</div>
+    <div class="joiners" id="joiners"></div>
+    <div class="hintline" id="ovHint">Waiting for players…</div>
+  </div>
+</div>
+
+<script src="/sdk.js"></script>
+<script type="module">
+/**
+ * Beach Volley - screen.
+ *
+ * The screen is the sole authority: it runs the simulation, decides points, and tells the
+ * phones what to show. Phones only ever send input events (left/right down-up, jump) and
+ * their chosen skin, which keeps the message rate to a handful per second per player even
+ * during a frantic rally.
+ *
+ * Rendering is Three.js; the rules live in sim.js and the geometry in scene.js, so this file
+ * is only the glue: SDK wiring, the HUD, and the frame loop.
+ */
+import * as THREE from "/vendor/three.js?v=5";
+import {
+  createMatch, addPlayer, removePlayer, step, beginServe, restart,
+  setInput, clearInput, jump, pickTeamFor, teamCounts, teamSign,
+  setReady, canStart, countdownRemaining,
+  COURT, PLAYER, BALL, RULES,
+} from "/games/beachvolley/sim.js?v=1";
+import {
+  buildWorld, buildPlayerMesh, buildBall, buildShadowBlob, updateSea,
+} from "/games/beachvolley/scene.js?v=1";
+import { skinById, defaultSkinFor, SKINS } from "/games/beachvolley/skins.js?v=1";
+
+const freeconsole = new FreeConsole();
+
+/* ------------------------------------------------------------ test harness */
+
+// ?test=1 runs the game with no shell behind it: two keyboard players, so the whole thing
+// can be reloaded on every edit without re-joining a room. Everything that talks to the
+// shell goes through safeCall so a missing one is simply a no-op.
+const TEST = new URLSearchParams(location.search).has("test");
+
+function safeCall(fn, fallback) {
+  try { return fn(); } catch (err) { return fallback; }
+}
+function nameOf(id) {
+  return safeCall(() => freeconsole.getNickname(id), "Player " + id) || ("Player " + id);
+}
+function colorOf(id) {
+  return safeCall(() => freeconsole.getPlayerColor(id), "#35f0e0");
+}
+/** Room-wide clock. Never Date.now() - phones and the TV disagree by seconds. */
+function now() {
+  return safeCall(() => freeconsole.getServerTime(), Date.now());
+}
+
+/* ------------------------------------------------------------------- state */
+
+const match = createMatch();
+/** Chosen skin per device id, mirrored from custom device state. */
+const skinChoice = new Map();
+/** Three.js group per device id. Keyed by id, never by array position. */
+const avatars = new Map();
+
+/* ------------------------------------------------------------------ three */
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const world = buildWorld(scene);
+
+// Framing: the court is ~17m wide and the players are 1.75m tall, so the camera has to sit
+// close enough that a person is a readable figure rather than a speck. At z=20 they were a
+// few pixels tall; 13.5m back and 5m up fills the frame with the court and still keeps a
+// high spike (~5m) comfortably in shot.
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 1200);
+const CAM_BASE = new THREE.Vector3(0, 5.0, 13.5);
+const CAM_LOOK = new THREE.Vector3(0, 2.2, 0);
+camera.position.copy(CAM_BASE);
+camera.lookAt(CAM_LOOK);
+
+const ballMesh = buildBall();
+scene.add(ballMesh);
+const ballShadow = buildShadowBlob();
+scene.add(ballShadow);
+
+addEventListener("resize", () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ------------------------------------------------------------------ roster */
+
+/** Build or rebuild the avatar for a device, e.g. after a skin change. */
+function syncAvatar(deviceId) {
+  const p = match.players.get(deviceId);
+  if (!p) return;
+
+  const old = avatars.get(deviceId);
+  if (old) { scene.remove(old); disposeTree(old); }
+
+  const skin = skinById(p.skinId);
+  const mesh = buildPlayerMesh(skin);
+  scene.add(mesh);
+  avatars.set(deviceId, mesh);
+}
+
+function disposeTree(root) {
+  root.traverse((o) => {
+    if (o.geometry) o.geometry.dispose();
+    if (o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach((m) => m.dispose());
+  });
+}
+
+function joinPlayer(deviceId) {
+  // Already seated: this is a reconnect or a duplicate onConnect, not a new player. Keep the
+  // seat and the score, but drop any direction the old session left held - the phone that
+  // just (re)appeared has nothing pressed, and a stale held key is exactly what makes a
+  // player refuse to move after rejoining.
+  if (match.players.has(deviceId)) {
+    clearInput(match, deviceId);
+    return;
+  }
+  if (match.players.size >= 4) return;   // 4 is the cap: 2 a side
+
+  const team = pickTeamFor(match);
+  const skinId = skinChoice.get(deviceId) || defaultSkinFor(deviceId).id;
+  addPlayer(match, deviceId, team, skinId);
+  syncAvatar(deviceId);
+  renderHud();
+  maybeStart();
+  broadcastPhase();
+}
+
+function leavePlayer(deviceId) {
+  if (!match.players.has(deviceId)) return;
+  removePlayer(match, deviceId);
+  const mesh = avatars.get(deviceId);
+  if (mesh) { scene.remove(mesh); disposeTree(mesh); avatars.delete(deviceId); }
+  renderHud();
+
+  // With nobody left to play, fall back to the lobby rather than simulating an empty court.
+  if (match.players.size === 0) {
+    match.phase = "waiting";
+    match.ball.live = false;
+    showOverlay(true);
+    broadcastPhase();
+    return;
+  }
+
+  // Someone leaving can be the thing that makes the rest of the room ready - the player we
+  // were waiting on is gone - so re-check rather than stranding everyone in the lobby.
+  if (match.phase === "waiting") maybeStart();
+  broadcastPhase();
+}
+
+/**
+ * Start once both sides have someone AND everyone has tapped ready. A 1v1 is a perfectly
+ * good game, so the only size requirement is one player per team.
+ */
+function maybeStart() {
+  if (match.phase !== "waiting") return;
+  if (!canStart(match)) { refreshLobby(); return; }
+  showOverlay(false);
+  restart(match, now());
+  broadcastPhase();
+}
+
+/** Update the lobby card's text and roster to match who is in and who is still choosing. */
+function refreshLobby() {
+  if (match.phase !== "waiting") return;
+  const [a, b] = teamCounts(match);
+  const total = match.players.size;
+  let hint;
+  if (total === 0) hint = "Waiting for players…";
+  else if (a < 1 || b < 1) hint = "Need someone on both sides…";
+  else {
+    const notReady = [...match.players.values()].filter((p) => !p.ready).length;
+    hint = notReady
+      ? "Waiting for " + notReady + " player" + (notReady === 1 ? "" : "s") + " to be ready…"
+      : "Starting…";
+  }
+  showOverlay(true, "Beach Volley", "Join on your phone to play. Turn it sideways.", hint);
+}
+
+/* --------------------------------------------------------------- SDK wiring */
+
+freeconsole.onReady = function () {
+  renderHud();
+  // Orientation is left alone deliberately: the controller renders its landscape pad in
+  // either orientation, so there is nothing to request of the phones.
+  for (const id of safeCall(() => freeconsole.getControllerDeviceIds(), []) || []) {
+    readSkinFrom(id);
+    joinPlayer(id);
+  }
+};
+
+freeconsole.onConnect = function (device_id) {
+  readSkinFrom(device_id);
+  joinPlayer(device_id);
+};
+
+freeconsole.onDisconnect = function (device_id) {
+  leavePlayer(device_id);
+};
+
+freeconsole.onCustomDeviceStateChange = function (device_id, custom) {
+  if (!custom) return;
+  if (custom.skin && custom.skin !== skinChoice.get(device_id)) {
+    skinChoice.set(device_id, custom.skin);
+    const p = match.players.get(device_id);
+    if (p) { p.skinId = custom.skin; syncAvatar(device_id); }
+    renderHud();
+  }
+};
+
+function readSkinFrom(device_id) {
+  const custom = safeCall(() => freeconsole.getCustomDeviceState(device_id), null);
+  if (custom && custom.skin) skinChoice.set(device_id, custom.skin);
+}
+
+freeconsole.onMessage = function (device_id, data) {
+  if (!data) return;
+
+  switch (data.a) {
+    case "move":
+      // { a:"move", k:"left"|"right", d:true|false } - sent on press and release only.
+      setInput(match, device_id, data.k, data.d);
+      break;
+    case "jump":
+      jump(match, device_id);
+      break;
+    case "skin":
+      skinChoice.set(device_id, data.skin);
+      { const p = match.players.get(device_id);
+        if (p) { p.skinId = data.skin; syncAvatar(device_id); } }
+      renderHud();
+      break;
+    case "ready":
+      // The phone's ready button. In the lobby it may start the match; after a win it also
+      // clears the previous result so the next match needs a fresh round of readies.
+      if (setReady(match, device_id, data.on !== false)) {
+        renderHud();
+        if (match.phase === "waiting") maybeStart();
+        broadcastPhase();
+      }
+      break;
+    case "again":
+      // Back to the lobby rather than straight into play: everyone re-readies, which stops
+      // one eager player from restarting while the others are still reading the score.
+      if (match.phase === "over") {
+        match.phase = "waiting";
+        match.ball.live = false;
+        for (const p of match.players.values()) p.ready = false;
+        setReady(match, device_id, true);
+        renderHud();
+        maybeStart();
+        broadcastPhase();
+      }
+      break;
+  }
+};
+
+/**
+ * Tell the phones what phase we are in, so their pads can enable/disable and show the score.
+ * Sent on change only - never per frame.
+ */
+function broadcastPhase() {
+  const readyIds = [];
+  for (const [id, p] of match.players) if (p.ready) readyIds.push(id);
+  safeCall(() => freeconsole.broadcast({
+    a: "phase",
+    phase: match.phase,
+    score: match.score,
+    winner: match.winner,
+    // Who is ready, so a phone can show its own button as armed even after a reconnect.
+    ready: readyIds,
+    players: match.players.size,
+  }));
+}
+
+/* -------------------------------------------------------------------- HUD */
+
+function renderHud() {
+  const byTeam = [[], []];
+  for (const p of match.players.values()) byTeam[p.team].push(p);
+  for (const list of byTeam) list.sort((x, y) => x.deviceId - y.deviceId);
+
+  for (const t of [0, 1]) {
+    const el = document.getElementById(t === 0 ? "rosterA" : "rosterB");
+    const list = byTeam[t];
+    el.innerHTML = list.length
+      ? list.map((p) => {
+          const skin = skinById(p.skinId);
+          return '<div class="who">' +
+            '<span class="chip" style="background:' + colorOf(p.deviceId) + '"></span>' +
+            '<span class="em">' + skin.emoji + "</span>" +
+            '<span class="nm">' + escapeHtml(nameOf(p.deviceId)) + "</span>" +
+            "</div>";
+        }).join("")
+      : '<div class="empty-slot">open…</div>';
+
+    document.getElementById(t === 0 ? "ptsA" : "ptsB").textContent = match.score[t];
+    document.getElementById(t === 0 ? "teamA" : "teamB")
+      .classList.toggle("serving", match.servingTeam === t && match.phase !== "waiting");
+  }
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+let shoutTimer = 0;
+function shout(text) {
+  const el = document.getElementById("shout");
+  el.textContent = text;
+  el.classList.remove("pop");
+  void el.offsetWidth;          // restart the animation
+  el.classList.add("pop");
+  clearTimeout(shoutTimer);
+  shoutTimer = setTimeout(() => el.classList.remove("pop"), 1200);
+}
+
+function showOverlay(show, title, sub, hint) {
+  const ov = document.getElementById("overlay");
+  ov.classList.toggle("show", show);
+  if (!show) return;
+  document.getElementById("ovTitle").textContent = title || "Beach Volley";
+  document.getElementById("ovSub").textContent = sub ||
+    "Join on your phone to play. Turn it sideways.";
+  document.getElementById("ovHint").textContent = hint || "Waiting for players…";
+  renderJoiners();
+}
+
+function renderJoiners() {
+  const el = document.getElementById("joiners");
+  const ids = [...match.players.keys()].sort((a, b) => a - b);
+  el.innerHTML = ids.map((id) => {
+    const p = match.players.get(id);
+    const skin = skinById(p.skinId);
+    return '<div class="joiner">' +
+      '<span class="chip" style="background:' + colorOf(id) + '"></span>' +
+      "<span>" + skin.emoji + " " + escapeHtml(nameOf(id)) + "</span>" +
+      '<span class="team-tag">' + (p.team === 0 ? "A" : "B") + "</span>" +
+      '<span class="' + (p.ready ? "ready" : "waiting") + '">' +
+      (p.ready ? "READY" : "CHOOSING…") + "</span></div>";
+  }).join("");
+}
+
+/* ------------------------------------------------------------------ events */
+
+/** Drain simulation events into sound-free visual feedback. */
+function consumeEvents() {
+  for (const e of match.events) {
+    switch (e.type) {
+      case "hit":
+      case "spike": {
+        const mesh = avatars.get(e.deviceId);
+        if (mesh) mesh.userData.hitFlash = 1;
+        if (e.type === "spike") shout("SPIKE!");
+        break;
+      }
+      case "point": {
+        const who = e.team === 0 ? "TEAM A" : "TEAM B";
+        if (!match.winner) shout(who + " SCORES");
+        renderHud();
+        broadcastPhase();
+        break;
+      }
+      case "serve":
+        renderHud();
+        broadcastPhase();
+        break;
+      case "win": {
+        const who = e.team === 0 ? "Team A" : "Team B";
+        showOverlay(true, who + " wins!",
+          "Final score " + match.score[0] + " – " + match.score[1] + ".",
+          "Tap PLAY AGAIN on any phone.");
+        broadcastPhase();
+        break;
+      }
+    }
+  }
+  match.events.length = 0;
+}
+
+/* ------------------------------------------------------------------- frame */
+
+let last = performance.now();
+let seaT = 0;
+
+function frame(t) {
+  requestAnimationFrame(frame);
+
+  // Clamp dt so a backgrounded tab does not teleport the ball through the floor on return.
+  let dt = (t - last) / 1000;
+  last = t;
+  if (dt > 0.05) dt = 0.05;
+
+  if (match.phase !== "waiting") step(match, dt, now());
+  consumeEvents();
+  drawCountdown();
+
+  seaT += dt;
+  updateSea(world.sea, seaT);
+
+  drawPlayers(dt);
+  drawBall(dt);
+  driftCamera(dt);
+
+  renderer.render(scene, camera);
+}
+
+/**
+ * The pre-match countdown. Re-renders only when the number changes, so the pop animation
+ * plays once per tick instead of restarting on every frame.
+ */
+let lastTick = null;
+function drawCountdown() {
+  const el = document.getElementById("count");
+
+  if (match.phase !== "countdown") {
+    if (lastTick !== null) { el.classList.remove("show"); lastTick = null; }
+    return;
+  }
+
+  const n = countdownRemaining(match, now());
+  if (n === lastTick) return;
+  lastTick = n;
+
+  el.classList.add("show");
+  el.innerHTML = n > 0
+    ? '<span class="tick">' + n + '<span class="sub">Get ready</span></span>'
+    : '<span class="tick">GO!</span>';
+}
+
+function drawPlayers(dt) {
+  for (const [id, p] of match.players) {
+    const mesh = avatars.get(id);
+    if (!mesh) continue;
+
+    mesh.position.set(p.x, p.y, 0);
+    // Face across the net, leaning into the run.
+    const targetRot = p.facing > 0 ? Math.PI / 2 : -Math.PI / 2;
+    mesh.rotation.y += (targetRot - mesh.rotation.y) * Math.min(1, dt * 12);
+
+    const { armL, armR, legs } = mesh.userData;
+
+    // Arms: raised while airborne, swung on a hit, relaxed otherwise.
+    const flash = mesh.userData.hitFlash || 0;
+    const raise = (!p.onGround ? 1 : 0) * 1.15 + flash * 1.5;
+    const armAngle = -Math.min(2.5, raise);
+    armL.rotation.x += (armAngle - armL.rotation.x) * Math.min(1, dt * 16);
+    armR.rotation.x = armL.rotation.x;
+    if (flash > 0) mesh.userData.hitFlash = Math.max(0, flash - dt * 3.2);
+
+    // Legs: a simple run cycle driven by speed, and a tuck while jumping.
+    const speed = Math.abs(p.vx);
+    if (p.onGround && speed > 0.4) {
+      mesh.userData.stride = (mesh.userData.stride || 0) + dt * speed * 2.6;
+      const swing = Math.sin(mesh.userData.stride) * 0.55;
+      legs.children[0].rotation.x = swing;
+      legs.children[1].rotation.x = -swing;
+    } else {
+      const tuck = p.onGround ? 0 : 0.5;
+      for (const leg of legs.children) {
+        leg.rotation.x += (tuck - leg.rotation.x) * Math.min(1, dt * 10);
+      }
+    }
+
+    // A gentle squash on landing sells the weight without any extra geometry.
+    const targetY = p.onGround ? 1 : 1.04;
+    mesh.scale.y += (targetY - mesh.scale.y) * Math.min(1, dt * 9);
+  }
+}
+
+let ballSpin = 0;
+function drawBall(dt) {
+  const b = match.ball;
+  ballMesh.position.set(b.x, b.y, 0);
+
+  // Spin proportional to travel, so a fast spike visibly rips.
+  ballSpin += (b.vx * 0.9 + Math.abs(b.vy) * 0.2) * dt;
+  ballMesh.rotation.z = -ballSpin;
+  ballMesh.rotation.x = ballSpin * 0.35;
+
+  // The blob shrinks and fades with height - the only depth cue the ball has.
+  const h = Math.max(0, b.y);
+  const k = Math.max(0.25, 1 - h / 11);
+  ballShadow.position.set(b.x, 0.03, 0);
+  ballShadow.scale.setScalar(k);
+  ballShadow.material.opacity = 0.26 * k;
+}
+
+/**
+ * The camera drifts a little toward the action, but never enough to feel like it is chasing.
+ *
+ * The look-at point tracks the camera's own x so the view stays square to the net. Aiming at
+ * a fraction of the drift instead swung the whole court across the frame and made a centred
+ * net look badly off to one side.
+ */
+function driftCamera(dt) {
+  const b = match.ball;
+  const targetX = THREE.MathUtils.clamp(b.x * 0.14, -1.6, 1.6);
+  const targetY = CAM_BASE.y + THREE.MathUtils.clamp((b.y - 3) * 0.06, -0.3, 0.8);
+  camera.position.x += (targetX - camera.position.x) * Math.min(1, dt * 1.6);
+  camera.position.y += (targetY - camera.position.y) * Math.min(1, dt * 1.6);
+  camera.lookAt(camera.position.x, CAM_LOOK.y, CAM_LOOK.z);
+}
+
+requestAnimationFrame(frame);
+
+/* --------------------------------------------------------------- test mode */
+
+if (TEST) {
+  // Two local players on the keyboard: A/D + W for team A, arrows + Up for team B.
+  showOverlay(false);
+  skinChoice.set(1, SKINS[0].id);
+  skinChoice.set(2, SKINS[1].id);
+  addPlayer(match, 1, 0, SKINS[0].id);
+  addPlayer(match, 2, 1, SKINS[1].id);
+  // No phones to tap ready, so seat both players already readied and run the normal
+  // countdown - test mode should exercise the same start path as a real match.
+  setReady(match, 1, true);
+  setReady(match, 2, true);
+  syncAvatar(1); syncAvatar(2);
+  renderHud();
+  restart(match, now());
+
+  const keymap = {
+    KeyA: [1, "left"], KeyD: [1, "right"],
+    ArrowLeft: [2, "left"], ArrowRight: [2, "right"],
+  };
+  addEventListener("keydown", (e) => {
+    if (e.repeat) return;
+    if (keymap[e.code]) { const [id, k] = keymap[e.code]; setInput(match, id, k, true); }
+    if (e.code === "KeyW") jump(match, 1);
+    if (e.code === "ArrowUp") jump(match, 2);
+    if (e.code === "KeyR") { restart(match, now()); showOverlay(false); }
+  });
+  addEventListener("keyup", (e) => {
+    if (keymap[e.code]) { const [id, k] = keymap[e.code]; setInput(match, id, k, false); }
+  });
+}
+</script>
+</body>
+</html>

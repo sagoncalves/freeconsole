@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>FreeConsole — diagnostics</title>
+<style>
+  body { margin:0; padding:24px; background:#05060d; color:#eaf2ff;
+         font:14px/1.6 ui-monospace, monospace; }
+  h1 { font-size:17px; margin:0 0 4px; }
+  .sub { color:#8492b8; margin-bottom:18px; font-size:13px; }
+  .row { padding:8px 0; border-bottom:1px solid rgba(120,160,220,.14); }
+  .ok { color:#9dff4f; } .bad { color:#ff2e88; } .warn { color:#ffc247; }
+  button { background:#35f0e0; color:#05060d; border:0; border-radius:8px;
+           padding:11px 18px; font:700 14px ui-monospace,monospace; cursor:pointer; margin-top:16px; }
+  pre { white-space:pre-wrap; word-break:break-all; color:#8492b8; font-size:12px; margin:4px 0 0; }
+</style>
+</head>
+<body>
+<h1>FreeConsole diagnostics</h1>
+<div class="sub">Checks what THIS browser profile actually sees. Open it on the failing profile.</div>
+<div id="out"></div>
+<button id="fix">Unregister service workers &amp; clear caches</button>
+
+<script type="module">
+const out = document.getElementById("out");
+const line = (label, state, detail) => {
+  const div = document.createElement("div");
+  div.className = "row";
+  div.innerHTML = `<span class="${state}">${state === "ok" ? "OK  " : state === "bad" ? "BAD " : "WARN"}</span> ${label}`;
+  if (detail) { const pre = document.createElement("pre"); pre.textContent = detail; div.appendChild(pre); }
+  out.appendChild(div);
+};
+
+// 1. Service workers - the usual reason incognito works and a normal profile doesn't.
+if ("serviceWorker" in navigator) {
+  const regs = await navigator.serviceWorker.getRegistrations();
+  if (regs.length) {
+    line(`${regs.length} service worker(s) registered — this is very likely the cause`, "bad",
+      regs.map((r) => r.scope).join("\n"));
+  } else {
+    line("no service workers registered", "ok");
+  }
+} else {
+  line("service workers unsupported", "warn");
+}
+
+// 2. Cache Storage, which a worker (or an old PWA) may still be serving from.
+if ("caches" in window) {
+  const keys = await caches.keys();
+  keys.length ? line(`${keys.length} cache storage bucket(s)`, "bad", keys.join("\n"))
+              : line("cache storage empty", "ok");
+}
+
+// 3. Fetch room.js fresh and check the export the error names.
+try {
+  const res = await fetch("/room.js", { cache: "no-store" });
+  const text = await res.text();
+  const hasScreen = /export\s+const\s+SCREEN\b/.test(text);
+  line(`/room.js fetched (${text.length} bytes, HTTP ${res.status})`, hasScreen ? "ok" : "bad",
+    hasScreen ? "contains: export const SCREEN" : "MISSING 'export const SCREEN' — this is an OLD file");
+  line("room.js cache-control: " + (res.headers.get("cache-control") || "(none)"),
+    (res.headers.get("cache-control") || "").includes("no-cache") ? "ok" : "warn");
+} catch (e) { line("could not fetch /room.js", "bad", e.message); }
+
+// 4. Actually import the module graph the way the page does.
+try {
+  const m = await import("/room.js");
+  line("import('/room.js') linked", m.SCREEN === 0 ? "ok" : "bad",
+    "exports: " + Object.keys(m).sort().join(", "));
+} catch (e) { line("import('/room.js') FAILED", "bad", e.message); }
+
+try {
+  const m = await import("/session.js");
+  line("import('/session.js') linked", typeof m.startSession === "function" ? "ok" : "bad",
+    "exports: " + Object.keys(m).sort().join(", "));
+} catch (e) { line("import('/session.js') FAILED", "bad", e.message); }
+
+document.getElementById("fix").addEventListener("click", async () => {
+  if ("serviceWorker" in navigator) {
+    for (const r of await navigator.serviceWorker.getRegistrations()) await r.unregister();
+  }
+  if ("caches" in window) {
+    for (const k of await caches.keys()) await caches.delete(k);
+  }
+  location.reload(true);
+});
+</script>
+</body>
+</html>

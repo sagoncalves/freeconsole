@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<title>Tap War — Controller</title>
+<link rel="stylesheet" href="/console.css" />
+<style>
+  * { -webkit-tap-highlight-color: transparent; user-select: none; }
+  html, body { height: 100%; }
+  body {
+    display: flex;
+    flex-direction: column;
+    touch-action: manipulation;
+    overscroll-behavior: none;
+  }
+
+  .status {
+    padding: max(14px, env(safe-area-inset-top)) 18px 10px;
+    text-align: center;
+    color: var(--text-dim);
+    font-size: 14px;
+  }
+  .score {
+    text-align: center;
+    font-family: var(--font-mono);
+    font-size: 54px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
+    padding-bottom: 12px;
+    color: var(--glow);
+    text-shadow: var(--bloom-glow);
+  }
+
+  /* The pad is the entire game on a phone: as large as the viewport allows, with the
+     press registering visually on pointerdown so it feels instant even before the
+     round-trip completes. */
+  #pad {
+    flex: 1;
+    margin: 0 16px max(20px, env(safe-area-inset-bottom));
+    border: 0;
+    border-radius: 22px;
+    background: linear-gradient(150deg, var(--hot), #b81f61);
+    color: #fff;
+    font-family: var(--font-display);
+    font-size: 32px;
+    font-weight: 700;
+    letter-spacing: .08em;
+    cursor: pointer;
+    box-shadow: var(--bloom-hot);
+    transition: transform .07s ease-out, filter .07s, box-shadow .07s;
+    position: relative;
+    overflow: hidden;
+  }
+  #pad::after {
+    content: "";
+    position: absolute; inset: 0;
+    background: repeating-linear-gradient(to bottom, rgba(255,255,255,.06) 0 1px, transparent 1px 3px);
+    pointer-events: none;
+  }
+  #pad:active {
+    transform: scale(.965);
+    filter: brightness(1.18);
+    box-shadow: 0 0 34px rgba(255,46,136,.75), 0 0 90px rgba(255,46,136,.3);
+  }
+  #pad:disabled {
+    background: rgba(26,32,56,.8);
+    color: var(--text-faint);
+    box-shadow: none;
+  }
+  .over #pad { pointer-events: none; }
+</style>
+</head>
+<body>
+<div class="status" id="status">Connecting…</div>
+<div class="score" id="score">0</div>
+<button id="pad" disabled>TAP</button>
+
+<script src="/sdk.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  var freeconsole = new FreeConsole();
+
+  var pad = document.getElementById("pad");
+  var statusEl = document.getElementById("status");
+  var scoreEl = document.getElementById("score");
+
+  var taps = 0;
+  var seq = 0;
+  var pending = false;
+  var over = false;
+
+  freeconsole.onReady = function () {
+    statusEl.textContent = "Tap as fast as you can!";
+    pad.disabled = false;
+  };
+
+  // Local count updates instantly for feel; the screen stays authoritative and its
+  // broadcast overrides this whenever it arrives.
+  function tap() {
+    if (over) return;
+    taps++;
+    seq++;
+    scoreEl.textContent = taps;
+    freeconsole.vibrate(8);
+    schedule();
+  }
+
+  // Coalesce taps to at most one message per frame: a fast tapper generates ~10/sec and
+  // each send is a write, so batching keeps bandwidth sane without losing taps (the
+  // screen counts by seq delta, not by message count).
+  function schedule() {
+    if (pending) return;
+    pending = true;
+    requestAnimationFrame(function () {
+      pending = false;
+      freeconsole.message(FreeConsole.SCREEN, { seq: seq });
+    });
+  }
+
+  pad.addEventListener("pointerdown", function (e) {
+    e.preventDefault();
+    tap();
+  });
+
+  freeconsole.onMessage = function (device_id, data) {
+    // Only the screen is authoritative about scores.
+    if (device_id !== FreeConsole.SCREEN) return;
+    var state = data || {};
+    var me = freeconsole.getDeviceId();
+
+    if (state.scores && state.scores[me] !== undefined) {
+      taps = state.scores[me];
+      scoreEl.textContent = taps;
+    }
+    if (state.phase === "over") {
+      over = true;
+      document.body.classList.add("over");
+      var isWinner = state.winner === me;
+      statusEl.textContent = isWinner ? "You win! 🎉" : "Game over";
+      pad.textContent = isWinner ? "WINNER" : "DONE";
+      pad.disabled = true;
+    }
+  };
+})();
+</script>
+</body>
+</html>

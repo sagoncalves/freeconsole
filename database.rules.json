@@ -1,0 +1,127 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+
+    "rooms": {
+      "$roomCode": {
+        // Room codes are exactly 4 chars from ROOM_CODE_ALPHABET (see functions/index.js).
+        // Reads require auth and an existing room, so probing arbitrary codes still needs a
+        // valid anonymous session and only reveals whether a room exists.
+        ".read": "auth != null && $roomCode.matches(/^[A-Z0-9]{4}$/) && data.exists()",
+        ".write": false,
+
+        "createdAt": { ".write": false },
+
+        // The URL every device should be on. This is the whole navigation state machine:
+        // navigateTo() writes it, navigateHome() resets it to the store, and every device
+        // follows. There is no separate "phase" - being at the store IS the lobby.
+        //
+        // Writable by any device holding a slot. AirConsole lets any device call
+        // navigateTo(); in practice only the master controller's UI offers it, but the
+        // platform does not enforce that, and neither do we.
+        "home": {
+          ".write": "auth != null && root.child('rooms').child($roomCode).child('uids').child(auth.uid).exists()",
+          ".validate": "newData.isString() && newData.val().length <= 500 && (newData.val().matches(/^\\/[^\\/].*/) || newData.val().matches(/^https:\\/\\/.+/))"
+        },
+
+        // uid -> device slot. Written once when a device claims a slot and never changed,
+        // so a device keeps the same device_id across disconnect/reconnect for the life of
+        // the room - matching AirConsole, where "devices keep the same device id when they
+        // disconnect and reconnect".
+        "uids": {
+          "$uid": {
+            // A device claims its own key, only into a room that actually exists:
+            // createdAt is written by createRoom (admin SDK) and is never client-writable,
+            // so its presence proves the room was opened server-side.
+            //
+            // Three permitted transitions, and no others:
+            //   - claim: absent -> a number
+            //   - release: a number -> null (used to back out of a slot collision)
+            //   - idempotent re-write of the same number
+            // Crucially a device can never CHANGE its number to a different one, so slots
+            // stay stable and nobody can promote themselves to master by taking slot 1.
+            ".write": "auth != null && $uid === auth.uid && root.child('rooms').child($roomCode).child('createdAt').exists() && (!data.exists() || !newData.exists() || newData.val() === data.val())",
+            ".validate": "newData.isNumber() && newData.val() >= 0"
+          }
+        },
+
+        // Devices by slot. Slot 0 is always the screen (AirConsole.SCREEN).
+        //
+        // There is deliberately NO stored host/master field: the master controller is the
+        // lowest-numbered connected controller, derived on read. That makes migration free -
+        // when the master leaves, the next slot simply is the master, with no write, no
+        // race and no rule.
+        "devices": {
+          "$slot": {
+            // A device owns its own slot. $slot is a string key, so compare against the
+            // string form of the uid's assigned slot number.
+            ".write": "auth != null && $slot === root.child('rooms').child($roomCode).child('uids').child(auth.uid).val() + ''",
+
+            // Which URL this device is currently on. getControllerDeviceIds() filters on
+            // this, so onConnect/onDisconnect mean "entered/left this location".
+            "location":  { ".validate": "newData.isString() && newData.val().length <= 500" },
+            "connected": { ".validate": "newData.isBoolean()" },
+            "joinedAt":  { ".validate": "newData.isNumber()" },
+            // Nullable: the screen has no nickname, and a controller clearing its name
+            // writes null too. A .validate that only accepted strings rejected the whole
+            // presence update, which took the onDisconnect handler down with it.
+            "nickname":  { ".validate": "newData.val() === null || (newData.isString() && newData.val().length <= 24)" },
+
+            // Custom DeviceState: free-form per-device data readable by every device.
+            // This is the sync primitive - late joiners read it rather than needing a
+            // replayed broadcast.
+            "custom": {},
+
+            // Assigned by setActivePlayers(), which is screen-only in the AirConsole model.
+            // Granted here as a narrow exception to slot ownership: the screen may write
+            // THIS field on any device, and nothing else. A controller can still set its
+            // own, which is harmless - the screen overwrites it on the next assignment.
+            "playerNumber": {
+              ".write": "auth != null && root.child('rooms').child($roomCode).child('uids').child(auth.uid).val() === 0",
+              ".validate": "newData.val() === null || newData.isNumber()"
+            },
+
+            "$other": { ".validate": false }
+          }
+        },
+
+        // Messages: append-only fan-out. Each entry names its sender and optional
+        // recipient; clients filter by location the way AirConsole does.
+        "messages": {
+          "$msgId": {
+            // Any device in the room may add a message, or delete one (used to trim the
+            // trail - messages are transient, and a 10Hz game would otherwise grow the
+            // list without bound). What nobody can do is EDIT an existing message, so a
+            // delivered message can't be rewritten after the fact.
+            ".write": "auth != null && root.child('rooms').child($roomCode).child('uids').child(auth.uid).exists() && (!data.exists() || !newData.exists())",
+            "from": { ".validate": "newData.isNumber() && newData.val() === root.child('rooms').child($roomCode).child('uids').child(auth.uid).val()" },
+            "to":   { ".validate": "newData.val() === null || newData.isNumber()" },
+            "data": {},
+            "at":   { ".validate": "newData.isNumber()" },
+            "$other": { ".validate": false }
+          }
+        },
+
+        // WebRTC signalling. Peers swap SDP offers/answers and ICE candidates here to
+        // establish a direct connection; once it is up, gameplay stops touching the
+        // database entirely. Same membership check as messages - only devices in the room
+        // may read or write - and entries are disposable, so anyone may delete them.
+        "signals": {
+          "$toSlot": {
+            "$signalId": {
+              ".write": "auth != null && root.child('rooms').child($roomCode).child('uids').child(auth.uid).exists()",
+              "from": { ".validate": "newData.isNumber() && newData.val() === root.child('rooms').child($roomCode).child('uids').child(auth.uid).val()" },
+              "kind": { ".validate": "newData.isString() && newData.val().length < 16" },
+              "payload": { ".validate": "newData.isString() && newData.val().length < 8192" },
+              "at": { ".validate": "newData.isNumber()" },
+              "$other": { ".validate": false }
+            }
+          }
+        },
+
+        "$other": { ".validate": false }
+      }
+    }
+  }
+}

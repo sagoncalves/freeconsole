@@ -1,0 +1,1694 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Gambit — Screen</title>
+<link rel="stylesheet" href="/console.css" />
+<style>
+  body { height: 100vh; overflow: hidden; margin: 0; background: #05060d; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+
+  /* Two seat plates, one per side, lit for whoever is to move. */
+  #seats {
+    position: fixed; top: 18px; left: 50%; transform: translateX(-50%);
+    z-index: 8; display: flex; gap: 14px; align-items: center;
+    pointer-events: none;
+  }
+  .seat {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 14px 8px 8px; border-radius: 14px;
+    background: rgba(10,12,24,.72); border: 1px solid var(--line);
+    backdrop-filter: blur(8px);
+    transition: border-color .3s, box-shadow .3s, opacity .3s;
+    opacity: .5;
+  }
+  .seat.active { opacity: 1; border-color: var(--line-bright); box-shadow: 0 0 26px rgba(53,240,224,.22); }
+  .seat-av {
+    width: 34px; height: 34px; border-radius: 10px; flex-shrink: 0;
+    display: grid; place-items: center;
+    font-family: var(--font-mono); font-size: 14px; font-weight: 700; color: #05060d;
+  }
+  .seat-txt { display: flex; flex-direction: column; gap: 2px; line-height: 1; }
+  .seat-side {
+    font-family: var(--font-mono); font-size: 9.5px; letter-spacing: .16em;
+    text-transform: uppercase; color: var(--text-faint);
+  }
+  .seat-name {
+    font-size: 14px; color: var(--text);
+    max-width: 15ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .seat-taken { color: var(--text-faint); font-style: italic; }
+  #vs { font-family: var(--font-mono); font-size: 11px; color: var(--text-faint); }
+
+  /* Captured material, mirrored either side of the seats. */
+  .taken { display: flex; gap: 2px; font-size: 17px; line-height: 1; min-height: 17px; max-width: 190px; flex-wrap: wrap; }
+
+  /* Move banner: what just happened, in algebraic. */
+  #banner {
+    position: fixed; bottom: 26px; left: 50%; transform: translateX(-50%);
+    z-index: 8; pointer-events: none; text-align: center;
+  }
+  #move {
+    font-family: var(--font-mono); font-size: 26px; letter-spacing: .06em;
+    color: var(--glow); text-shadow: var(--bloom-glow);
+    opacity: 0; transition: opacity .4s;
+  }
+  #move.show { opacity: 1; }
+  #hint { font-size: 13px; color: var(--text-dim); margin-top: 6px; }
+
+  /* CHECK flash. */
+  #check {
+    position: fixed; top: 50%; left: 50%; z-index: 9;
+    transform: translate(-50%,-50%); pointer-events: none;
+    font-family: var(--font-display); font-weight: 800;
+    font-size: clamp(48px, 11vw, 150px); letter-spacing: .08em;
+    color: var(--hot); text-shadow: var(--bloom-hot);
+    opacity: 0;
+  }
+  #check.fire { animation: checkPop 1.15s ease-out; }
+  @keyframes checkPop {
+    0%   { opacity: 0; transform: translate(-50%,-50%) scale(.5); }
+    18%  { opacity: 1; transform: translate(-50%,-50%) scale(1.12); }
+    62%  { opacity: 1; transform: translate(-50%,-50%) scale(1); }
+    100% { opacity: 0; transform: translate(-50%,-50%) scale(1.3); }
+  }
+
+  .overlay {
+    position: fixed; inset: 0; z-index: 10;
+    display: none; align-items: center; justify-content: center;
+    flex-direction: column; gap: 14px; text-align: center;
+    background: rgba(5,6,13,.9); backdrop-filter: blur(4px);
+  }
+  .overlay.show { display: flex; }
+  .overlay h2 { font-size: clamp(28px, 5.5vw, 66px); line-height: 1; margin: 0; }
+  .overlay .sub { color: var(--text-dim); font-size: clamp(13px, 1.7vw, 20px); }
+  .eyebrow {
+    font-family: var(--font-mono); font-size: 11px; letter-spacing: .2em;
+    text-transform: uppercase; color: var(--text-faint);
+  }
+  .win { color: var(--glow); text-shadow: var(--bloom-glow); }
+  .ring {
+    width: 42px; height: 42px; border-radius: 50%;
+    border: 2px solid rgba(53,240,224,.2); border-top-color: var(--glow);
+    animation: spin 1s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .lobby-seats { display: flex; gap: 26px; margin-top: 10px; }
+</style>
+</head>
+<body>
+
+<div id="seats">
+  <div class="taken" id="takenByBlack"></div>
+  <div class="seat" id="seatW">
+    <div class="seat-av" id="avW">1</div>
+    <div class="seat-txt">
+      <div class="seat-side">White</div>
+      <div class="seat-name seat-taken" id="nameW">open seat</div>
+    </div>
+  </div>
+  <div id="vs">VS</div>
+  <div class="seat" id="seatB">
+    <div class="seat-av" id="avB">2</div>
+    <div class="seat-txt">
+      <div class="seat-side">Black</div>
+      <div class="seat-name seat-taken" id="nameB">open seat</div>
+    </div>
+  </div>
+  <div class="taken" id="takenByWhite"></div>
+</div>
+
+<div id="banner">
+  <div id="move"></div>
+  <div id="hint"></div>
+</div>
+
+<div id="check">CHECK</div>
+
+<div class="overlay show" id="lobby">
+  <div class="ring"></div>
+  <div class="eyebrow">Gambit</div>
+  <h2>First-person chess</h2>
+  <div class="sub" id="lobbyNote">Waiting for two players…</div>
+</div>
+
+<div class="overlay" id="gameover">
+  <div class="eyebrow" id="overEyebrow">Checkmate</div>
+  <h2 class="win" id="overTitle"></h2>
+  <div class="sub" id="overNote">New game starting…</div>
+</div>
+
+<script src="/sdk.js"></script>
+<script type="module">
+/**
+ * Gambit — screen.
+ *
+ * The screen owns the game completely: it holds the only real board, validates every
+ * move, and animates the result. Phones send intent ("I picked up e2", "put it on e4")
+ * and are told what the board looks like afterwards.
+ *
+ * The camera sits at the board's edge, at the eye height of whoever is to move, looking
+ * down the ranks — so a player sees the position from behind their own pieces. On a turn
+ * change it flies around the board to the other seat. Everything moving on screen is
+ * driven by easing functions over a normalised t, not by keyframed clips: pieces arc,
+ * knights hop, captured pieces burst into their own parts and the dust that settles on
+ * the square is a decal that fades over the following minute.
+ */
+import * as THREE from "/vendor/three.js?v=5";
+import {
+  initialState, legalMoves, findMove, applyMove, outcome,
+  squareName, colorOf, kindOf, opposite, findKing,
+  WHITE, BLACK, fileOf, rankOf, idx,
+} from "/games/chess3d/chess.js?v=1";
+import { buildPiece, PIECE_HEIGHT } from "/games/chess3d/pieces.js?v=1";
+
+const freeconsole = new FreeConsole();
+
+/**
+ * Diagnostic logging for the connect / reconnect path. Prefixed [GS] (screen) so a
+ * console showing both pages can be filtered, and timestamped from load so the ORDER
+ * and GAPS between events are visible — which is what matters when the bug is a race
+ * between the shell handshake and the screen reply.
+ */
+const T0 = Date.now();
+const LOG = (...args) => console.log(
+  "[GS +" + String(Date.now() - T0).padStart(5) + "ms]",
+  // Objects are serialised here so they survive as readable text in a console
+  // transcript, where a live object would render as an unhelpful "Object".
+  ...args.map((a) => (a && typeof a === "object" ? JSON.stringify(a) : a))
+);
+LOG("screen script start");
+window.addEventListener("error", (e) => LOG("WINDOW ERROR", e.message, e.filename + ":" + e.lineno));
+
+const TEST = new URLSearchParams(location.search).get("test") === "1";
+
+/** Anything that talks to the shell is wrapped, so test mode runs with no shell at all. */
+function safeCall(fn, fallback) {
+  try { return fn(); } catch (err) { return fallback; }
+}
+
+/* ------------------------------------------------------------------ tuning */
+
+const SQ = 1;               // one square is one world unit
+const BOARD = SQ * 8;
+const HALF = BOARD / 2;
+
+// Eye height and standoff for the first-person camera.
+//
+// These are the numbers that decide whether the game is playable. Sitting at true eye
+// height right at the board edge is the most dramatic framing and the least usable one:
+// your own back rank fills the screen and the far half of the board is a few pixels tall.
+// So the eye is lifted to roughly a standing player's view and pulled back off the edge —
+// still unmistakably from behind your own pieces, but with all 64 squares legible.
+const EYE = { height: 4.6, back: 4.2 };
+
+const MOVE_MS = 620;         // a piece sliding to its destination
+const HOP_MS = 760;          // knights, which arc higher
+const SWING_MS = 1500;       // camera flight between seats
+const SHATTER_MS = 2600;     // fragments flying, bouncing, then sinking
+const DUST_FADE_MS = 52000;  // how long a death mark lingers on its square
+
+/* ------------------------------------------------------------------- scene */
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x05060d);
+// Fog starts beyond the far edge of the board, so it darkens the surroundings without
+// ever dimming the opponent's back rank — which is exactly the rank you need to read.
+scene.fog = new THREE.Fog(0x05060d, 20, 46);
+
+const camera = new THREE.PerspectiveCamera(52, 1, 0.05, 200);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.08;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.appendChild(renderer.domElement);
+
+function resize() {
+  const w = window.innerWidth, h = window.innerHeight;
+  renderer.setSize(w, h);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+window.addEventListener("resize", resize);
+resize();
+
+/* ------------------------------------------------------------------ lights */
+
+scene.add(new THREE.AmbientLight(0x2a3350, 1.5));
+
+// Key light hangs over the board and casts the shadows that sell the 3D.
+const key = new THREE.DirectionalLight(0xdfe9ff, 2.4);
+key.position.set(4.5, 11, 3.5);
+key.castShadow = true;
+key.shadow.mapSize.set(2048, 2048);
+key.shadow.camera.near = 1;
+key.shadow.camera.far = 30;
+key.shadow.camera.left = -7;
+key.shadow.camera.right = 7;
+key.shadow.camera.top = 7;
+key.shadow.camera.bottom = -7;
+key.shadow.bias = -0.0006;
+key.shadow.normalBias = 0.02;
+scene.add(key);
+
+// Two rim lights in the platform's cyan and magenta, one behind each side, so the pieces
+// separate from the dark background even where the key light does not reach.
+const rimW = new THREE.PointLight(0x35f0e0, 34, 22, 2);
+rimW.position.set(-2.5, 2.4, 6.6);
+scene.add(rimW);
+const rimB = new THREE.PointLight(0xff2e88, 34, 22, 2);
+rimB.position.set(2.5, 2.4, -6.6);
+scene.add(rimB);
+
+/* ------------------------------------------------------------------ board */
+
+/**
+ * World position of a square's centre.
+ *
+ * Board indices run in reading order from a8, so file 0 (the a-file) is at -x and rank
+ * index 0 (rank 8, Black's home) is at -z. White therefore sits at +z and looks toward
+ * -z, which is what seatFor() below assumes.
+ */
+function squarePos(i) {
+  return new THREE.Vector3(
+    (fileOf(i) - 3.5) * SQ,
+    0,
+    (rankOf(i) - 3.5) * SQ
+  );
+}
+
+const boardGroup = new THREE.Group();
+scene.add(boardGroup);
+
+// Squares. Each is its own mesh so it can be tinted for selection and legal-move hints
+// without a texture atlas or a shader.
+const squareMeshes = [];
+const squareGeo = new THREE.BoxGeometry(SQ, 0.12, SQ);
+for (let i = 0; i < 64; i++) {
+  const light = (fileOf(i) + rankOf(i)) % 2 === 0;
+  const mat = new THREE.MeshStandardMaterial({
+    color: light ? 0x39456b : 0x141a2e,
+    roughness: light ? 0.62 : 0.72,
+    metalness: 0.15,
+  });
+  const mesh = new THREE.Mesh(squareGeo, mat);
+  mesh.position.copy(squarePos(i)).setY(-0.06);
+  mesh.receiveShadow = true;
+  mesh.userData.base = mat.color.clone();
+  boardGroup.add(mesh);
+  squareMeshes.push(mesh);
+}
+
+// Plinth under the board, plus a rim that catches the light.
+const plinth = new THREE.Mesh(
+  new THREE.BoxGeometry(BOARD + 0.9, 0.5, BOARD + 0.9),
+  new THREE.MeshStandardMaterial({ color: 0x0a0c18, roughness: 0.85, metalness: 0.2 })
+);
+plinth.position.y = -0.37;
+plinth.receiveShadow = true;
+boardGroup.add(plinth);
+
+// A thin lit edge around the board. Kept very dim on purpose: it is a long bright shape
+// running along the bottom of frame, and at any real emissive strength it out-shouts the
+// pieces it is meant to frame.
+const rim = new THREE.Mesh(
+  new THREE.BoxGeometry(BOARD + 0.42, 0.05, BOARD + 0.42),
+  new THREE.MeshStandardMaterial({
+    color: 0x0a1a22, emissive: 0x35f0e0, emissiveIntensity: 0.045, roughness: 0.6,
+  })
+);
+rim.position.y = -0.115;
+boardGroup.add(rim);
+
+// A dark ground plane far below, so the fog has something to sit against.
+const ground = new THREE.Mesh(
+  new THREE.PlaneGeometry(90, 90),
+  new THREE.MeshStandardMaterial({ color: 0x07090f, roughness: 1 })
+);
+ground.rotation.x = -Math.PI / 2;
+ground.position.y = -0.63;
+ground.receiveShadow = true;
+scene.add(ground);
+
+/* -------------------------------------------------------------- materials */
+
+const MAT = {
+  w: new THREE.MeshStandardMaterial({ color: 0xe8eefc, roughness: 0.34, metalness: 0.28 }),
+  b: new THREE.MeshStandardMaterial({ color: 0x171d33, roughness: 0.38, metalness: 0.42 }),
+};
+// Selected pieces glow; each side gets its own instance so the tint can be animated.
+const MAT_SEL = {
+  w: new THREE.MeshStandardMaterial({
+    color: 0xe8eefc, roughness: 0.3, metalness: 0.3,
+    emissive: 0x35f0e0, emissiveIntensity: 0.55,
+  }),
+  b: new THREE.MeshStandardMaterial({
+    color: 0x1d2440, roughness: 0.34, metalness: 0.44,
+    emissive: 0x35f0e0, emissiveIntensity: 0.55,
+  }),
+};
+
+/* --------------------------------------------------------------- piece set */
+
+/**
+ * Live pieces, keyed by square index. Each entry is
+ * `{ group, kind, color, square, anim }` — `anim` is non-null only while it is moving.
+ */
+let pieceAt = Object.create(null);
+
+function makePiece(kind, color, square) {
+  const group = buildPiece(THREE, kind, MAT[color], 1);
+  group.position.copy(squarePos(square));
+  // A knight is only recognisable in profile — head-on it is a featureless slab. It is
+  // built facing +X, which is across the board, so leaving the yaw alone presents that
+  // profile to both seated players. Turning it to "face the enemy" like a real set would
+  // point the nose at the camera and lose the horse entirely.
+  if (kind === "n") group.rotation.y = color === WHITE ? 0 : Math.PI;
+  scene.add(group);
+  return { group, kind, color, square, anim: null };
+}
+
+function clearPieces() {
+  for (const key of Object.keys(pieceAt)) {
+    scene.remove(pieceAt[key].group);
+  }
+  pieceAt = Object.create(null);
+}
+
+function buildPiecesFrom(board) {
+  clearPieces();
+  for (let i = 0; i < 64; i++) {
+    const p = board[i];
+    if (p) pieceAt[i] = makePiece(kindOf(p), colorOf(p), i);
+  }
+}
+
+/* ------------------------------------------------------------- easing */
+
+const easeInOut = (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
+const easeOut = (t) => 1 - Math.pow(1 - t, 3);
+const easeIn = (t) => t * t * t;
+const clamp01 = (t) => (t < 0 ? 0 : t > 1 ? 1 : t);
+
+/* ------------------------------------------------------ camera: the seats */
+
+/**
+ * Where the camera sits to view from `color`'s side.
+ *
+ * White is at +z looking toward -z. The eye is pulled back off the board edge and lifted,
+ * and the look-at target is the middle of the board a little above the surface — that
+ * combination is what makes it read as a person leaning over the table rather than a
+ * floating orthographic view.
+ */
+/**
+ * The player's own adjustment to their seat, driven from the controller.
+ *
+ * Stored as an orbit around the board's centre rather than as a position, so it survives
+ * the swing to the other side: the same "one step left" means the same thing from either
+ * seat, and the view never ends up somewhere a seat could not be.
+ *
+ * `yaw` is in radians around the board, `lift` raises the eye and steepens the look-down.
+ * Both are eased toward their target every frame, so a tap glides rather than snaps.
+ */
+const VIEW = {
+  yaw: 0, targetYaw: 0,
+  lift: 0, targetLift: 0,
+  YAW_STEP: Math.PI / 10,     // one tap ≈ 18°, so four taps reach a corner view
+  YAW_LIMIT: Math.PI / 2.6,   // short of 90°, so you can never swing behind the opponent
+  LIFT_STEP: 1.5,
+  LIFT_LIMIT: 6.5,            // roughly a top-down view of the whole board
+};
+
+/** Reset the player's adjustment — used when the seat changes hands. */
+function resetView() {
+  VIEW.targetYaw = 0;
+  VIEW.targetLift = 0;
+}
+
+function seatFor(color) {
+  const sign = color === WHITE ? 1 : -1;
+  return {
+    pos: new THREE.Vector3(0, EYE.height, sign * (HALF + EYE.back)),
+    // Aim just past the middle of the board, toward the opponent. Looking at dead centre
+    // wastes the top of the frame on empty space behind the far rank.
+    look: new THREE.Vector3(0, 0.2, sign * -0.9),
+  };
+}
+
+const camPos = seatFor(WHITE).pos.clone();
+const camLook = seatFor(WHITE).look.clone();
+let camSwing = null;   // { from, to, fromLook, toLook, t0, dir }
+let camSide = WHITE;
+
+/**
+ * Fly the camera to the other seat.
+ *
+ * It travels along an arc around the board rather than straight through it: the
+ * intermediate position is the slerp of the two seat angles at a radius that bulges
+ * outward, so the board stays in frame and the move reads as walking around the table.
+ * Direction alternates so consecutive swings do not always sweep the same way.
+ */
+function swingTo(color, atMs) {
+  if (camSide === color && !camSwing) return;
+  const target = seatFor(color);
+  camSwing = {
+    fromPos: camPos.clone(),
+    fromLook: camLook.clone(),
+    toPos: target.pos.clone(),
+    toLook: target.look.clone(),
+    t0: atMs,
+    dir: color === WHITE ? 1 : -1,
+  };
+  camSide = color;
+}
+
+function updateCamera(now, dt) {
+  if (camSwing) {
+    const t = clamp01((now - camSwing.t0) / SWING_MS);
+    const e = easeInOut(t);
+
+    // Interpolate the angle around the board's centre, not the raw position, so the path
+    // curves around the edge. Radius bulges at the midpoint and the eye lifts, which
+    // together look like standing up and walking around.
+    const a0 = Math.atan2(camSwing.fromPos.z, camSwing.fromPos.x);
+    let a1 = Math.atan2(camSwing.toPos.z, camSwing.toPos.x);
+    // Take the short way round, forced onto the chosen side.
+    while (a1 - a0 > Math.PI) a1 -= Math.PI * 2;
+    while (a1 - a0 < -Math.PI) a1 += Math.PI * 2;
+    if (Math.sign(a1 - a0) !== camSwing.dir && Math.abs(a1 - a0) > 0.001) {
+      a1 += Math.PI * 2 * camSwing.dir;
+    }
+
+    const angle = a0 + (a1 - a0) * e;
+    const r0 = Math.hypot(camSwing.fromPos.x, camSwing.fromPos.z);
+    const r1 = Math.hypot(camSwing.toPos.x, camSwing.toPos.z);
+    const bulge = Math.sin(e * Math.PI) * 2.1;
+    const radius = r0 + (r1 - r0) * e + bulge;
+
+    camPos.set(
+      Math.cos(angle) * radius,
+      camSwing.fromPos.y + (camSwing.toPos.y - camSwing.fromPos.y) * e + Math.sin(e * Math.PI) * 1.35,
+      Math.sin(angle) * radius
+    );
+    camLook.lerpVectors(camSwing.fromLook, camSwing.toLook, e);
+
+    if (t >= 1) camSwing = null;
+  }
+
+  // Ease the player's own adjustment toward wherever they last tapped. Easing rather than
+  // jumping means a held button glides the view instead of stepping it, and a tap during
+  // the turn swing blends with it rather than fighting it.
+  const ease = Math.min(1, 4.5 * dt);
+  VIEW.yaw += (VIEW.targetYaw - VIEW.yaw) * ease;
+  VIEW.lift += (VIEW.targetLift - VIEW.lift) * ease;
+
+  // Apply that adjustment as an orbit of the seat position about the board's centre, so
+  // the camera stays the same distance out and keeps looking at the board.
+  const cos = Math.cos(VIEW.yaw), sin = Math.sin(VIEW.yaw);
+  const ox = camPos.x * cos - camPos.z * sin;
+  const oz = camPos.x * sin + camPos.z * cos;
+  // Rising also pulls in slightly, so lifting tends toward a top-down view of the board
+  // rather than drifting off into the distance above the far rank.
+  const pull = 1 - Math.min(VIEW.lift / VIEW.LIFT_LIMIT, 1) * 0.34;
+
+  // A slow breathing sway, so a still position never looks like a frozen render.
+  const sway = now / 1000;
+  camera.position.set(
+    ox * pull + Math.sin(sway * 0.42) * 0.045,
+    camPos.y + VIEW.lift + Math.sin(sway * 0.61) * 0.03,
+    oz * pull + Math.cos(sway * 0.37) * 0.045
+  );
+  camera.lookAt(camLook);
+}
+
+/* ------------------------------------------------------- move animation */
+
+/** Pieces currently mid-flight; drained as each finishes. */
+const moving = [];
+
+/**
+ * True while a move is still resolving.
+ *
+ * `busyUntil` is a time estimate and expires a frame or two BEFORE the arrival callback
+ * commits the move, so anything that only consults the clock can act on a half-applied
+ * position — the piece already lifted from its old square but the board not yet updated.
+ * Checking the animation list as well closes that window.
+ */
+function isBusy() {
+  return performance.now() < busyUntil || moving.length > 0;
+}
+
+/**
+ * Slide (or hop) a piece from one square to another.
+ *
+ * The arc is what makes this feel procedural rather than a lerp: every piece lifts off
+ * the board, and the knight lifts much higher and adds a tumble, so it visibly jumps over
+ * whatever it passed. `onArrive` fires once, at the end.
+ */
+function animateMove(entry, toSquare, opts = {}) {
+  const from = entry.group.position.clone();
+  const to = squarePos(toSquare);
+  const isKnight = entry.kind === "n";
+  const dur = opts.duration || (isKnight ? HOP_MS : MOVE_MS);
+
+  entry.anim = {
+    from, to,
+    t0: performance.now(),
+    dur,
+    lift: isKnight ? 1.5 : 0.42,
+    spin: isKnight ? (Math.random() < 0.5 ? -1 : 1) * 0.55 : 0,
+    baseYaw: entry.group.rotation.y,
+    onArrive: opts.onArrive || null,
+    // Fired partway through, the moment the attacker would touch the piece it is taking,
+    // rather than when it reaches the square's centre. Without this the two pieces slide
+    // fully into each other and the victim only bursts once they are completely
+    // overlapping, which looks like the collision was forgotten.
+    onContact: opts.onContact || null,
+    contactAt: opts.contactAt === undefined ? 1 : opts.contactAt,
+    contactFired: false,
+  };
+  moving.push(entry);
+}
+
+function updateMoving(now) {
+  for (let i = moving.length - 1; i >= 0; i--) {
+    const entry = moving[i];
+    const a = entry.anim;
+    if (!a) { moving.splice(i, 1); continue; }
+
+    const t = clamp01((now - a.t0) / a.dur);
+    const e = easeInOut(t);
+
+    // Contact happens on the eased progress, not the raw clock, so it lands at the point
+    // the piece has visually travelled that far rather than at a fixed time.
+    if (a.onContact && !a.contactFired && e >= a.contactAt) {
+      a.contactFired = true;
+      a.onContact();
+    }
+
+    entry.group.position.lerpVectors(a.from, a.to, e);
+    // Arc: a sine bump peaks at the midpoint. Squashing it slightly toward the start
+    // makes the landing feel weightier than the take-off.
+    entry.group.position.y = a.from.y + (a.to.y - a.from.y) * e + Math.sin(e * Math.PI) * a.lift;
+
+    if (a.spin) entry.group.rotation.y = a.baseYaw + Math.sin(e * Math.PI) * a.spin;
+    // Lean into the direction of travel, easing back to upright on landing.
+    const dir = new THREE.Vector3().subVectors(a.to, a.from);
+    const tilt = Math.sin(e * Math.PI) * 0.16;
+    entry.group.rotation.z = -dir.x * tilt * 0.5;
+    entry.group.rotation.x = dir.z * tilt * 0.5;
+
+    if (t >= 1) {
+      entry.group.position.copy(a.to);
+      entry.group.rotation.x = 0;
+      entry.group.rotation.z = 0;
+      entry.group.rotation.y = a.baseYaw;
+      const done = a.onArrive;
+      entry.anim = null;
+      moving.splice(i, 1);
+      if (done) done();
+    }
+  }
+}
+
+/* ------------------------------------------------- death: shatter and dust */
+
+/** Fragments in flight, and the dust marks they leave behind. */
+const shards = [];
+const dustMarks = [];
+
+/**
+ * A shared circular gradient texture, used for both the dust marks on the board and the
+ * puff of particles at the moment of the break. Drawn once into a canvas rather than
+ * loaded, so there is still no asset to ship.
+ */
+const softDisc = (() => {
+  const c = document.createElement("canvas");
+  c.width = c.height = 128;
+  const g = c.getContext("2d");
+  const grad = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+  grad.addColorStop(0, "rgba(255,255,255,1)");
+  grad.addColorStop(0.45, "rgba(255,255,255,0.55)");
+  grad.addColorStop(1, "rgba(255,255,255,0)");
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 128, 128);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+})();
+
+/**
+ * Break a piece apart.
+ *
+ * Every mesh in the piece's group becomes an independent fragment with its own velocity
+ * and spin, thrown outward from the impact and away from the attacker. They fall under
+ * gravity, bounce once off the board with damping, then sink through it and fade —
+ * leaving a dust mark on the square where the piece stood.
+ */
+function shatter(entry, impactFrom) {
+  const origin = entry.group.position.clone();
+  // Direction the blow came from, so fragments spray away from the attacker rather than
+  // symmetrically — a symmetric burst reads as an explosion, this reads as a hit.
+  const away = new THREE.Vector3().subVectors(origin, impactFrom || origin).setY(0);
+  if (away.lengthSq() < 0.0001) away.set(0, 0, 1);
+  away.normalize();
+
+  const parts = [];
+  entry.group.traverse((o) => { if (o.isMesh) parts.push(o); });
+
+  for (const mesh of parts) {
+    // Reparent to the scene, preserving where the fragment actually was.
+    const worldPos = new THREE.Vector3();
+    mesh.getWorldPosition(worldPos);
+    const worldQuat = new THREE.Quaternion();
+    mesh.getWorldQuaternion(worldQuat);
+
+    entry.group.remove(mesh);
+    mesh.position.copy(worldPos);
+    mesh.quaternion.copy(worldQuat);
+    // Own the material so it can fade independently of the rest of the set.
+    mesh.material = mesh.material.clone();
+    mesh.material.transparent = true;
+    scene.add(mesh);
+
+    // Higher fragments get more energy, so a piece topples from the top down.
+    const heightFactor = 0.35 + worldPos.y * 0.9;
+    const spread = 0.55;
+    shards.push({
+      mesh,
+      vel: new THREE.Vector3(
+        away.x * (0.9 + Math.random() * 1.5) + (Math.random() - 0.5) * spread,
+        1.4 + Math.random() * 2.6 * heightFactor,
+        away.z * (0.9 + Math.random() * 1.5) + (Math.random() - 0.5) * spread
+      ),
+      spin: new THREE.Vector3(
+        (Math.random() - 0.5) * 11,
+        (Math.random() - 0.5) * 11,
+        (Math.random() - 0.5) * 11
+      ),
+      t0: performance.now(),
+      bounced: false,
+      restY: 0.04 + Math.random() * 0.05,
+    });
+  }
+
+  scene.remove(entry.group);
+  puff(origin, entry.color);
+  addDust(entry.square, entry.color);
+}
+
+/** A short-lived cloud of motes at the moment of the break. */
+function puff(origin, color) {
+  const count = 26;
+  const positions = new Float32Array(count * 3);
+  const velocities = [];
+  for (let i = 0; i < count; i++) {
+    positions[i * 3] = origin.x;
+    positions[i * 3 + 1] = origin.y + 0.25 + Math.random() * 0.5;
+    positions[i * 3 + 2] = origin.z;
+    velocities.push(new THREE.Vector3(
+      (Math.random() - 0.5) * 1.9,
+      0.5 + Math.random() * 1.5,
+      (Math.random() - 0.5) * 1.9
+    ));
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  const mat = new THREE.PointsMaterial({
+    size: 0.2,
+    map: softDisc,
+    color: color === WHITE ? 0xd8e2f8 : 0x7d88ad,
+    transparent: true,
+    opacity: 0.85,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  });
+  const points = new THREE.Points(geo, mat);
+  scene.add(points);
+  puffs.push({ points, velocities, t0: performance.now(), life: 1500 });
+}
+const puffs = [];
+
+/**
+ * The mark left on a square where a piece died.
+ *
+ * It is a flat disc laid just above the square, in the dead piece's colour, that fades
+ * over the following minute — so a glance at the board shows not just the position but
+ * where the fighting has been. Marks stack: dying twice on a square darkens it further.
+ */
+function addDust(square, color) {
+  const geo = new THREE.CircleGeometry(SQ * 0.46, 30);
+  const mat = new THREE.MeshBasicMaterial({
+    map: softDisc,
+    color: color === WHITE ? 0xbfcbe8 : 0x5b6690,
+    transparent: true,
+    opacity: 0,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.rotation.x = -Math.PI / 2;
+  mesh.position.copy(squarePos(square)).setY(0.012 + dustMarks.length * 0.0012);
+  scene.add(mesh);
+  dustMarks.push({ mesh, t0: performance.now(), square });
+}
+
+function updateShards(now, dt) {
+  const GRAVITY = 9.4;
+  for (let i = shards.length - 1; i >= 0; i--) {
+    const s = shards[i];
+    const age = now - s.t0;
+
+    s.vel.y -= GRAVITY * dt;
+    s.mesh.position.addScaledVector(s.vel, dt);
+    s.mesh.rotation.x += s.spin.x * dt;
+    s.mesh.rotation.y += s.spin.y * dt;
+    s.mesh.rotation.z += s.spin.z * dt;
+
+    // One bounce off the board, then it settles and slides to a stop.
+    if (s.mesh.position.y < s.restY && s.vel.y < 0) {
+      if (!s.bounced) {
+        s.bounced = true;
+        s.mesh.position.y = s.restY;
+        s.vel.y = Math.abs(s.vel.y) * 0.32;
+        s.vel.x *= 0.55;
+        s.vel.z *= 0.55;
+        s.spin.multiplyScalar(0.4);
+      } else {
+        s.mesh.position.y = s.restY;
+        s.vel.set(s.vel.x * 0.9, 0, s.vel.z * 0.9);
+        s.spin.multiplyScalar(0.9);
+      }
+    }
+
+    // Fade out over the last third of the life, then sink through the board.
+    const t = age / SHATTER_MS;
+    if (t > 0.62) {
+      const f = (t - 0.62) / 0.38;
+      s.mesh.material.opacity = 1 - f;
+      s.mesh.position.y -= f * dt * 0.8;
+    }
+
+    if (t >= 1) {
+      scene.remove(s.mesh);
+      s.mesh.geometry.dispose?.();
+      s.mesh.material.dispose?.();
+      shards.splice(i, 1);
+    }
+  }
+
+  for (let i = puffs.length - 1; i >= 0; i--) {
+    const p = puffs[i];
+    const t = (now - p.t0) / p.life;
+    const arr = p.points.geometry.attributes.position.array;
+    for (let k = 0; k < p.velocities.length; k++) {
+      const v = p.velocities[k];
+      v.y -= 2.6 * dt;
+      v.multiplyScalar(0.97);
+      arr[k * 3] += v.x * dt;
+      arr[k * 3 + 1] += v.y * dt;
+      arr[k * 3 + 2] += v.z * dt;
+    }
+    p.points.geometry.attributes.position.needsUpdate = true;
+    p.points.material.opacity = 0.85 * (1 - t);
+    if (t >= 1) {
+      scene.remove(p.points);
+      p.points.geometry.dispose();
+      p.points.material.dispose();
+      puffs.splice(i, 1);
+    }
+  }
+
+  for (let i = dustMarks.length - 1; i >= 0; i--) {
+    const d = dustMarks[i];
+    const age = now - d.t0;
+    // Bloom in quickly as the fragments land, then fade slowly.
+    const fadeIn = clamp01(age / 700);
+    const life = clamp01(age / DUST_FADE_MS);
+    d.mesh.material.opacity = 0.44 * fadeIn * (1 - life);
+    if (life >= 1) {
+      scene.remove(d.mesh);
+      d.mesh.geometry.dispose();
+      d.mesh.material.dispose();
+      dustMarks.splice(i, 1);
+    }
+  }
+}
+
+/* ---------------------------------------------------- square highlighting */
+
+/**
+ * Which squares are lit, and why. Set from the controller's selection so the player at
+ * the table sees exactly what the player holding the phone is considering.
+ */
+let highlight = { from: null, targets: [], captures: [], check: null, lastMove: null };
+
+const HL_COLORS = {
+  from: new THREE.Color(0x35f0e0),
+  target: new THREE.Color(0x1f7d76),
+  capture: new THREE.Color(0xff2e88),
+  check: new THREE.Color(0xff2e88),
+  last: new THREE.Color(0x3a4a35),
+};
+
+/**
+ * Repaint every square from `highlight`. Called on change, and the pulse below is
+ * applied on top of the result each frame.
+ */
+function paintSquares() {
+  for (let i = 0; i < 64; i++) {
+    const mesh = squareMeshes[i];
+    const base = mesh.userData.base;
+    let color = base;
+    let emissive = 0;
+
+    if (highlight.lastMove && (i === highlight.lastMove.from || i === highlight.lastMove.to)) {
+      color = base.clone().lerp(HL_COLORS.last, 0.5);
+    }
+    if (highlight.targets.includes(i)) {
+      color = base.clone().lerp(HL_COLORS.target, 0.72);
+      emissive = 0.35;
+    }
+    if (highlight.captures.includes(i)) {
+      color = base.clone().lerp(HL_COLORS.capture, 0.62);
+      emissive = 0.5;
+    }
+    if (i === highlight.check) {
+      color = base.clone().lerp(HL_COLORS.check, 0.8);
+      emissive = 0.7;
+    }
+    if (i === highlight.from) {
+      color = base.clone().lerp(HL_COLORS.from, 0.85);
+      emissive = 0.8;
+    }
+
+    mesh.material.color.copy(color);
+    mesh.material.emissive.copy(color);
+    mesh.material.emissiveIntensity = emissive;
+    mesh.userData.pulse = emissive;
+  }
+}
+
+/** Markers floating over each legal destination, so hints read from the low camera. */
+const markerGroup = new THREE.Group();
+scene.add(markerGroup);
+
+function rebuildMarkers() {
+  for (const child of markerGroup.children.slice()) {
+    markerGroup.remove(child);
+    child.geometry.dispose();
+    child.material.dispose();
+  }
+
+  // A quiet disc for an empty destination; a ring for a capture, sized to encircle the
+  // piece already standing there.
+  for (const sq of highlight.targets) {
+    const m = new THREE.Mesh(
+      new THREE.CircleGeometry(SQ * 0.17, 24),
+      new THREE.MeshBasicMaterial({ color: 0x35f0e0, transparent: true, opacity: 0.62, depthWrite: false })
+    );
+    m.rotation.x = -Math.PI / 2;
+    m.position.copy(squarePos(sq)).setY(0.03);
+    markerGroup.add(m);
+  }
+  for (const sq of highlight.captures) {
+    const m = new THREE.Mesh(
+      new THREE.RingGeometry(SQ * 0.36, SQ * 0.46, 28),
+      new THREE.MeshBasicMaterial({ color: 0xff2e88, transparent: true, opacity: 0.8, depthWrite: false })
+    );
+    m.rotation.x = -Math.PI / 2;
+    m.position.copy(squarePos(sq)).setY(0.03);
+    markerGroup.add(m);
+  }
+}
+
+/** Set the selection shown on screen, from a controller's pick. */
+function setSelection(from) {
+  // Only the side to move can have a selection, and only on their own piece.
+  if (from === null || from === undefined ||
+      colorOf(state.board[from]) !== state.turn) {
+    highlight.from = null;
+    highlight.targets = [];
+    highlight.captures = [];
+  } else {
+    const moves = legalMoves(state, from);
+    highlight.from = from;
+    highlight.targets = [];
+    highlight.captures = [];
+    for (const m of moves) {
+      // A promotion generates four moves onto the same square; show it once.
+      const list = (state.board[m.to] || m.enPassant !== undefined)
+        ? highlight.captures : highlight.targets;
+      if (!list.includes(m.to)) list.push(m.to);
+    }
+  }
+
+  // Glow the selected piece itself, and drop the glow from whatever was selected before.
+  for (const key of Object.keys(pieceAt)) {
+    const p = pieceAt[key];
+    const selected = highlight.from !== null && p.square === highlight.from;
+    const want = selected ? MAT_SEL[p.color] : MAT[p.color];
+    p.group.traverse((o) => { if (o.isMesh) o.material = want; });
+  }
+
+  paintSquares();
+  rebuildMarkers();
+}
+
+/* -------------------------------------------------------------- game state */
+
+let state = initialState();
+let phase = "lobby";           // lobby | playing | over
+let seats = { w: null, b: null };   // device id per side
+let takenPieces = { w: [], b: [] }; // pieces each side has captured
+let busyUntil = 0;             // input is ignored while an animation is resolving
+
+const GLYPH = {
+  wk: "♔", wq: "♕", wr: "♖", wb: "♗", wn: "♘", wp: "♙",
+  bk: "♚", bq: "♛", br: "♜", bb: "♝", bn: "♞", bp: "♟",
+};
+
+/**
+ * Play a validated move: animate it, then commit the new state.
+ *
+ * Order matters. The capture is resolved at the moment the attacker lands, not when it
+ * starts moving — so the victim is standing there right up until it is hit, which is what
+ * makes the shatter read as an impact.
+ */
+function playMove(move) {
+  const before = state;
+  const next = applyMove(before, move);
+  const info = next.last;
+
+  const mover = pieceAt[move.from];
+  if (!mover) return;   // desynced; the board broadcast below will resync the phones
+
+  // Never start a move on top of a running one. The busy window above is the normal
+  // guard, but it is time-based and therefore approximate; this is the one that actually
+  // protects the piece table. Overlapping moves double-handle the piece in flight and
+  // silently drop it from the board.
+  if (mover.anim || moving.length > 0) return;
+
+  busyUntil = performance.now() + (mover.kind === "n" ? HOP_MS : MOVE_MS) + 260;
+
+  // Clear the selection glow before anything moves.
+  highlight.from = null;
+  highlight.targets = [];
+  highlight.captures = [];
+  mover.group.traverse((o) => { if (o.isMesh) o.material = MAT[mover.color]; });
+
+  delete pieceAt[move.from];
+  const victim = info.captured ? pieceAt[info.captureSquare] : null;
+  if (victim) delete pieceAt[info.captureSquare];
+
+  // A castle animates two pieces at once, and the position is only really "arrived" when
+  // both have landed. Counting them and committing on the last arrival stops the state
+  // being adopted while the rook is still in the air — which left the piece table
+  // momentarily disagreeing with the board.
+  let pending = 1 + (info.rookMove ? 1 : 0);
+  const arrived = () => { if (--pending === 0) commit(next); };
+
+  animateMove(mover, move.to, {
+    // Break the victim just before the attacker would pass through it. Two pieces are
+    // each roughly a third of a square wide, so contact is around 70% of the way across —
+    // early enough that they never visibly interpenetrate.
+    contactAt: victim ? 0.68 : 1,
+    onContact: victim ? () => {
+      shatter(victim, mover.group.position.clone());
+      takenPieces[info.color].push(info.captured);
+      renderTaken();
+    } : null,
+    onArrive: () => {
+      mover.square = move.to;
+      pieceAt[move.to] = mover;
+
+      // Promotion swaps the geometry in place, with a flare of the square beneath.
+      if (info.promo) {
+        scene.remove(mover.group);
+        const promoted = makePiece(info.promo, info.color, move.to);
+        pieceAt[move.to] = promoted;
+      }
+
+      arrived();
+    },
+  });
+
+  // The castling rook travels at the same time as the king.
+  if (info.rookMove) {
+    const rook = pieceAt[info.rookMove.from];
+    if (rook) {
+      delete pieceAt[info.rookMove.from];
+      animateMove(rook, info.rookMove.to, {
+        onArrive: () => {
+          rook.square = info.rookMove.to;
+          pieceAt[info.rookMove.to] = rook;
+          arrived();
+        },
+      });
+    } else {
+      // The rook was missing from the table (desync); do not wait for an arrival that
+      // will never come, or the game would never commit and every phone would lock up.
+      pending--;
+    }
+  }
+}
+
+/** Adopt the new position once its animation has finished, and tell everyone. */
+function commit(next) {
+  state = next;
+
+  const info = state.last;
+  highlight.lastMove = { from: info.from, to: info.to };
+  highlight.check = null;
+
+  const result = outcome(state);
+
+  if (state.check) {
+    highlight.check = findKing(state, state.turn);
+    flashCheck();
+  }
+
+  paintSquares();
+  rebuildMarkers();
+  showMove(info, result);
+
+  if (result) {
+    endGame(result);
+    return;
+  }
+
+  // Hand the view to whoever is now to move — but not while a piece is still coming
+  // apart. Swinging the camera during the shatter drags the debris across frame and the
+  // kill is never actually seen, so a capture holds the view until the fragments have
+  // essentially settled.
+  const holdMs = info.captured ? SHATTER_MS * 0.62 : 0;
+  const nextTurn = state.turn;
+
+  // The seat is changing hands, so drop the previous player's camera adjustment — the new
+  // player should start from their own square-on view, not inherit a corner angle someone
+  // else chose.
+  resetView();
+
+  if (holdMs > 0) {
+    // Keep the game closed to input for the hold as well as the swing, otherwise a phone
+    // could play into a position the screen has not finished showing.
+    busyUntil = Math.max(busyUntil, performance.now() + holdMs);
+    setTimeout(() => {
+      // Guard against the game having moved on (restart, disconnect) during the hold.
+      if (phase === "playing" && state.turn === nextTurn) swingTo(nextTurn, performance.now());
+    }, holdMs);
+  } else {
+    swingTo(nextTurn, performance.now());
+  }
+
+  broadcastState();
+}
+
+function flashCheck() {
+  const el = document.getElementById("check");
+  el.classList.remove("fire");
+  void el.offsetWidth;     // restart the animation
+  el.classList.add("fire");
+}
+
+/** Algebraic-ish description of the move just played, on the banner. */
+function showMove(info, result) {
+  const glyph = GLYPH[info.piece] || "";
+  const target = info.captured ? "×" : "→";
+  let text = info.castle
+    ? (info.castle === "k" ? "0–0" : "0–0–0")
+    : `${glyph} ${squareName(info.from)} ${target} ${squareName(info.to)}`;
+  if (info.promo) text += ` =${GLYPH[info.color + info.promo]}`;
+  if (result === "checkmate") text += "#";
+  else if (state.check) text += "+";
+
+  const el = document.getElementById("move");
+  el.textContent = text;
+  el.classList.add("show");
+
+  document.getElementById("hint").textContent = result
+    ? ""
+    : `${state.turn === WHITE ? "White" : "Black"} to move`;
+}
+
+/* ---------------------------------------------------------------- seating */
+
+/**
+ * Assign the two seats.
+ *
+ * The two lowest-numbered controllers play; anyone else is a spectator whose phone shows
+ * the board but cannot move. Keeping seats keyed by device id means a player who drops
+ * and returns to the same slot keeps their colour.
+ */
+function assignSeats() {
+  const ids = safeCall(() => freeconsole.getControllerDeviceIds(), []) || [];
+
+  // Vacate seats whose player is gone — but only outside a live game.
+  //
+  // Reloading a phone is a disconnect immediately followed by a reconnect on the SAME
+  // device id, so during a game an absent player is treated as temporarily away and their
+  // seat is HELD. Clearing it here is what made a reload lose your side and drop you into
+  // "you'll be seated when a place opens" while your own game was still on the board.
+  // Between games there is nothing to protect, so seats are released normally.
+  if (phase !== "playing") {
+    for (const side of ["w", "b"]) {
+      if (seats[side] !== null && !ids.includes(seats[side])) seats[side] = null;
+    }
+  }
+
+  // Fill empty seats from whoever is not already sitting.
+  //
+  // Never during a live game: a seat that is empty mid-game belongs to someone who is
+  // reloading, and handing it to a spectator would lock the real player out of their own
+  // game for good. Mid-game, seats only ever change hands via a fresh startGame().
+  if (phase !== "playing") {
+    for (const id of ids) {
+      if (seats.w === id || seats.b === id) continue;
+      if (seats.w === null) seats.w = id;
+      else if (seats.b === null) seats.b = id;
+    }
+  }
+  renderSeats();
+  LOG("assignSeats ->", { seats: { ...seats }, ids, phase, bothPresent: bothSeatsPresent() });
+  return bothSeatsPresent();
+}
+
+/** True when both seats are taken AND both of those devices are currently connected. */
+function bothSeatsPresent() {
+  const ids = safeCall(() => freeconsole.getControllerDeviceIds(), []) || [];
+  return seats.w !== null && seats.b !== null &&
+         ids.includes(seats.w) && ids.includes(seats.b);
+}
+
+function sideOfDevice(deviceId) {
+  if (seats.w === deviceId) return WHITE;
+  if (seats.b === deviceId) return BLACK;
+  return null;
+}
+
+function renderSeats() {
+  for (const [side, key] of [[WHITE, "w"], [BLACK, "b"]]) {
+    const id = seats[key];
+    const nameEl = document.getElementById(side === WHITE ? "nameW" : "nameB");
+    const avEl = document.getElementById(side === WHITE ? "avW" : "avB");
+    const seatEl = document.getElementById(side === WHITE ? "seatW" : "seatB");
+
+    if (id === null) {
+      nameEl.textContent = "open seat";
+      nameEl.classList.add("seat-taken");
+      avEl.style.background = "#2a3350";
+      avEl.textContent = "–";
+    } else {
+      nameEl.textContent = safeCall(() => freeconsole.getNickname(id), `Player ${id}`) || `Player ${id}`;
+      nameEl.classList.remove("seat-taken");
+      const color = safeCall(() => freeconsole.getPlayerColor(id), "#35f0e0");
+      avEl.style.background = color;
+      avEl.textContent = String(id);
+    }
+    seatEl.classList.toggle("active", phase === "playing" && state.turn === side);
+  }
+}
+
+function renderTaken() {
+  document.getElementById("takenByWhite").textContent = takenPieces.w.map((p) => GLYPH[p]).join("");
+  document.getElementById("takenByBlack").textContent = takenPieces.b.map((p) => GLYPH[p]).join("");
+}
+
+/* ------------------------------------------------------------- broadcast */
+
+/**
+ * Tell one phone how far its camera can still travel, so it can disable a direction that
+ * has hit its limit rather than offering a button that does nothing.
+ */
+function sendViewLimits(deviceId) {
+  const EPS = 0.001;
+  safeCall(() => freeconsole.message(deviceId, {
+    type: "view",
+    canLeft: VIEW.targetYaw < VIEW.YAW_LIMIT - EPS,
+    canRight: VIEW.targetYaw > -VIEW.YAW_LIMIT + EPS,
+    canUp: VIEW.targetLift < VIEW.LIFT_LIMIT - EPS,
+    canDown: VIEW.targetLift > EPS,
+    centred: Math.abs(VIEW.targetYaw) < EPS && VIEW.targetLift < EPS,
+  }));
+}
+
+/** Send the camera limits to whoever is currently to move. */
+function pushViewLimitsToMover() {
+  const id = state.turn === WHITE ? seats.w : seats.b;
+  if (id !== null && id !== undefined) sendViewLimits(id);
+}
+
+/**
+ * Tell the phones what the board looks like.
+ *
+ * The whole position goes in one message — 64 short strings is small, and sending the
+ * complete truth means a phone that missed an update is repaired by the next one rather
+ * than drifting.
+ */
+/** The full position, as sent to a phone. */
+function boardPayload() {
+  return {
+    type: "board",
+    board: state.board,
+    turn: state.turn,
+    check: !!state.check,
+    phase,
+    seats: { w: seats.w, b: seats.b },
+    last: state.last ? { from: state.last.from, to: state.last.to } : null,
+    taken: takenPieces,
+    // Castling rights and the en passant square travel with the board. Without them the
+    // phone would hide legal castles and en passant captures, because neither can be
+    // inferred from the piece layout alone.
+    castling: state.castling,
+    enPassant: state.enPassant,
+    // Set while a seated player is away (usually reloading). Their seat is held and the
+    // position is intact; the phone uses this to say "waiting for them" rather than
+    // pretending the game is live or that the reconnecting player is a spectator.
+    paused: phase === "playing" && !bothSeatsPresent(),
+  };
+}
+
+/** Send the position to exactly one device — the answer to its "hello". */
+function sendBoardTo(deviceId) {
+  safeCall(() => freeconsole.message(deviceId, boardPayload()));
+}
+
+/**
+ * Resend the board to a device several times over the next few seconds.
+ *
+ * A device that has just (re)connected is NOT reachable yet, even though the SDK reports
+ * it as connected and its own onReady has already fired. The peer connection is still
+ * being renegotiated — the transport log shows it flipping between "relay (database)" and
+ * "DIRECT (webrtc)" — and everything sent during that window is dropped silently, in both
+ * directions. That is why a reloaded phone could sit through nine unanswered "hello"
+ * retries: its outbound path was dead too, so it could not even ask.
+ *
+ * The screen is the one device guaranteed to be up, so recovery has to live here. Repeating
+ * the send across a spread of delays means at least one lands whenever the pipe opens,
+ * rather than betting everything on a single broadcast at the worst possible moment.
+ */
+const RESEND_DELAYS = [0, 250, 600, 1200, 2000, 3000, 4500, 6000, 8000];
+
+/** Devices that have confirmed they hold the board, so resending can stop. */
+const boardAcked = new Set();
+
+function ensureDeviceHasBoard(deviceId) {
+  boardAcked.delete(deviceId);
+  for (const delay of RESEND_DELAYS) {
+    setTimeout(() => {
+      // Stop the moment the device confirms it has the board.
+      //
+      // This must not keep firing once the phone is up: every board it receives resets
+      // that phone's selection, so a stray resend arriving while someone is choosing a
+      // move silently cancels their pick and the move never happens.
+      if (boardAcked.has(deviceId)) return;
+      const ids = safeCall(() => freeconsole.getControllerDeviceIds(), []) || [];
+      if (!ids.includes(deviceId)) return;
+      sendBoardTo(deviceId);
+      if (phase === "playing") sendViewLimits(deviceId);
+    }, delay);
+  }
+}
+
+function broadcastState() {
+  safeCall(() => freeconsole.broadcast(boardPayload()));
+
+  // The camera buttons belong to whoever is to move, so refresh their limits alongside
+  // the board that just told them it is their turn.
+  if (phase === "playing") pushViewLimitsToMover();
+}
+
+/* ------------------------------------------------------------ game flow */
+
+function startGame() {
+  state = initialState();
+  takenPieces = { w: [], b: [] };
+  highlight = { from: null, targets: [], captures: [], check: null, lastMove: null };
+  buildPiecesFrom(state.board);
+  paintSquares();
+  rebuildMarkers();
+  renderTaken();
+
+  // Clear any dust left from the previous game.
+  for (const d of dustMarks) scene.remove(d.mesh);
+  dustMarks.length = 0;
+
+  phase = "playing";
+  document.getElementById("lobby").classList.remove("show");
+  document.getElementById("gameover").classList.remove("show");
+  document.getElementById("move").classList.remove("show");
+  document.getElementById("hint").textContent = "White to move";
+
+  camSide = BLACK;             // force the opening swing so the game starts with motion
+  swingTo(WHITE, performance.now());
+  renderSeats();
+  broadcastState();
+  safeCall(() => freeconsole.setActivePlayers(2));
+
+  // The very first game starts during onReady, which can be before either phone's peer
+  // connection is usable — so this broadcast is exactly as droppable as a reconnect's.
+  // Repeat it at both players until it sticks.
+  for (const side of ["w", "b"]) {
+    if (seats[side] !== null) ensureDeviceHasBoard(seats[side]);
+  }
+}
+
+function endGame(result) {
+  phase = "over";
+
+  const loser = state.turn;                 // the side that cannot move
+  const winner = opposite(loser);
+  const eyebrow = document.getElementById("overEyebrow");
+  const title = document.getElementById("overTitle");
+
+  if (result === "checkmate") {
+    eyebrow.textContent = "Checkmate";
+    const id = winner === WHITE ? seats.w : seats.b;
+    const name = id !== null
+      ? safeCall(() => freeconsole.getNickname(id), `Player ${id}`)
+      : (winner === WHITE ? "White" : "Black");
+    title.textContent = `${name} wins`;
+  } else {
+    eyebrow.textContent = "Draw";
+    title.textContent = result === "stalemate" ? "Stalemate"
+      : result === "fifty" ? "Fifty-move rule"
+      : "Insufficient material";
+  }
+
+  broadcastState();
+
+  // Pull the camera back over the board to show the final position, then restart.
+  camSwing = {
+    fromPos: camPos.clone(),
+    fromLook: camLook.clone(),
+    toPos: new THREE.Vector3(0, 10.5, 8.4),
+    toLook: new THREE.Vector3(0, 0, 0),
+    t0: performance.now(),
+    dir: 1,
+  };
+  camSide = null;
+
+  // Hold the overlay back until the mating piece has finished shattering. A checkmate is
+  // very often a capture, and covering the board the instant it lands throws away the
+  // best-looking moment in the game.
+  setTimeout(() => {
+    if (phase === "over") document.getElementById("gameover").classList.add("show");
+  }, SHATTER_MS * 0.72);
+
+  setTimeout(() => {
+    if (phase !== "over") return;
+    if (assignSeats()) startGame();
+    else returnToLobby();
+  }, 11000);
+}
+
+function returnToLobby() {
+  phase = "lobby";
+  document.getElementById("gameover").classList.remove("show");
+  document.getElementById("lobby").classList.add("show");
+  document.getElementById("lobbyNote").textContent =
+    seats.w === null && seats.b === null ? "Waiting for two players…" : "Waiting for one more player…";
+  safeCall(() => freeconsole.setActivePlayers(0));
+  broadcastState();
+}
+
+/* ------------------------------------------------------------ shell wiring */
+
+function sync() {
+  const ready = assignSeats();
+
+  if (phase === "playing") {
+    // A game already in progress: whoever just (re)connected picks it up where it is.
+    // startGame() must never be reached from here, or a reload would wipe the position.
+    showPausedNote();
+    renderSeats();
+    broadcastState();
+    return;
+  }
+
+  if (ready) startGame();
+  else {
+    document.getElementById("lobbyNote").textContent =
+      seats.w === null && seats.b === null ? "Waiting for two players…" : "Waiting for one more player…";
+    broadcastState();
+  }
+}
+
+freeconsole.onReady = () => {
+  LOG("onReady", { controllers: freeconsole.getControllerDeviceIds() });
+  sync();
+  // Announce that the screen is listening. A phone that sent its "hello" before this page
+  // had a message handler got no answer and would otherwise wait forever; this tells every
+  // phone in the room to ask again.
+  safeCall(() => freeconsole.broadcast({ type: "screen-ready" }));
+};
+freeconsole.onConnect = (id) => {
+  LOG("onConnect", { id, controllers: freeconsole.getControllerDeviceIds(), seats: { ...seats }, phase });
+  sync();
+  // onConnect is the only reliable signal that a device is back — its own messages to us
+  // may not arrive for several seconds while the peer connection renegotiates. Push the
+  // board at it repeatedly rather than waiting to be asked.
+  if (id !== undefined && id !== null) ensureDeviceHasBoard(Number(id));
+};
+freeconsole.onDisconnect = (id) => {
+  LOG("onDisconnect", { id, controllers: freeconsole.getControllerDeviceIds(), seats: { ...seats }, phase });
+  assignSeats();
+
+  // Do NOT tear the game down. A player who vanished mid-game has most likely just
+  // reloaded, and their seat is held for them by assignSeats(); the position stays on the
+  // board and play resumes the moment they are back. Abandoning here is what turned a
+  // reload into a lost game.
+  if (phase === "playing" && !bothSeatsPresent()) {
+    showPausedNote();
+  }
+  renderSeats();
+  broadcastState();
+};
+
+/** Tell the room a seat is empty and the game is waiting rather than over. */
+function showPausedNote() {
+  const missing = [];
+  const ids = safeCall(() => freeconsole.getControllerDeviceIds(), []) || [];
+  if (seats.w !== null && !ids.includes(seats.w)) missing.push("White");
+  if (seats.b !== null && !ids.includes(seats.b)) missing.push("Black");
+  document.getElementById("hint").textContent = missing.length
+    ? `Waiting for ${missing.join(" and ")} to reconnect…`
+    : "";
+}
+
+freeconsole.onMessage = (deviceId, data) => {
+  if (!data) return;
+  const side = sideOfDevice(Number(deviceId));
+
+  // A phone announcing itself — on first load, on reload, or on joining late. It may have
+  // missed the broadcast that went out before its SDK was ready, so seat it (if a seat is
+  // free) and send it the position directly.
+  if (data.type === "hello") {
+    LOG("HELLO from", deviceId, { seatsBefore: { ...seats }, phase, controllers: freeconsole.getControllerDeviceIds() });
+    assignSeats();
+    renderSeats();
+    if (phase === "lobby" && bothSeatsPresent()) {
+      LOG("  -> both seats present, starting game");
+      startGame();
+    } else {
+      showPausedNote();
+      LOG("  -> sending board to", deviceId, { seatsAfter: { ...seats },
+        seatedAs: seats.w === Number(deviceId) ? "WHITE" : seats.b === Number(deviceId) ? "BLACK" : "SPECTATOR" });
+      // Answer immediately, and keep answering for a few seconds: a hello that got through
+      // does not prove the return path is up yet.
+      ensureDeviceHasBoard(Number(deviceId));
+    }
+    return;
+  }
+
+  // The phone confirming it holds the board, so the resend burst can stop.
+  if (data.type === "got-board") {
+    boardAcked.add(Number(deviceId));
+    return;
+  }
+
+  if (data.type === "view") {
+    // Only the player to move may steer the camera — the screen is showing their seat,
+    // and letting the waiting player move it would yank the view out from under them.
+    if (phase !== "playing" || side !== state.turn) return;
+
+    if (data.dir === "reset") {
+      resetView();
+    } else if (data.dir === "left" || data.dir === "right") {
+      const step = (data.dir === "left" ? 1 : -1) * VIEW.YAW_STEP;
+      VIEW.targetYaw = Math.max(-VIEW.YAW_LIMIT, Math.min(VIEW.YAW_LIMIT, VIEW.targetYaw + step));
+    } else if (data.dir === "up" || data.dir === "down") {
+      const step = (data.dir === "up" ? 1 : -1) * VIEW.LIFT_STEP;
+      VIEW.targetLift = Math.max(0, Math.min(VIEW.LIFT_LIMIT, VIEW.targetLift + step));
+    }
+    // Tell the phone which way it can still go, so it can grey out a spent direction.
+    sendViewLimits(Number(deviceId));
+    return;
+  }
+
+  if (data.type === "select") {
+    // Only the side to move may highlight, and only during play. A spectator tapping
+    // around must not light up the board for the players.
+    if (phase !== "playing" || side !== state.turn || !bothSeatsPresent()) return;
+    if (isBusy()) return;
+    setSelection(data.square === null ? null : Number(data.square));
+    return;
+  }
+
+  if (data.type === "move") {
+    // Every rejection MUST answer with the current board.
+    //
+    // A phone clears its selection and shows "Moving…" the moment it sends. If the screen
+    // drops the message silently, that phone is left believing a move is in flight that
+    // will never land — the board looks live, says it is your turn, and ignores every tap.
+    // Returning without a reply here is what caused exactly that lock-up, and the window
+    // is wide because a capture holds the camera for the shatter.
+    // Also refuse while a seat is empty: the game is paused for a reconnect, and letting
+    // the present player move on would change the position under the absent one.
+    if (phase !== "playing" || side !== state.turn || isBusy() || !bothSeatsPresent()) {
+      freeconsole.message(Number(deviceId), { type: "nack" });
+      return;
+    }
+
+    const move = findMove(state, Number(data.from), Number(data.to), data.promo);
+    if (!move) {
+      // Illegal, or the phone was working from a stale board. Re-send the truth.
+      broadcastState();
+      return;
+    }
+    playMove(move);
+  }
+};
+
+/* ------------------------------------------------------------- test mode */
+
+/**
+ * Test mode: no shell, both sides driven from this page.
+ *
+ * Click a piece to select it, click a destination to move. It exercises the same
+ * playMove() path the real game uses, so the animations can be tuned without two phones.
+ */
+if (TEST) {
+  seats = { w: 1, b: 2 };
+  startGame();
+
+  // A scripting hook, so the game can be driven from the console or an automated check
+  // without synthesising pointer events: __gambit.move("e2","e4") plays through exactly
+  // the same path a phone's message would take.
+  const toIndex = (name) => "abcdefgh".indexOf(name[0]) + (8 - Number(name[1])) * 8;
+  window.__gambit = {
+    move(from, to, promo) {
+      // Mirror the guards the real message handler applies. Without the busy check a
+      // scripted game can fire a move while the previous one is still animating, which
+      // the shell would never allow — and the piece mid-flight gets handled twice.
+      if (phase !== "playing") return { ok: false, reason: "phase:" + phase };
+      if (isBusy()) return { ok: false, reason: "busy" };
+      const move = findMove(state, toIndex(from), toIndex(to), promo);
+      if (!move) return { ok: false, reason: "illegal" };
+      playMove(move);
+      return { ok: true };
+    },
+    select(name) { setSelection(name === null ? null : toIndex(name)); return highlight.targets.length + highlight.captures.length; },
+    /** The authoritative board, for comparing against the rules engine in a test. */
+    get board() { return state.board.slice(); },
+    /** What the piece table thinks is standing where, to catch it drifting from the board. */
+    get rendered() {
+      const out = new Array(64).fill(null);
+      for (const key of Object.keys(pieceAt)) out[key] = pieceAt[key].color + pieceAt[key].kind;
+      return out;
+    },
+    legalFrom(name) { return legalMoves(state, toIndex(name)).map((m) => squareName(m.to)); },
+    get info() {
+      return {
+        turn: state.turn, phase, check: !!state.check,
+        busy: isBusy(),
+        pieces: Object.keys(pieceAt).length,
+        shards: shards.length, dust: dustMarks.length,
+        camSide, swinging: !!camSwing,
+        taken: { w: takenPieces.w.length, b: takenPieces.b.length },
+        highlight: { from: highlight.from, targets: highlight.targets.length, captures: highlight.captures.length },
+      };
+    },
+  };
+
+  const raycaster = new THREE.Raycaster();
+  const pointer = new THREE.Vector2();
+
+  renderer.domElement.addEventListener("pointerdown", (ev) => {
+    if (phase !== "playing" || isBusy()) return;
+    pointer.x = (ev.clientX / window.innerWidth) * 2 - 1;
+    pointer.y = -(ev.clientY / window.innerHeight) * 2 + 1;
+    raycaster.setFromCamera(pointer, camera);
+    const hit = raycaster.intersectObjects(squareMeshes)[0];
+    if (!hit) return;
+    const sq = squareMeshes.indexOf(hit.object);
+
+    if (highlight.from !== null) {
+      const move = findMove(state, highlight.from, sq);
+      if (move) { playMove(move); return; }
+    }
+    setSelection(colorOf(state.board[sq]) === state.turn ? sq : null);
+  });
+}
+
+/**
+ * Read-only view of where the camera actually is. Exposed outside test mode too, because
+ * it costs nothing and is the only way to confirm from outside that a controller's camera
+ * button had any effect.
+ */
+window.__camProbe = () => ({
+  x: +camera.position.x.toFixed(2),
+  y: +camera.position.y.toFixed(2),
+  z: +camera.position.z.toFixed(2),
+  yaw: +VIEW.yaw.toFixed(3),
+  targetYaw: +VIEW.targetYaw.toFixed(3),
+  lift: +VIEW.lift.toFixed(2),
+  targetLift: +VIEW.targetLift.toFixed(2),
+  side: camSide,
+});
+
+/* --------------------------------------------------------------- the loop */
+
+let lastFrame = performance.now();
+
+function frame() {
+  const now = performance.now();
+  const dt = Math.min((now - lastFrame) / 1000, 0.05);
+  lastFrame = now;
+
+  updateCamera(now, dt);
+  updateMoving(now);
+  updateShards(now, dt);
+
+  // Breathe the highlighted squares, so a hint reads as active rather than painted on.
+  const pulse = 0.72 + Math.sin(now / 260) * 0.28;
+  for (let i = 0; i < 64; i++) {
+    const mesh = squareMeshes[i];
+    if (mesh.userData.pulse) mesh.material.emissiveIntensity = mesh.userData.pulse * pulse;
+  }
+  for (const marker of markerGroup.children) {
+    marker.material.opacity = 0.45 + 0.35 * pulse;
+  }
+
+  // The selected piece bobs, so the player can find it without reading the square.
+  if (highlight.from !== null && pieceAt[highlight.from]) {
+    const p = pieceAt[highlight.from];
+    if (!p.anim) p.group.position.y = Math.abs(Math.sin(now / 420)) * 0.11;
+  }
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(frame);
+}
+
+buildPiecesFrom(state.board);
+paintSquares();
+renderSeats();
+frame();
+</script>
+</body>
+</html>

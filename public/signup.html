@@ -1,0 +1,1159 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Sign up — FreeConsole</title>
+<meta name="theme-color" content="#05060d" />
+<link rel="stylesheet" href="/console.css" />
+<style>
+  /* ---------------------------------------------------------------- auth */
+  #authView { max-width: 440px; margin: clamp(30px, 8vh, 78px) auto; padding: 0 22px; }
+  #authView.hidden, #adminView.hidden { display: none; }
+
+  .auth-head { text-align: center; margin-bottom: 26px; }
+  .auth-head h1 { font-size: 27px; margin: 12px 0 7px; }
+  .auth-head p { color: var(--text-dim); font-size: 14.5px; margin: 0; }
+
+  .tabs {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 5px;
+    padding: 5px;
+    background: rgba(5, 6, 13, 0.6);
+    border: 1px solid var(--line);
+    border-radius: 11px;
+    margin-bottom: 20px;
+  }
+  .tab {
+    padding: 10px;
+    border-radius: 8px;
+    border: 0;
+    background: none;
+    color: var(--text-dim);
+    font-family: var(--font-display);
+    font-size: 14px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: background .16s, color .16s;
+  }
+  .tab.active { background: rgba(53, 240, 224, 0.12); color: var(--glow); }
+
+  /* The one-time bootstrap. Deliberately loud: it is the single most consequential
+     checkbox in the product, and it only ever appears once. */
+  .claim {
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+    margin: 18px 0 4px;
+    padding: 15px;
+    border: 1px solid var(--line-bright);
+    border-radius: 11px;
+    background: linear-gradient(140deg, rgba(53,240,224,.1), rgba(53,240,224,.02));
+    position: relative;
+    overflow: hidden;
+  }
+  .claim::before {
+    content: "";
+    position: absolute; top: 0; left: 0; right: 0; height: 1px;
+    background: linear-gradient(to right, transparent, var(--glow), transparent);
+  }
+  .claim.hidden { display: none; }
+  .claim input { width: 18px; height: 18px; margin-top: 2px; accent-color: var(--glow); flex-shrink: 0; }
+  .claim-title { font-weight: 700; font-size: 14.5px; color: var(--text); cursor: pointer; }
+  .claim-note { font-size: 12px; color: var(--text-dim); margin-top: 4px; line-height: 1.45; }
+
+  .auth-alt { text-align: center; margin-top: 18px; font-size: 13px; color: var(--text-faint); }
+
+  /* ---------------------------------------------------------------- admin */
+  #adminView {
+    display: grid;
+    grid-template-columns: minmax(260px, 350px) 1fr;
+    gap: 20px;
+    align-items: start;
+    padding: 26px clamp(16px, 4vw, 40px) 40px;
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+  @media (max-width: 860px) { #adminView { grid-template-columns: 1fr; } }
+
+  .panel-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 15px;
+  }
+  .panel-head h2 {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: .18em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+    font-weight: 400;
+  }
+
+  /* ---------------------------------------------------------------- game list */
+  .list-search { position: relative; margin-bottom: 12px; }
+  .list-search .input { padding-left: 32px; font-size: 13.5px; }
+  .list-search::before {
+    content: "⌕";
+    position: absolute;
+    left: 11px; top: 50%;
+    transform: translateY(-50%);
+    color: var(--text-faint);
+    font-size: 15px;
+    pointer-events: none;
+  }
+
+  .game-row {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    padding: 10px 11px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    margin-bottom: 7px;
+    background: none;
+    transition: border-color .16s, background .16s;
+    position: relative;
+  }
+  .game-row:hover { border-color: var(--line-bright); background: rgba(255,255,255,.025); }
+  .game-row.selected { border-color: var(--glow); background: rgba(53,240,224,.09); }
+  .game-row.selected::before {
+    content: "";
+    position: absolute;
+    left: -1px; top: 22%; bottom: 22%;
+    width: 2px;
+    border-radius: 2px;
+    background: var(--glow);
+    box-shadow: 0 0 10px var(--glow);
+  }
+
+  .game-row .thumb {
+    width: 44px; height: 30px;
+    border-radius: 6px;
+    background: linear-gradient(135deg, rgba(53,240,224,.24), rgba(255,46,136,.24));
+    display: grid; place-items: center;
+    font-weight: 700; font-size: 14px;
+    color: var(--glow);
+    flex-shrink: 0;
+    overflow: hidden;
+  }
+  .game-row .thumb img { width: 100%; height: 100%; object-fit: cover; }
+
+  .game-row .meta { flex: 1; min-width: 0; }
+  .game-row .name { font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .game-row .sub {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--text-faint);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+
+  /* Actions are always present rather than hover-only: on touch there is no hover, and a
+     hidden action is an action nobody finds. They fade up on hover on pointer devices. */
+  .game-actions { display: flex; gap: 3px; flex-shrink: 0; }
+  .icon-btn {
+    width: 27px; height: 27px;
+    display: grid; place-items: center;
+    border-radius: 6px;
+    border: 1px solid transparent;
+    background: none;
+    color: var(--text-faint);
+    cursor: pointer;
+    font-size: 13px;
+    line-height: 1;
+    transition: color .14s, background .14s, border-color .14s;
+  }
+  .icon-btn:hover { color: var(--glow); background: rgba(53,240,224,.1); border-color: var(--line-bright); }
+  .icon-btn.danger:hover { color: var(--hot); background: rgba(255,46,136,.1); border-color: rgba(255,46,136,.4); }
+  @media (hover: hover) {
+    .game-actions { opacity: .45; transition: opacity .16s; }
+    .game-row:hover .game-actions, .game-row.selected .game-actions { opacity: 1; }
+  }
+
+  .empty { color: var(--text-faint); font-size: 13px; padding: 22px 2px; text-align: center; }
+  .list-skeleton {
+    height: 51px;
+    border-radius: var(--radius-sm);
+    margin-bottom: 7px;
+    background: linear-gradient(100deg, rgba(26,32,56,.5) 30%, rgba(53,240,224,.06) 50%, rgba(26,32,56,.5) 70%);
+    background-size: 220% 100%;
+    animation: shimmer 1.4s infinite;
+  }
+  @keyframes shimmer { to { background-position: -120% 0; } }
+
+  /* ---------------------------------------------------------------- form */
+  .form-head {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    margin-bottom: 4px;
+  }
+  .form-head h2 { font-size: 18px; letter-spacing: -.01em; }
+  .form-mode {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    padding: 3px 9px;
+    border-radius: 999px;
+    border: 1px solid var(--line-bright);
+    color: var(--glow);
+  }
+  .form-mode.new { border-color: rgba(255,46,136,.45); color: var(--hot); }
+  .form-sub { color: var(--text-faint); font-size: 12.5px; margin-bottom: 18px; }
+
+  .dirty-flag {
+    display: none;
+    align-items: center;
+    gap: 6px;
+    font-size: 11.5px;
+    color: var(--amber);
+  }
+  .dirty-flag.show { display: flex; }
+
+  /* Inline validation: a field turns hot only after it has been touched, so the form
+     doesn't scream at someone who has typed nothing yet. */
+  .input.invalid { border-color: rgba(255,46,136,.6); }
+  .field-error {
+    display: none;
+    font-size: 11.5px;
+    color: #ffa8c8;
+    margin-top: 5px;
+  }
+  .field-error.show { display: block; }
+
+  .form-actions {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    align-items: center;
+    margin-top: 22px;
+    padding-top: 18px;
+    border-top: 1px solid var(--line);
+  }
+
+  /* Live preview of exactly what the catalog will render. */
+  .preview-card {
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+    background: linear-gradient(160deg, rgba(26,32,56,.7), rgba(10,12,24,.9));
+    max-width: 250px;
+  }
+  .preview-art {
+    aspect-ratio: 16/9;
+    background: linear-gradient(135deg, rgba(53,240,224,.16), rgba(255,46,136,.16));
+    display: grid; place-items: center;
+    overflow: hidden;
+  }
+  .preview-art img { width: 100%; height: 100%; object-fit: cover; }
+  .preview-art .initial {
+    font-family: var(--font-marquee);
+    font-size: 32px;
+    color: var(--glow);
+    text-shadow: var(--bloom-glow);
+    padding-top: 6px;
+  }
+  .preview-body { padding: 11px 13px 13px; }
+  .preview-body h4 { margin: 0 0 4px; font-size: 14.5px; }
+  .preview-body p {
+    margin: 0 0 9px;
+    font-size: 12px;
+    color: var(--text-dim);
+    min-height: 2.6em;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .preview-foot {
+    display: flex; justify-content: space-between;
+    font-family: var(--font-mono); font-size: 9.5px;
+    letter-spacing: .1em; text-transform: uppercase;
+    color: var(--text-faint);
+  }
+
+  .kbd {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    border: 1px solid var(--line);
+    color: var(--text-faint);
+    background: rgba(5,6,13,.6);
+  }
+</style>
+</head>
+<body>
+
+<main id="main" class="shell">
+
+  <!-- ------------------------------------------------------------ sign in -->
+  <section id="authView" class="hidden">
+    <div class="auth-head">
+      <a class="brand" href="/" style="justify-content:center">
+        <span class="brand-mark" aria-hidden="true">FC</span>
+        <span class="brand-name">FreeConsole</span>
+      </a>
+      <h1 id="authHeading">Admin access</h1>
+      <p id="authBlurb">Sign in to manage the game catalog.</p>
+    </div>
+
+    <div class="panel panel-lit">
+      <div class="tabs" role="tablist">
+        <button class="tab active" id="tabSignIn" type="button" role="tab">Sign in</button>
+        <button class="tab" id="tabSignUp" type="button" role="tab">Create account</button>
+      </div>
+
+      <form id="authForm" autocomplete="on">
+        <div class="field">
+          <label class="label" for="email">Email</label>
+          <input class="input" id="email" type="email" autocomplete="email" placeholder="you@example.com" />
+        </div>
+
+        <div class="field">
+          <label class="label" for="password">Password</label>
+          <input class="input" id="password" type="password" autocomplete="current-password" placeholder="At least 6 characters" />
+        </div>
+
+        <div class="claim hidden" id="adminCheckWrap">
+          <input type="checkbox" id="asAdmin" />
+          <div>
+            <label class="claim-title" for="asAdmin">Claim admin access</label>
+            <div class="claim-note" id="adminCheckHint">
+              No admin exists yet, so this account can claim it. This option disappears
+              permanently once someone does.
+            </div>
+          </div>
+        </div>
+
+        <button type="submit" class="btn btn-primary btn-block btn-lg" id="authSubmit" style="margin-top:18px">Sign in</button>
+        <div class="msg" id="authMsg"></div>
+      </form>
+    </div>
+
+    <p class="auth-alt">
+      Just here to play? <a href="/play.html" style="color:var(--glow);text-decoration:none">Join a game</a> — no account needed.
+    </p>
+  </section>
+
+  <!-- ------------------------------------------------------------ catalog -->
+  <section id="adminView" class="hidden">
+    <div>
+      <div class="panel panel-lit">
+        <div class="panel-head">
+          <h2>Catalog</h2>
+          <span class="chip push" id="gameCount" style="font-size:11px">—</span>
+        </div>
+
+        <button class="btn btn-primary btn-block" id="new" type="button" style="margin-bottom:13px">
+          + New game
+        </button>
+
+        <div class="list-search">
+          <input class="input" id="search" type="search" placeholder="Search games…" aria-label="Search games" />
+        </div>
+
+        <div id="list">
+          <div class="list-skeleton"></div>
+          <div class="list-skeleton"></div>
+        </div>
+      </div>
+
+      <div class="panel" style="margin-top:16px">
+        <div class="panel-head"><h2>Admins</h2></div>
+        <div class="field">
+          <label class="label" for="grantEmail">Grant admin to an account</label>
+          <input class="input" id="grantEmail" type="email" placeholder="teammate@example.com" />
+          <div class="field-hint">They must have created an account here first. Access applies next time they sign in.</div>
+        </div>
+        <button class="btn btn-ghost btn-block" id="grant" type="button">Grant admin</button>
+        <div class="msg" id="grantMsg"></div>
+      </div>
+    </div>
+
+    <div class="panel panel-lit">
+      <div class="form-head">
+        <h2 id="formTitle">New game</h2>
+        <span class="form-mode new" id="formMode">creating</span>
+        <span class="dirty-flag push" id="dirtyFlag"><span class="dot"></span> unsaved changes</span>
+      </div>
+      <div class="form-sub" id="formSub">Fill this in and save to add it to the catalog.</div>
+
+      <form id="gameForm" autocomplete="off" novalidate>
+        <div class="field">
+          <label class="label" for="id">Game ID</label>
+          <input class="input" id="id" placeholder="tapwar" />
+          <div class="field-hint">Lowercase letters, digits and dashes. Used in the URL and the room record — it can't be changed after creating.</div>
+          <div class="field-error" id="err-id"></div>
+        </div>
+
+        <div class="field">
+          <label class="label" for="name">Name</label>
+          <input class="input" id="name" placeholder="Tap War" />
+          <div class="field-error" id="err-name"></div>
+        </div>
+
+        <div class="field">
+          <label class="label" for="description">Description</label>
+          <textarea class="input" id="description" placeholder="A race to 50 taps."></textarea>
+          <div class="field-hint"><span id="descCount">0</span>/300 · shown on the catalog card</div>
+          <div class="field-error" id="err-description"></div>
+        </div>
+
+        <div class="field-row">
+          <div class="field">
+            <label class="label" for="minPlayers">Min players</label>
+            <input class="input" id="minPlayers" type="number" min="1" value="1" />
+          </div>
+          <div class="field">
+            <label class="label" for="maxPlayers">Max players</label>
+            <input class="input" id="maxPlayers" type="number" min="1" value="8" />
+          </div>
+        </div>
+        <div class="field-error" id="err-players" style="margin-top:-8px;margin-bottom:14px"></div>
+
+        <div class="field">
+          <label class="label" for="screenUrl">Screen URL</label>
+          <input class="input" id="screenUrl" placeholder="/games/tapwar/screen.html" />
+          <div class="field-hint">A /path on this host, or an absolute https:// URL for a game hosted elsewhere.</div>
+          <div class="field-error" id="err-screenUrl"></div>
+        </div>
+
+        <div class="field">
+          <label class="label" for="controllerUrl">Controller URL</label>
+          <input class="input" id="controllerUrl" placeholder="/games/tapwar/controller.html" />
+          <div class="field-error" id="err-controllerUrl"></div>
+        </div>
+
+        <div class="field">
+          <label class="label" for="thumbnailUrl">Thumbnail URL <span class="faint">(optional)</span></label>
+          <input class="input" id="thumbnailUrl" placeholder="/games/tapwar/thumb.png" />
+          <div class="field-error" id="err-thumbnailUrl"></div>
+        </div>
+
+        <div class="field">
+          <div class="label">Catalog preview</div>
+          <div class="preview-card" id="preview">
+            <div class="preview-art" id="previewArt"><span class="initial">?</span></div>
+            <div class="preview-body">
+              <h4 id="previewName">Untitled game</h4>
+              <p id="previewDesc"></p>
+              <div class="preview-foot">
+                <span id="previewPlayers">1–8 players</span>
+                <span style="color:var(--glow)">Start →</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="form-actions">
+          <button type="submit" class="btn btn-primary" id="save">Save game</button>
+          <button type="button" class="btn btn-ghost" id="cancel">Cancel</button>
+          <span class="kbd">⌘S</span>
+          <button type="button" class="btn btn-danger push" id="delete" hidden>Delete</button>
+        </div>
+        <div class="msg" id="gameMsg"></div>
+      </form>
+    </div>
+  </section>
+</main>
+<script type="module">
+import {
+  getAuth,
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
+  onAuthStateChanged,
+} from "https://www.gstatic.com/firebasejs/11.1.0/firebase-auth.js";
+import {
+  getFirestore, collection, doc, getDoc, getDocs, setDoc, deleteDoc, query, orderBy,
+} from "https://www.gstatic.com/firebasejs/11.1.0/firebase-firestore.js";
+import { getFunctions, httpsCallable } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-functions.js";
+import { initializeApp } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-app.js";
+import { firebaseConfig } from "./firebase-config.js?v=202608011900";
+import { mountChrome, toast } from "./chrome.js?v=202608012200";
+
+// Initialized directly rather than reusing relay.js: that module also spins up RTDB and the
+// anonymous-auth flow for gameplay, none of which this page needs.
+const app = initializeApp(firebaseConfig);
+mountChrome({ app, footer: false });
+const auth = getAuth(app);
+const firestore = getFirestore(app);
+const functions = getFunctions(app);
+
+const $ = (id) => document.getElementById(id);
+const FIELDS = ["name", "description", "minPlayers", "maxPlayers", "screenUrl", "controllerUrl", "thumbnailUrl"];
+
+let mode = "signin";     // or "signup"
+let games = [];
+let selected = null;
+
+function message(el, kind, text, details) {
+  el.className = "msg show " + kind;
+  el.textContent = text;
+  if (details && details.length) {
+    const ul = document.createElement("ul");
+    for (const d of details) {
+      const li = document.createElement("li");
+      li.textContent = d;
+      ul.appendChild(li);
+    }
+    el.appendChild(ul);
+  }
+}
+const clear = (el) => { el.className = "msg"; };
+
+// Deliberate pause so a success message is actually readable before the view changes.
+const hold = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/* ---------------------------------------------------------------- auth screen */
+
+// The bootstrap option only appears while no admin exists. This is a UI hint only - the
+// real gate is the claimFirstAdmin function, which rejects a second claimant even if
+// someone calls it directly.
+async function adminExists() {
+  try {
+    const snap = await getDoc(doc(firestore, "admin_meta", "state"));
+    return snap.exists() && snap.data().adminExists === true;
+  } catch {
+    return true; // fail closed: don't offer the bootstrap if we can't tell
+  }
+}
+
+async function refreshAdminCheckbox() {
+  const exists = await adminExists();
+  const offer = !exists && mode === "signup";
+  $("adminCheckWrap").classList.toggle("hidden", !offer);
+  if (exists) $("asAdmin").checked = false;
+
+  // On a brand-new install nobody owns the catalog yet, so lead with that rather than
+  // making someone guess that "create account" is also the setup step.
+  if (!exists) {
+    $("authHeading").textContent = mode === "signup" ? "Set up your console" : "Admin access";
+    $("authBlurb").textContent = mode === "signup"
+      ? "No admin exists yet. The first account can claim the catalog."
+      : "Sign in to manage the game catalog.";
+    // Nudge a first-time visitor onto the tab that actually does something.
+    if (!offer && mode === "signin") $("tabSignUp").classList.add("hint");
+  } else {
+    $("authHeading").textContent = "Admin access";
+    $("authBlurb").textContent = mode === "signup"
+      ? "Create an account, then ask an admin to grant you access."
+      : "Sign in to manage the game catalog.";
+  }
+}
+
+function setMode(next) {
+  mode = next;
+  $("tabSignIn").classList.toggle("active", mode === "signin");
+  $("tabSignUp").classList.toggle("active", mode === "signup");
+  $("authSubmit").textContent = mode === "signin" ? "Sign in" : "Create account";
+  $("password").autocomplete = mode === "signin" ? "current-password" : "new-password";
+  clear($("authMsg"));
+  refreshAdminCheckbox();
+}
+
+$("tabSignIn").addEventListener("click", () => setMode("signin"));
+$("tabSignUp").addEventListener("click", () => setMode("signup"));
+
+// Set while a submit is in flight so the onAuthStateChanged handler doesn't yank the view
+// out from under the success message before it's been read.
+let submitting = false;
+
+$("authForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const email = $("email").value.trim();
+  const password = $("password").value;
+  const btn = $("authSubmit");
+
+  btn.disabled = true;
+  btn.classList.add("loading");
+  submitting = true;
+  clear($("authMsg"));
+
+  try {
+    if (mode === "signup") {
+      const wantsAdmin = $("asAdmin").checked && !$("adminCheckWrap").classList.contains("hidden");
+      await createUserWithEmailAndPassword(auth, email, password);
+
+      let claimed = false;
+      if (wantsAdmin) {
+        await httpsCallable(functions, "claimFirstAdmin")({});
+        // Custom claims only reach the client on a token refresh.
+        await auth.currentUser.getIdToken(true);
+        claimed = true;
+      }
+
+      btn.classList.remove("loading");
+      if (claimed) {
+        // This person now owns the catalog, so send them to it rather than home.
+        message($("authMsg"), "ok", "Account created — you're the admin. Opening the catalog…");
+        await hold(1100);
+        submitting = false;
+        showAdminView();
+      } else {
+        // A plain account can't do anything here yet, so home is the useful destination.
+        message($("authMsg"), "ok", "Account created. Taking you home…");
+        await hold(1400);
+        location.href = "/";
+      }
+      return;
+    }
+
+    await signInWithEmailAndPassword(auth, email, password);
+    btn.classList.remove("loading");
+    message($("authMsg"), "ok", "Signed in. One moment…");
+    await hold(650);
+    submitting = false;
+    applySession(auth.currentUser);
+  } catch (err) {
+    submitting = false;
+    btn.classList.remove("loading");
+    btn.disabled = false;
+    message($("authMsg"), "error", friendlyAuthError(err));
+  }
+});
+
+function friendlyAuthError(err) {
+  const code = err.code || "";
+  if (code.includes("email-already-in-use")) return "That email already has an account. Try signing in.";
+  if (code.includes("invalid-credential") || code.includes("wrong-password")) return "Wrong email or password.";
+  if (code.includes("user-not-found")) return "No account for that email. Create one first.";
+  if (code.includes("weak-password")) return "Password must be at least 6 characters.";
+  if (code.includes("invalid-email")) return "That doesn't look like an email address.";
+  return err.message || "Something went wrong.";
+}
+
+/* ---------------------------------------------------------------- catalog CRUD */
+
+let filter = "";
+let baseline = null;   // serialized form state at load, for dirty tracking
+let touched = new Set();
+
+const FORM_IDS = ["id", ...FIELDS];
+
+function readForm() {
+  return {
+    id: $("id").value.trim(),
+    name: $("name").value.trim(),
+    description: $("description").value.trim(),
+    minPlayers: Number($("minPlayers").value),
+    maxPlayers: Number($("maxPlayers").value),
+    screenUrl: $("screenUrl").value.trim(),
+    controllerUrl: $("controllerUrl").value.trim(),
+    thumbnailUrl: $("thumbnailUrl").value.trim() || null,
+  };
+}
+
+const snapshot = () => JSON.stringify(readForm());
+const isDirty = () => baseline !== null && snapshot() !== baseline;
+
+function markClean() {
+  baseline = snapshot();
+  $("dirtyFlag").classList.remove("show");
+}
+
+async function loadGames() {
+  try {
+    const snap = await getDocs(query(collection(firestore, "games"), orderBy("name")));
+    games = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+  } catch (err) {
+    $("list").innerHTML = "";
+    const div = document.createElement("div");
+    div.className = "empty";
+    div.textContent = "Could not load: " + err.message;
+    $("list").appendChild(div);
+    return;
+  }
+  renderList();
+}
+
+function renderList() {
+  const host = $("list");
+  host.innerHTML = "";
+
+  const needle = filter.toLowerCase();
+  const shown = needle
+    ? games.filter(
+        (g) =>
+          (g.name || "").toLowerCase().includes(needle) || g.id.toLowerCase().includes(needle)
+      )
+    : games;
+
+  $("gameCount").textContent =
+    games.length === 0
+      ? "empty"
+      : needle
+        ? `${shown.length} of ${games.length}`
+        : `${games.length} game${games.length === 1 ? "" : "s"}`;
+
+  if (shown.length === 0) {
+    const div = document.createElement("div");
+    div.className = "empty";
+    div.textContent = games.length === 0
+      ? "No games yet. Create your first one."
+      : `Nothing matches "${filter}".`;
+    host.appendChild(div);
+    return;
+  }
+
+  for (const game of shown) {
+    const row = document.createElement("div");
+    row.className = "game-row" + (game.id === selected ? " selected" : "");
+
+    const thumb = document.createElement("div");
+    thumb.className = "thumb";
+    if (game.thumbnailUrl) {
+      const img = document.createElement("img");
+      img.src = game.thumbnailUrl;
+      img.alt = "";
+      img.loading = "lazy";
+      // A broken thumbnail URL shouldn't leave a blank box with no explanation.
+      img.addEventListener("error", () => {
+        thumb.textContent = (game.name || game.id).charAt(0).toUpperCase();
+      });
+      thumb.appendChild(img);
+    } else {
+      thumb.textContent = (game.name || game.id).charAt(0).toUpperCase();
+    }
+
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    const name = document.createElement("div");
+    name.className = "name";
+    name.textContent = game.name || game.id;
+    const sub = document.createElement("div");
+    sub.className = "sub";
+    sub.textContent = `${game.id} · ${game.minPlayers ?? 1}–${game.maxPlayers ?? 8}p`;
+    meta.append(name, sub);
+
+    const actions = document.createElement("div");
+    actions.className = "game-actions";
+
+    const editBtn = document.createElement("button");
+    editBtn.className = "icon-btn";
+    editBtn.type = "button";
+    editBtn.title = `Edit ${game.name || game.id}`;
+    editBtn.setAttribute("aria-label", `Edit ${game.name || game.id}`);
+    editBtn.textContent = "✎";
+    editBtn.addEventListener("click", (e) => { e.stopPropagation(); select(game.id); });
+
+    const dupBtn = document.createElement("button");
+    dupBtn.className = "icon-btn";
+    dupBtn.type = "button";
+    dupBtn.title = `Duplicate ${game.name || game.id}`;
+    dupBtn.setAttribute("aria-label", `Duplicate ${game.name || game.id}`);
+    dupBtn.textContent = "⧉";
+    dupBtn.addEventListener("click", (e) => { e.stopPropagation(); duplicate(game.id); });
+
+    const delBtn = document.createElement("button");
+    delBtn.className = "icon-btn danger";
+    delBtn.type = "button";
+    delBtn.title = `Delete ${game.name || game.id}`;
+    delBtn.setAttribute("aria-label", `Delete ${game.name || game.id}`);
+    delBtn.textContent = "🗑";
+    delBtn.addEventListener("click", (e) => { e.stopPropagation(); removeGame(game.id); });
+
+    actions.append(editBtn, dupBtn, delBtn);
+
+    // The whole row is still clickable - the explicit buttons are for discoverability,
+    // not because clicking the row should stop working.
+    row.addEventListener("click", () => select(game.id));
+    row.append(thumb, meta, actions);
+    host.appendChild(row);
+  }
+}
+
+/** Warns before throwing away edits. Returns true if it's safe to proceed. */
+function confirmDiscard() {
+  if (!isDirty()) return true;
+  return confirm("You have unsaved changes. Discard them?");
+}
+
+function fillForm(game) {
+  $("id").value = game.id || "";
+  for (const f of FIELDS) $(f).value = game[f] == null ? "" : game[f];
+}
+
+function select(id) {
+  const game = games.find((g) => g.id === id);
+  if (!game || !confirmDiscard()) return;
+
+  selected = id;
+  touched.clear();
+  clearFieldErrors();
+  clear($("gameMsg"));
+
+  $("formTitle").textContent = game.name || id;
+  $("formMode").textContent = "editing";
+  $("formMode").classList.remove("new");
+  $("formSub").textContent = `Editing an existing catalog entry. Its ID (${id}) is fixed.`;
+  fillForm({ ...game, id });
+  $("id").disabled = true;
+  $("delete").hidden = false;
+  markClean();
+  updatePreview();
+  renderList();
+}
+
+/** Copies an existing game into a new draft - the fastest way to add a variant. */
+function duplicate(id) {
+  const game = games.find((g) => g.id === id);
+  if (!game || !confirmDiscard()) return;
+
+  selected = null;
+  touched.clear();
+  clearFieldErrors();
+  clear($("gameMsg"));
+
+  $("formTitle").textContent = "New game";
+  $("formMode").textContent = "creating";
+  $("formMode").classList.add("new");
+  $("formSub").textContent = `Copied from ${game.name || id}. Give it a new ID and save.`;
+  fillForm({ ...game, id: "" });
+  $("id").disabled = false;
+  $("delete").hidden = true;
+  markClean();
+  updatePreview();
+  renderList();
+  $("id").focus();
+  toast("Copied to a new draft", { kind: "info", note: "Pick a new ID, then save." });
+}
+
+function resetForm(opts = {}) {
+  if (!opts.force && !confirmDiscard()) return;
+
+  selected = null;
+  touched.clear();
+  clearFieldErrors();
+  clear($("gameMsg"));
+
+  $("formTitle").textContent = "New game";
+  $("formMode").textContent = "creating";
+  $("formMode").classList.add("new");
+  $("formSub").textContent = "Fill this in and save to add it to the catalog.";
+  $("gameForm").reset();
+  $("id").disabled = false;
+  $("minPlayers").value = 1;
+  $("maxPlayers").value = 8;
+  $("delete").hidden = true;
+  markClean();
+  updatePreview();
+  renderList();
+}
+
+/* ---------------------------------------------------------------- validation */
+
+const okUrl = (u) => typeof u === "string" && (/^\/[^/]/.test(u) || /^https:\/\/.+/.test(u));
+
+// Mirrors firestore.rules so a bad entry is caught before the write is rejected. Keyed by
+// field so each message can sit under the input it's about.
+function fieldErrors(game, { creating }) {
+  const errors = {};
+
+  if (creating) {
+    if (!game.id) errors.id = "An ID is required.";
+    else if (!/^[a-z0-9][a-z0-9-]{0,38}$/.test(game.id)) {
+      errors.id = "Lowercase letters, digits and dashes only, starting with a letter or digit.";
+    } else if (games.some((g) => g.id === game.id)) {
+      errors.id = "A game with that ID already exists.";
+    }
+  }
+
+  if (!game.name) errors.name = "A name is required.";
+  else if (game.name.length > 60) errors.name = "Keep the name to 60 characters or fewer.";
+
+  if ((game.description || "").length > 300) {
+    errors.description = "Keep the description to 300 characters or fewer.";
+  }
+
+  if (!Number.isInteger(game.minPlayers) || game.minPlayers < 1) {
+    errors.players = "Min players must be a whole number, 1 or more.";
+  } else if (!Number.isInteger(game.maxPlayers) || game.maxPlayers < game.minPlayers) {
+    errors.players = "Max players can't be less than min players.";
+  }
+
+  if (!game.screenUrl) errors.screenUrl = "A screen URL is required.";
+  else if (!okUrl(game.screenUrl)) errors.screenUrl = "Must be a /path or an https:// URL.";
+
+  if (!game.controllerUrl) errors.controllerUrl = "A controller URL is required.";
+  else if (!okUrl(game.controllerUrl)) errors.controllerUrl = "Must be a /path or an https:// URL.";
+
+  if (game.thumbnailUrl && !okUrl(game.thumbnailUrl)) {
+    errors.thumbnailUrl = "Must be a /path or an https:// URL.";
+  }
+
+  return errors;
+}
+
+function clearFieldErrors() {
+  for (const key of ["id", "name", "description", "players", "screenUrl", "controllerUrl", "thumbnailUrl"]) {
+    const el = $("err-" + key);
+    if (el) { el.textContent = ""; el.classList.remove("show"); }
+  }
+  for (const f of FORM_IDS) $(f).classList.remove("invalid");
+}
+
+/**
+ * Paints validation state.
+ * @param {boolean} all when false, only fields the user has already touched are marked,
+ *   so the form doesn't turn red before anything has been typed.
+ */
+function paintErrors(all = false) {
+  const errors = fieldErrors(readForm(), { creating: !selected });
+
+  for (const key of ["id", "name", "description", "players", "screenUrl", "controllerUrl", "thumbnailUrl"]) {
+    const el = $("err-" + key);
+    if (!el) continue;
+    const show = errors[key] && (all || touched.has(key));
+    el.textContent = show ? errors[key] : "";
+    el.classList.toggle("show", !!show);
+
+    if (key === "players") {
+      $("minPlayers").classList.toggle("invalid", !!show);
+      $("maxPlayers").classList.toggle("invalid", !!show);
+    } else if ($(key)) {
+      $(key).classList.toggle("invalid", !!show);
+    }
+  }
+  return errors;
+}
+
+/* ---------------------------------------------------------------- preview */
+
+// Renders exactly what the catalog card will look like, so nobody has to save and
+// navigate away to find out.
+function updatePreview() {
+  const game = readForm();
+
+  $("previewName").textContent = game.name || "Untitled game";
+  $("previewDesc").textContent = game.description || "No description yet.";
+  $("previewPlayers").textContent =
+    `${Number.isFinite(game.minPlayers) ? game.minPlayers : 1}–${Number.isFinite(game.maxPlayers) ? game.maxPlayers : 8} players`;
+
+  const art = $("previewArt");
+  art.innerHTML = "";
+  if (game.thumbnailUrl && okUrl(game.thumbnailUrl)) {
+    const img = document.createElement("img");
+    img.src = game.thumbnailUrl;
+    img.alt = "";
+    img.addEventListener("error", () => {
+      art.innerHTML = "";
+      const span = document.createElement("span");
+      span.className = "initial";
+      span.textContent = (game.name || "?").charAt(0).toUpperCase();
+      art.appendChild(span);
+    });
+    art.appendChild(img);
+  } else {
+    const span = document.createElement("span");
+    span.className = "initial";
+    span.textContent = (game.name || "?").charAt(0).toUpperCase();
+    art.appendChild(span);
+  }
+
+  $("descCount").textContent = String(game.description.length);
+  $("dirtyFlag").classList.toggle("show", isDirty());
+}
+
+// Live feedback as they type: preview, character count, dirty flag, and validation for
+// fields already touched.
+for (const f of FORM_IDS) {
+  $(f).addEventListener("input", () => { updatePreview(); paintErrors(); });
+  $(f).addEventListener("blur", () => {
+    touched.add(f === "minPlayers" || f === "maxPlayers" ? "players" : f);
+    paintErrors();
+  });
+}
+
+$("search").addEventListener("input", (e) => {
+  filter = e.target.value.trim();
+  renderList();
+});
+
+/* ---------------------------------------------------------------- save/delete */
+
+$("gameForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+
+  const creating = !selected;
+  const form = readForm();
+  const id = creating ? form.id : selected;
+
+  // Everything is "touched" on submit, so all problems surface at once.
+  for (const key of ["id", "name", "description", "players", "screenUrl", "controllerUrl", "thumbnailUrl"]) {
+    touched.add(key);
+  }
+  const errors = paintErrors(true);
+  if (Object.keys(errors).length) {
+    const first = $(Object.keys(errors)[0] === "players" ? "minPlayers" : Object.keys(errors)[0]);
+    if (first) first.focus();
+    toast("Fix the highlighted fields", {
+      kind: "error",
+      note: `${Object.keys(errors).length} field${Object.keys(errors).length === 1 ? "" : "s"} need attention.`,
+    });
+    return;
+  }
+
+  const { id: _drop, ...payload } = form;
+
+  $("save").disabled = true;
+  $("save").classList.add("loading");
+  try {
+    await setDoc(doc(firestore, "games", id), payload, { merge: true });
+    await loadGames();
+    // What's on screen is now exactly what's stored, so clear the dirty state before
+    // re-selecting - otherwise select()'s discard guard prompts about the edits we
+    // just successfully saved.
+    markClean();
+    selected = id;
+    select(id);
+    toast(creating ? `Added ${payload.name}` : `Saved ${payload.name}`, {
+      note: creating ? "It's live in the catalog now." : "Changes are live.",
+    });
+  } catch (err) {
+    const denied = err.code === "permission-denied";
+    message($("gameMsg"), "error", denied
+      ? "Your account isn't an admin, so the catalog is read-only for you."
+      : err.message);
+    toast(denied ? "Not allowed" : "Could not save", {
+      kind: "error",
+      note: denied ? "This account lacks admin access." : err.message,
+    });
+  } finally {
+    $("save").disabled = false;
+    $("save").classList.remove("loading");
+  }
+});
+
+async function removeGame(id) {
+  const game = games.find((g) => g.id === id);
+  const label = game?.name || id;
+  if (!confirm(`Delete "${label}" from the catalog?\n\nRooms already running it keep working — it just stops appearing in the catalog.`)) {
+    return;
+  }
+
+  try {
+    await deleteDoc(doc(firestore, "games", id));
+    if (selected === id) resetForm({ force: true });
+    await loadGames();
+    toast(`Deleted ${label}`, { note: "It no longer appears in the catalog." });
+  } catch (err) {
+    toast("Could not delete", { kind: "error", note: err.message });
+  }
+}
+
+$("delete").addEventListener("click", async () => {
+  if (!selected) return;
+  $("delete").disabled = true;
+  $("delete").classList.add("loading");
+  try {
+    await removeGame(selected);
+  } finally {
+    $("delete").disabled = false;
+    $("delete").classList.remove("loading");
+  }
+});
+
+$("cancel").addEventListener("click", () => resetForm());
+$("new").addEventListener("click", () => {
+  resetForm();
+  $("id").focus();
+});
+
+// Cmd/Ctrl-S saves without reaching for the mouse - expected in any editor-shaped UI.
+document.addEventListener("keydown", (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
+    if ($("adminView").classList.contains("hidden")) return;
+    e.preventDefault();
+    $("gameForm").requestSubmit();
+  }
+});
+
+// Catches tab-close and reloads; in-app navigation is guarded by confirmDiscard().
+window.addEventListener("beforeunload", (e) => {
+  if (!isDirty()) return;
+  e.preventDefault();
+  e.returnValue = "";
+});
+
+$("grant").addEventListener("click", async () => {
+  const email = $("grantEmail").value.trim();
+  if (!email) return;
+  $("grant").disabled = true;
+  $("grant").classList.add("loading");
+  clear($("grantMsg"));
+  try {
+    await httpsCallable(functions, "grantAdmin")({ email });
+    message($("grantMsg"), "ok", `${email} is now an admin. They'll get access next time they sign in.`);
+    toast(`${email} is now an admin`, { note: "Access applies next time they sign in." });
+    $("grantEmail").value = "";
+  } catch (err) {
+    message($("grantMsg"), "error", err.message);
+    toast("Could not grant admin", { kind: "error", note: err.message });
+  } finally {
+    $("grant").disabled = false;
+    $("grant").classList.remove("loading");
+  }
+});
+
+/* ---------------------------------------------------------------- session */
+
+function showAuthView() {
+  $("authView").classList.remove("hidden");
+  $("adminView").classList.add("hidden");
+  $("authSubmit").disabled = false;
+  $("authSubmit").classList.remove("loading");
+}
+
+function showAdminView() {
+  $("authView").classList.add("hidden");
+  $("adminView").classList.remove("hidden");
+  // force: nothing to discard on first entry, and prompting here would be nonsense.
+  resetForm({ force: true });
+  loadGames();
+}
+
+/**
+ * Routes a signed-in user to the right view.
+ *
+ * Shared by the auth-state listener and the submit handler so both agree on what "signed
+ * in but not an admin" looks like.
+ */
+async function applySession(user) {
+  if (!user || user.isAnonymous) {
+    showAuthView();
+    setMode(mode);
+    return;
+  }
+
+  const token = await user.getIdTokenResult().catch(() => null);
+  if (token?.claims?.admin === true) {
+    showAdminView();
+    return;
+  }
+
+  // Signed in without the claim: say so plainly rather than showing a catalog that would
+  // reject every write.
+  showAuthView();
+  message(
+    $("authMsg"),
+    "error",
+    "This account isn't an admin yet. Ask an existing admin to grant you access."
+  );
+}
+
+// Account identity and sign-out live in the shared nav (chrome.js); this only decides which
+// view of the page to show. While a submit is in flight the handler owns the transition, so
+// this stays out of the way and lets the success message be read.
+onAuthStateChanged(auth, (user) => {
+  if (submitting) return;
+  applySession(user);
+});
+
+setMode("signin");
+</script>
+</body>
+</html>

@@ -1,0 +1,6 @@
+# Settings for the functions package, which pnpm installs independently of the root project
+# (Firebase deploys this directory as a standalone unit).
+allowBuilds:
+  # protobufjs' postinstall backs the gRPC transport firebase-admin uses at runtime.
+  '@firebase/util': true
+  protobufjs: true

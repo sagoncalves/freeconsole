@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<title>Nidhogg — Controller</title>
+<link rel="stylesheet" href="/console.css" />
+<style>
+  * { -webkit-tap-highlight-color: transparent; user-select: none; -webkit-user-select: none; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    display: flex; flex-direction: column;
+    touch-action: none; overscroll-behavior: none;
+    padding: max(6px, env(safe-area-inset-top)) 8px max(8px, env(safe-area-inset-bottom));
+    gap: 8px;
+  }
+
+  .status {
+    text-align: center; color: var(--text-dim); font-size: 12px;
+    display: flex; align-items: center; justify-content: center; gap: 10px;
+    min-height: 16px;
+  }
+  .status .armed {
+    font-family: var(--font-mono); font-size: 10px; letter-spacing: .1em;
+    text-transform: uppercase; padding: 2px 7px; border-radius: 999px;
+    border: 1px solid var(--line); color: var(--text-faint);
+  }
+  .status .armed.on { color: var(--amber); border-color: var(--amber); }
+
+  /* The pad fills everything left over. Three columns: move, guard, attack. Guard sits in
+     the middle where both thumbs can reach it, because changing height is the most frequent
+     decision in the game. */
+  #pad {
+    flex: 1; display: grid; gap: 8px;
+    grid-template-columns: 1fr 1.05fr 1fr;
+    min-height: 0;
+  }
+  #pad.locked { opacity: .35; pointer-events: none; }
+
+  .col { display: grid; gap: 8px; min-height: 0; }
+  .col.move { grid-template-rows: 1.2fr 1fr; }
+  .col.act { grid-template-rows: 1.2fr 1fr; }
+
+  .key {
+    border-radius: 14px; border: 1px solid var(--line);
+    background: rgba(26,32,56,.55);
+    display: grid; place-items: center; text-align: center;
+    font-family: var(--font-display); font-weight: 700;
+    font-size: clamp(11px, 3.2vw, 16px); letter-spacing: .06em;
+    color: var(--text); position: relative; overflow: hidden;
+    transition: background .06s, transform .06s, box-shadow .06s;
+  }
+  .key .sub {
+    display: block; font-family: var(--font-mono); font-weight: 400;
+    font-size: 9px; letter-spacing: .1em; color: var(--text-faint); margin-top: 3px;
+  }
+  .key.down { transform: scale(.97); }
+
+  /* Movement: a split cell for left/right, and a run toggle that latches while held. */
+  .dpad { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .key.dir.down { background: rgba(53,240,224,.22); box-shadow: inset 0 0 22px rgba(53,240,224,.3); }
+  .key.jump.down, .key.duck.down { background: rgba(53,240,224,.18); }
+
+  /* Guard strip: three stacked zones. Sliding a thumb up and down the strip changes height
+     without lifting, which is what makes fencing possible on glass. */
+  .guard { display: grid; grid-template-rows: 1fr 1fr 1fr; gap: 6px; }
+  .gkey {
+    border-radius: 12px; border: 1px solid var(--line);
+    background: rgba(10,12,24,.6);
+    display: grid; place-items: center; gap: 2px;
+    font-family: var(--font-mono); font-size: 10px; letter-spacing: .12em;
+    text-transform: uppercase; color: var(--text-faint);
+    transition: background .08s, color .08s, box-shadow .08s, border-color .08s;
+  }
+  .gkey .bar {
+    width: 58%; height: 4px; border-radius: 2px;
+    background: var(--text-faint); transition: background .08s, box-shadow .08s;
+  }
+  .gkey.on {
+    background: rgba(255,194,71,.16); border-color: var(--amber); color: var(--amber);
+    box-shadow: 0 0 20px rgba(255,194,71,.28);
+  }
+  .gkey.on .bar { background: var(--amber); box-shadow: 0 0 14px var(--amber); }
+
+  /* Attacks. Stab is the big one; kick and throw share the row below. */
+  .key.stab {
+    background: linear-gradient(150deg, var(--hot), var(--hot-dim));
+    border-color: transparent; box-shadow: var(--bloom-hot);
+    font-size: clamp(13px, 4vw, 20px);
+  }
+  .key.stab.down { filter: brightness(1.2); transform: scale(.97); }
+  .small { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+
+  #banner {
+    position: fixed; inset: 0; z-index: 20;
+    display: none; flex-direction: column; align-items: center; justify-content: center;
+    gap: 10px; background: rgba(5,6,13,.94); text-align: center; padding: 24px;
+  }
+  #banner.show { display: flex; }
+  #banner .big {
+    font-size: clamp(26px, 9vw, 46px); font-weight: 700; line-height: 1.05;
+    color: var(--glow); text-shadow: var(--bloom-glow);
+  }
+  #banner .sub { color: var(--text-dim); font-size: 14px; max-width: 32ch; }
+</style>
+</head>
+<body>
+
+<div class="status">
+  <span id="status">Connecting…</span>
+  <span class="armed" id="armed">unarmed</span>
+</div>
+
+<div id="pad" class="locked">
+  <div class="col move">
+    <div class="dpad">
+      <div class="key dir" data-hold="left">◀</div>
+      <div class="key dir" data-hold="right">▶</div>
+    </div>
+    <div class="dpad">
+      <div class="key jump" data-press="jump">JUMP<span class="sub">wall too</span></div>
+      <div class="key duck" data-hold="down">DUCK<span class="sub">hold+move=crawl</span></div>
+    </div>
+  </div>
+
+  <div class="col guard" id="guard">
+    <div class="gkey" data-guard="0"><div class="bar"></div>High</div>
+    <div class="gkey on" data-guard="1"><div class="bar"></div>Mid</div>
+    <div class="gkey" data-guard="2"><div class="bar"></div>Low</div>
+  </div>
+
+  <div class="col act">
+    <div class="key stab" data-press="attack">STAB<span class="sub">run to lunge</span></div>
+    <div class="small">
+      <div class="key" data-press="kick">KICK</div>
+      <div class="key" data-press="throw">THROW</div>
+    </div>
+  </div>
+</div>
+
+<div id="banner">
+  <div class="big" id="bannerBig">—</div>
+  <div class="sub" id="bannerSub"></div>
+</div>
+
+<script src="/sdk.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  var freeconsole = new FreeConsole();
+  freeconsole.setOrientation("landscape");
+
+  var pad = document.getElementById("pad");
+  var statusEl = document.getElementById("status");
+  var armedEl = document.getElementById("armed");
+  var banner = document.getElementById("banner");
+
+  var guard = 1;
+  var over = false;
+
+  /** Held keys are sent on change only — never per frame. */
+  var held = { left: false, right: false, down: false, run: false, up: false };
+
+  function sendHold(key, value) {
+    if (held[key] === value) return;
+    held[key] = value;
+    freeconsole.message(FreeConsole.SCREEN, { t: "hold", k: key, v: value });
+  }
+  function sendPress(key) {
+    freeconsole.message(FreeConsole.SCREEN, { t: "press", k: key });
+  }
+  function sendGuard(g) {
+    if (g === guard) return;
+    guard = g;
+    freeconsole.message(FreeConsole.SCREEN, { t: "guard", g: g });
+    var keys = document.querySelectorAll("#guard .gkey");
+    for (var i = 0; i < keys.length; i++) {
+      keys[i].classList.toggle("on", Number(keys[i].dataset.guard) === g);
+    }
+    freeconsole.vibrate(6);
+  }
+
+  /**
+   * Pointer routing.
+   *
+   * Every pad key is driven from pointer events on the document rather than per-element
+   * listeners, so a thumb that slides off a key releases it, and a thumb that slides onto
+   * the guard strip changes height without lifting. Tracking by pointerId keeps two thumbs
+   * independent — the whole game is left thumb moving while the right thumb fights.
+   */
+  var active = Object.create(null);   // pointerId -> element
+
+  function keyAt(x, y) {
+    var el = document.elementFromPoint(x, y);
+    while (el && el !== document.body) {
+      if (el.dataset && (el.dataset.hold || el.dataset.press || el.dataset.guard !== undefined)) return el;
+      el = el.parentElement;
+    }
+    return null;
+  }
+
+  function engage(pointerId, el) {
+    var prev = active[pointerId];
+    if (prev === el) return;
+
+    // Leaving a held key releases it. A press key fires once on entry and does not repeat.
+    if (prev && prev.dataset.hold) { sendHold(prev.dataset.hold, false); prev.classList.remove("down"); }
+    if (prev) prev.classList.remove("down");
+
+    active[pointerId] = el;
+    if (!el) return;
+
+    el.classList.add("down");
+    if (el.dataset.hold) {
+      sendHold(el.dataset.hold, true);
+      // Holding a direction is a walk; the screen promotes it to a run once the stick is
+      // pushed, so a direction key doubles as run when held past a short threshold.
+      if (el.dataset.hold === "left" || el.dataset.hold === "right") armRun(pointerId);
+    } else if (el.dataset.press) {
+      sendPress(el.dataset.press);
+      freeconsole.vibrate(10);
+    } else if (el.dataset.guard !== undefined) {
+      sendGuard(Number(el.dataset.guard));
+    }
+  }
+
+  /**
+   * Run is implicit: hold a direction for a beat and the fencer commits to a run, which is
+   * also what turns a stab into a lunge. Making it a separate button would cost a thumb
+   * nobody has spare.
+   */
+  var runTimers = Object.create(null);
+  function armRun(pointerId) {
+    clearTimeout(runTimers[pointerId]);
+    runTimers[pointerId] = setTimeout(function () {
+      var el = active[pointerId];
+      if (el && el.dataset && (el.dataset.hold === "left" || el.dataset.hold === "right")) {
+        sendHold("run", true);
+      }
+    }, 180);
+  }
+  function disarmRun(pointerId) {
+    clearTimeout(runTimers[pointerId]);
+    // Only drop run when no pointer is still holding a direction.
+    var stillMoving = false;
+    for (var id in active) {
+      var el = active[id];
+      if (el && el.dataset && (el.dataset.hold === "left" || el.dataset.hold === "right")) stillMoving = true;
+    }
+    if (!stillMoving) sendHold("run", false);
+  }
+
+  document.addEventListener("pointerdown", function (e) {
+    if (over) { restart(); return; }
+    e.preventDefault();
+    engage(e.pointerId, keyAt(e.clientX, e.clientY));
+  }, { passive: false });
+
+  document.addEventListener("pointermove", function (e) {
+    if (!(e.pointerId in active)) return;
+    e.preventDefault();
+    var el = keyAt(e.clientX, e.clientY);
+    // Sliding between press-keys must not re-fire them; only holds and guards track a move.
+    if (el && el.dataset.press && el !== active[e.pointerId]) return;
+    engage(e.pointerId, el);
+  }, { passive: false });
+
+  function release(e) {
+    var el = active[e.pointerId];
+    if (el) {
+      if (el.dataset.hold) sendHold(el.dataset.hold, false);
+      el.classList.remove("down");
+    }
+    delete active[e.pointerId];
+    disarmRun(e.pointerId);
+  }
+  document.addEventListener("pointerup", release);
+  document.addEventListener("pointercancel", release);
+
+  // A backgrounded phone must not leave a key stuck down on the screen.
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) {
+      for (var k in held) if (held[k]) sendHold(k, false);
+      for (var id in active) delete active[id];
+      var downs = document.querySelectorAll(".key.down, .gkey.down");
+      for (var i = 0; i < downs.length; i++) downs[i].classList.remove("down");
+    }
+  });
+
+  function restart() {
+    over = false;
+    banner.classList.remove("show");
+    freeconsole.message(FreeConsole.SCREEN, { t: "restart" });
+  }
+
+  /* ------------------------------------------------------------------ shell */
+
+  freeconsole.onReady = function () {
+    statusEl.textContent = "Waiting for the round…";
+  };
+
+  freeconsole.onMessage = function (deviceId, data) {
+    // Only the screen is authoritative.
+    if (deviceId !== FreeConsole.SCREEN || !data) return;
+    var me = freeconsole.getDeviceId();
+
+    if (data.armed && me in data.armed) {
+      var isArmed = !!data.armed[me];
+      armedEl.textContent = isArmed ? "armed" : "unarmed";
+      armedEl.classList.toggle("on", isArmed);
+    }
+
+    if (data.phase === "fight") {
+      over = false;
+      banner.classList.remove("show");
+      pad.classList.remove("locked");
+      var side = data.sides && data.sides[me];
+      statusEl.textContent = side === 0 ? "Push right →" : "← Push left";
+    } else if (data.phase === "waiting") {
+      pad.classList.add("locked");
+      statusEl.textContent = "Waiting for two players…";
+    } else if (data.phase === "over") {
+      over = true;
+      pad.classList.add("locked");
+      var won = data.winner === me;
+      document.getElementById("bannerBig").textContent = won ? "You reached the goal" : "Defeated";
+      document.getElementById("bannerSub").textContent = won
+        ? "Nidhogg devours you all the same. Tap to fight again."
+        : "Tap to fight again.";
+      banner.classList.add("show");
+      freeconsole.vibrate(won ? 40 : 12);
+    }
+  };
+})();
+</script>
+</body>
+</html>

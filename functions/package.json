@@ -1,0 +1,22 @@
+{
+  "name": "console-functions",
+  "description": "Room lifecycle functions for the console platform",
+  "main": "index.js",
+  "type": "commonjs",
+  "engines": {
+    "node": "22"
+  },
+  "packageManager": "pnpm@11.5.2",
+  "scripts": {
+    "serve": "firebase emulators:start --only functions,database,firestore,auth,hosting",
+    "deploy": "firebase deploy --only functions",
+    "logs": "firebase functions:log"
+  },
+  "dependencies": {
+    "@firebase/app": "^0.14.4",
+    "@google-cloud/functions-framework": "^5.0.5",
+    "firebase-admin": "^13.0.2",
+    "firebase-functions": "^6.3.0"
+  },
+  "private": true
+}

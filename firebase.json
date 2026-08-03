@@ -1,0 +1,56 @@
+{
+  "database": {
+    "rules": "database.rules.json"
+  },
+  "firestore": {
+    "rules": "firestore.rules",
+    "indexes": "firestore.indexes.json"
+  },
+  "functions": [
+    {
+      "source": "functions",
+      "codebase": "default",
+      "runtime": "nodejs22",
+      "ignore": ["node_modules", ".git", "firebase-debug.log", "*.local"]
+    }
+  ],
+  "hosting": {
+    "public": "public",
+    "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
+    "headers": [
+      {
+        "//": "Firebase Hosting defaults to max-age=3600. For ES modules that is actively harmful: a browser can hold one module for an hour while fetching a fresh one that imports it, and the mismatched pair fails to link with 'does not provide an export named X'. Clearing site data does not help, because the edge still serves the cached copy. Always revalidate HTML and JS; hashed assets under /vendor/ can still cache hard.",
+        "source": "**/*.@(js|mjs|html)",
+        "headers": [{ "key": "Cache-Control", "value": "no-cache, must-revalidate" }]
+      },
+      {
+        "//": "Games run in a sandbox='allow-scripts' iframe, which gives them origin 'null'. A null origin treats EVERY fetch as cross-origin, so an ES module import of /vendor/three.js is blocked unless the response carries CORS headers. Games loaded with a classic <script src> are unaffected, which is why this only showed up once a game used `import`. These are public static assets, so allowing any origin costs nothing - and third-party games on other domains need it regardless.",
+        "source": "/vendor/**",
+        "headers": [
+          { "key": "Cache-Control", "value": "public, max-age=86400" },
+          { "key": "Access-Control-Allow-Origin", "value": "*" }
+        ]
+      },
+      {
+        "//": "Same reason, for the SDK and any game asset a sandboxed frame may import.",
+        "source": "/sdk.js",
+        "headers": [{ "key": "Access-Control-Allow-Origin", "value": "*" }]
+      },
+      {
+        "source": "/games/**",
+        "headers": [{ "key": "Access-Control-Allow-Origin", "value": "*" }]
+      }
+    ],
+    "rewrites": []
+  },
+  "emulators": {
+    "auth": { "port": 9099 },
+    "functions": { "port": 5001 },
+    "firestore": { "port": 8080 },
+    "database": { "port": 9000 },
+    "//hosting": "3000 to match `pnpm dev`; 5000 is unusable anyway since macOS AirPlay Receiver binds it. Only used if you run the emulators directly - the normal dev loop is `pnpm dev` against the live project.",
+    "hosting": { "host": "0.0.0.0", "port": 3000 },
+    "ui": { "enabled": true, "port": 4000 },
+    "singleProjectMode": true
+  }
+}

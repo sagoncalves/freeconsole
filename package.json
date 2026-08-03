@@ -1,0 +1,32 @@
+{
+  "name": "console",
+  "version": "0.1.0",
+  "private": true,
+  "description": "An AirConsole-style party-game platform: the browser is the screen, phones are the controllers.",
+  "type": "module",
+  "packageManager": "pnpm@11.5.2",
+  "scripts": {
+    "dev": "./scripts/dev.sh",
+    "test": "./scripts/test.sh && ./scripts/test-flow.sh && ./scripts/test-join.sh && ./scripts/test-messages.sh && ./scripts/test-admin-auth.sh",
+    "test:rules": "./scripts/test.sh",
+    "test:flow": "./scripts/test-flow.sh",
+    "test:admin": "./scripts/test-admin-auth.sh",
+    "seed": "node scripts/seed-catalog.cjs",
+    "build:vendor": "./scripts/build-vendor.sh",
+    "deploy": "vercel --prod",
+    "deploy:preview": "vercel",
+    "deploy:functions": "firebase deploy --only functions && ./scripts/allow-public-invoke.sh",
+    "deploy:rules": "firebase deploy --only firestore:rules,database",
+    "test:join": "./scripts/test-join.sh",
+    "test:messages": "./scripts/test-messages.sh"
+  },
+  "devDependencies": {
+    "@dimforge/rapier2d-compat": "0.14.0",
+    "@firebase/rules-unit-testing": "^4.0.1",
+    "firebase": "^11.1.0",
+    "firebase-admin": "^13.0.2",
+    "jsqr": "^1.4.0",
+    "qrcode": "^1.5.4",
+    "three": "0.171.0"
+  }
+}

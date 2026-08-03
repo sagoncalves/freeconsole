@@ -1,0 +1,407 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<title>Beach Volley — Controller</title>
+<link rel="stylesheet" href="/console.css" />
+<style>
+  * { -webkit-tap-highlight-color: transparent; user-select: none; -webkit-user-select: none; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; touch-action: none; overscroll-behavior: none;
+    overflow: hidden;
+    --me: var(--glow);
+    background: var(--ink-900);
+  }
+
+  /* ---- top strip: who you are, and the score ---- */
+  /* Plain padding, not env(safe-area-inset-*): inside the rotated stage those insets still
+     refer to the physical screen edges, so in portrait the "top" inset would pad what is
+     now the left-hand side. A uniform margin is correct in both orientations. */
+  .bar {
+    display: flex; align-items: center; gap: 9px; flex-shrink: 0;
+    padding: 10px 16px 7px;
+  }
+  .dot {
+    width: 22px; height: 22px; border-radius: 7px; flex-shrink: 0;
+    background: var(--me); box-shadow: 0 0 14px var(--me);
+    display: grid; place-items: center; font-size: 12px;
+  }
+  .bar .name { font-weight: 700; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bar .score {
+    margin-left: auto; font-family: var(--font-mono); font-size: 13px;
+    color: var(--text-dim); letter-spacing: .1em; flex-shrink: 0;
+  }
+  .bar .score b { color: var(--text); }
+
+  /* ---- the pad: three big zones, sized for thumbs in landscape ---- */
+  #pad {
+    flex: 1; display: flex; gap: 9px; min-height: 0; position: relative;
+    padding: 4px 12px 12px;
+  }
+
+  /* Covers the pad while the match has not started, so nobody mashes buttons that do
+     nothing yet and concludes their phone is broken. */
+  #hold {
+    position: absolute; inset: 4px 12px 12px;
+    border-radius: 20px; display: none;
+    align-items: center; justify-content: center; text-align: center;
+    background: rgba(5,7,16,.82); backdrop-filter: blur(3px);
+    font-size: 14px; color: var(--text-dim); padding: 16px; line-height: 1.5;
+  }
+  #hold.show { display: flex; }
+  #hold b { color: var(--glow); font-weight: 700; }
+
+  /* Deliberately inert: no :active state, no lit-up class, no transition.
+     The player's real feedback is their character moving on the TV. A button that lights up
+     locally the instant it is touched sets that as the reference point, so the character -
+     which cannot move until the message reaches the screen - always looks like it is
+     lagging behind the pad. Removing the local flash removes the thing it was late against. */
+  .btn {
+    flex: 1; border-radius: 20px; border: 1px solid var(--line);
+    background: rgba(255,255,255,.045);
+    display: grid; place-items: center; position: relative;
+    overflow: hidden;
+  }
+  #jump { flex: 1.15; }
+  /* vmin, not vh: vh tracks the physical screen, so in portrait - where the stage's height
+     is the screen's WIDTH - the glyphs would resize against the wrong axis. vmin is the
+     same number whichever way the phone is held. */
+  .glyph { font-size: clamp(30px, 9vmin, 52px); line-height: 1; opacity: .9; }
+  .lab {
+    position: absolute; bottom: 9px; font-family: var(--font-mono);
+    font-size: 9.5px; letter-spacing: .16em; text-transform: uppercase; color: var(--text-faint);
+  }
+
+  /* ---- skin picker, shown before the match and on the game-over card ---- */
+  /* Absolute, not fixed: a fixed element ignores the stage's rotation and would stay
+     upright while everything behind it turned. */
+  .sheet {
+    position: absolute; inset: 0; z-index: 20; display: none;
+    flex-direction: column; align-items: center; justify-content: center; gap: 12px;
+    background: rgba(6,9,20,.9); backdrop-filter: blur(7px);
+    padding: 14px 16px;
+  }
+  .sheet.show { display: flex; }
+  .sheet h2 { margin: 0; font-size: 17px; letter-spacing: .02em; }
+  .sheet .sub { margin: 0; font-size: 12.5px; color: var(--text-dim); text-align: center; }
+
+  .skins {
+    display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px;
+    width: 100%; max-width: 560px;
+  }
+  .skin {
+    border: 1px solid var(--line); border-radius: 14px;
+    background: rgba(255,255,255,.05); padding: 8px 4px;
+    display: flex; flex-direction: column; align-items: center; gap: 4px;
+    transition: border-color .15s, background .15s, transform .1s;
+  }
+  .skin .face { font-size: clamp(20px, 5.4vmin, 28px); line-height: 1; }
+  .skin .nm { font-size: 10px; color: var(--text-dim); letter-spacing: .02em; }
+  .skin .swatch { width: 100%; height: 4px; border-radius: 99px; }
+  .skin.sel {
+    border-color: var(--line-bright); background: rgba(53,240,224,.14);
+    transform: translateY(-2px);
+  }
+  .skin:active { transform: scale(.96); }
+
+  .cta {
+    border: 0; border-radius: 14px; padding: 12px 26px;
+    font-family: var(--font-display); font-weight: 700; font-size: 15px;
+    letter-spacing: .06em; text-transform: uppercase;
+    background: var(--glow); color: #04121a;
+    box-shadow: var(--bloom-glow);
+  }
+  .cta:active { transform: scale(.97); }
+  .cta.ghost { background: rgba(255,255,255,.08); color: var(--text); box-shadow: none; }
+
+  /* The stage is always laid out landscape. Held upright, it is rotated a quarter turn
+     rather than reflowed, so the controls sit in the same place relative to the player's
+     hands in both orientations - and nobody is told to turn their phone.
+     Sized in viewport units and rotated about its centre: in portrait it is given the
+     screen's height as its width (and vice versa), so after the turn it fills the display
+     exactly. There is no transition on the transform - a rotating pad mid-game would be
+     worse than either end state. */
+  #stage {
+    position: fixed; top: 50%; left: 50%;
+    width: 100vw; height: 100vh;
+    transform: translate(-50%, -50%);
+    transform-origin: center center;
+    display: flex; flex-direction: column;
+    overflow: hidden;
+    /* The glow lives here rather than on the body so it turns with the layout. */
+    background:
+      radial-gradient(120% 90% at 50% 0%, rgba(255,190,110,.16), transparent 60%),
+      var(--ink-900);
+  }
+  @media (orientation: portrait) {
+    #stage {
+      width: 100vh; height: 100vw;
+      transform: translate(-50%, -50%) rotate(90deg);
+    }
+  }
+</style>
+</head>
+<body>
+
+<!-- Everything lives inside the stage, which is what gets rotated when the phone is held
+     upright. The layout inside it is always landscape, so the pad looks and behaves
+     identically whichever way the phone is turned. -->
+<div id="stage">
+  <div class="bar">
+    <div class="dot" id="dot"></div>
+    <div class="name" id="myName">…</div>
+    <div class="score" id="score"><b>0</b> – <b>0</b></div>
+  </div>
+
+  <div id="pad">
+    <div class="btn" id="left"><span class="glyph">◀</span><span class="lab">Left</span></div>
+    <div class="btn" id="jump"><span class="glyph">▲</span><span class="lab">Jump</span></div>
+    <div class="btn" id="right"><span class="glyph">▶</span><span class="lab">Right</span></div>
+    <div id="hold"><span id="holdText">Waiting for other players…</span></div>
+  </div>
+
+  <div class="sheet show" id="sheet">
+    <h2 id="sheetTitle">Pick your character</h2>
+    <p class="sub" id="sheetSub">Everyone plays the same — this is just you.</p>
+    <div class="skins" id="skins"></div>
+    <button class="cta" id="sheetGo">I'm ready</button>
+  </div>
+</div>
+
+<script src="/sdk.js"></script>
+<script type="module">
+/**
+ * Beach Volley - controller.
+ *
+ * Three buttons: left, jump, right. The pad sends an event on press and on release, never
+ * per frame - the screen holds the input state and simulates from it, so a rally costs a
+ * handful of messages rather than one per frame per player.
+ */
+import { SKINS, skinById, defaultSkinFor, hexCss } from "/games/beachvolley/skins.js?v=1";
+
+const freeconsole = new FreeConsole();
+
+function safeCall(fn, fallback) {
+  try { return fn(); } catch (err) { return fallback; }
+}
+
+/* ------------------------------------------------------------------- skins */
+
+let myDeviceId = safeCall(() => freeconsole.getDeviceId(), 1) || 1;
+let chosen = defaultSkinFor(myDeviceId).id;
+
+function renderSkins() {
+  const el = document.getElementById("skins");
+  el.innerHTML = SKINS.map((s) =>
+    '<div class="skin' + (s.id === chosen ? " sel" : "") + '" data-id="' + s.id + '">' +
+      '<span class="face">' + s.emoji + "</span>" +
+      '<span class="nm">' + s.name + "</span>" +
+      '<span class="swatch" style="background:' + hexCss(s.suit) + '"></span>' +
+    "</div>").join("");
+}
+
+document.getElementById("skins").addEventListener("pointerdown", (e) => {
+  const card = e.target.closest(".skin");
+  if (!card) return;
+  chosen = card.dataset.id;
+  renderSkins();
+  publishSkin();
+  if (freeconsole.vibrate) safeCall(() => freeconsole.vibrate(10));
+});
+
+/**
+ * Publish the choice two ways: custom device state so a screen that starts later still sees
+ * it, and a message so a running screen reacts immediately.
+ */
+function publishSkin() {
+  safeCall(() => freeconsole.setCustomDeviceStateProperty("skin", chosen));
+  safeCall(() => freeconsole.message(FreeConsole.SCREEN, { a: "skin", skin: chosen }));
+}
+
+document.getElementById("sheetGo").addEventListener("click", () => {
+  publishSkin();
+  // One button, two meanings: after a win it asks for a rematch (which sends everyone back
+  // to the lobby), otherwise it is this player's ready flag. Both end with the sheet down
+  // and the screen waiting on whoever is left.
+  if (matchOver) safeCall(() => freeconsole.message(FreeConsole.SCREEN, { a: "again" }));
+  else safeCall(() => freeconsole.message(FreeConsole.SCREEN, { a: "ready", on: true }));
+  iAmReady = true;
+  hideSheet();
+  if (freeconsole.vibrate) safeCall(() => freeconsole.vibrate(18));
+});
+
+function hideSheet() { document.getElementById("sheet").classList.remove("show"); }
+function showSheet(title, sub, cta) {
+  document.getElementById("sheetTitle").textContent = title;
+  document.getElementById("sheetSub").textContent = sub;
+  document.getElementById("sheetGo").textContent = cta;
+  document.getElementById("sheet").classList.add("show");
+}
+
+/* -------------------------------------------------------------------- pad */
+
+/**
+ * Pointer handling. Each button tracks the pointer that pressed it so a thumb sliding off
+ * the edge still releases, which is the usual way a held direction gets stuck.
+ */
+function wireHold(el, key) {
+  let pointerId = null;
+
+  const press = (e) => {
+    // Take over rather than bailing out. Guarding with `if (pointerId !== null) return`
+    // meant a single missed pointerup - which happens whenever a touch is interrupted by a
+    // call, a notification or the browser chrome - left the id set forever and killed the
+    // button for the rest of the match.
+    pointerId = e.pointerId;
+    el.setPointerCapture?.(e.pointerId);
+    send(key, true);
+    if (freeconsole.vibrate) safeCall(() => freeconsole.vibrate(8));
+    e.preventDefault();
+  };
+  const release = (e) => {
+    if (pointerId !== e.pointerId) return;
+    pointerId = null;
+    send(key, false);
+    e.preventDefault();
+  };
+
+  el.addEventListener("pointerdown", press);
+  el.addEventListener("pointerup", release);
+  el.addEventListener("pointercancel", release);
+  el.addEventListener("lostpointercapture", () => {
+    if (pointerId !== null) { pointerId = null; send(key, false); }
+  });
+}
+
+function send(key, down) {
+  safeCall(() => freeconsole.message(FreeConsole.SCREEN, { a: "move", k: key, d: down }));
+}
+
+wireHold(document.getElementById("left"), "left");
+wireHold(document.getElementById("right"), "right");
+
+// Jump is a one-shot: fire on press, nothing on release. With no pressed state to clear,
+// the release listeners it used to need are gone too.
+const jumpEl = document.getElementById("jump");
+jumpEl.addEventListener("pointerdown", (e) => {
+  safeCall(() => freeconsole.message(FreeConsole.SCREEN, { a: "jump" }));
+  if (freeconsole.vibrate) safeCall(() => freeconsole.vibrate(14));
+  e.preventDefault();
+});
+
+// A backgrounded phone must not leave a direction held on the screen. Releasing on the way
+// out AND on the way back in covers the case where the "up" event never arrived at all,
+// which is what leaves a player walking into the sideline on their own.
+addEventListener("blur", releaseAll);
+document.addEventListener("visibilitychange", () => releaseAll());
+function releaseAll() {
+  for (const id of ["left", "right"]) send(id, false);
+}
+
+/* ------------------------------------------------------------------- state */
+
+let matchOver = false;
+let iAmReady = false;
+
+freeconsole.onReady = function () {
+  myDeviceId = safeCall(() => freeconsole.getDeviceId(), myDeviceId) || myDeviceId;
+  // Only fall back to a device-derived default if nothing was chosen yet.
+  const saved = safeCall(() => freeconsole.getCustomDeviceState(), null);
+  chosen = (saved && saved.skin) || defaultSkinFor(myDeviceId).id;
+
+  const color = safeCall(() => freeconsole.getPlayerColor(), "#35f0e0");
+  document.body.style.setProperty("--me", color);
+  document.getElementById("myName").textContent =
+    safeCall(() => freeconsole.getNickname(), "Player") || "Player";
+  document.getElementById("dot").textContent = skinById(chosen).emoji;
+
+  renderSkins();
+  publishSkin();
+  // No setOrientation() call: the pad works in either orientation on its own, so asking the
+  // shell to lock or prompt for landscape would only take that choice away from the player.
+};
+
+freeconsole.onMessage = function (device_id, data) {
+  if (device_id !== FreeConsole.SCREEN || !data) return;
+  if (data.a !== "phase") return;
+
+  if (Array.isArray(data.score)) {
+    document.getElementById("score").innerHTML =
+      "<b>" + data.score[0] + "</b> – <b>" + data.score[1] + "</b>";
+  }
+
+  const wasOver = matchOver;
+  matchOver = data.phase === "over";
+
+  // The screen is the authority on whether this device is ready - after a reconnect the
+  // phone has forgotten, and after a rematch the screen has cleared everyone's flag.
+  if (Array.isArray(data.ready)) iAmReady = data.ready.includes(myDeviceId);
+
+  // What the sheet shows is a function of the phase, not of the transition into it. The
+  // screen broadcasts more than once per phase - a winning rally emits `point` and `win`
+  // back to back, both carrying phase "over" - so anything keyed on "just became X" fires
+  // on the first broadcast and then takes itself back on the second.
+  if (matchOver) {
+    // Match finished: everyone gets the rematch button, however many times this arrives.
+    const won = data.winner;
+    showSheet(
+      won === 0 ? "Team A wins" : "Team B wins",
+      "Change your character if you like, then start another match.",
+      "Play again");
+    if (!wasOver && freeconsole.vibrate) safeCall(() => freeconsole.vibrate([60, 50, 60]));
+  } else if (data.phase === "waiting" && !iAmReady) {
+    // Back in the lobby and this device has not readied up: it still needs the picker and
+    // the ready button. Someone else tapping "play again" is what moves the room from
+    // "over" to "waiting", and closing the sheet there used to strip this player's only
+    // way to get ready.
+    showSheet("Ready up", "Pick your character, then start the match.", "I'm ready");
+  } else {
+    // Ready and waiting, counting down, or playing - nothing to choose.
+    hideSheet();
+  }
+
+  updateHold(data);
+};
+
+/**
+ * Show the pad only once play is actually live. During the lobby and the countdown the
+ * buttons do nothing, so covering them is more honest than leaving them tappable.
+ */
+function updateHold(data) {
+  const hold = document.getElementById("hold");
+  const text = document.getElementById("holdText");
+  const phase = data && data.phase;
+
+  if (phase === "countdown") {
+    hold.classList.add("show");
+    text.innerHTML = "<b>Get ready!</b>";
+  } else if (phase === "waiting" || phase === undefined) {
+    hold.classList.add("show");
+    // While the picker is open it sits on top of this, and the button it names is right
+    // there - so only prompt for the tap when the sheet is actually down.
+    const sheetUp = document.getElementById("sheet").classList.contains("show");
+    text.innerHTML = iAmReady
+      ? "Waiting for the other players…"
+      : (sheetUp ? "Pick a character to start." : "Tap <b>I'm ready</b> to join the match.");
+  } else {
+    hold.classList.remove("show");
+  }
+}
+
+// Keep the emoji in the bar in step with the picker.
+const dotObserver = () => { document.getElementById("dot").textContent = skinById(chosen).emoji; };
+document.getElementById("skins").addEventListener("pointerup", dotObserver);
+
+renderSkins();
+updateHold(null);   // pad stays covered until the screen says play is live
+
+/* The pad is never blocked on orientation. Held upright, the stage is rotated a quarter
+   turn by CSS so the same landscape layout is presented either way - there is nothing to
+   detect here, and nothing to ask the player to do. */
+</script>
+</body>
+</html>

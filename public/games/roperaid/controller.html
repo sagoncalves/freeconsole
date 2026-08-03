@@ -1,0 +1,344 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<title>Rope Raid — Controller</title>
+<link rel="stylesheet" href="/console.css" />
+<style>
+  * { -webkit-tap-highlight-color: transparent; user-select: none; -webkit-user-select: none; }
+  html, body { height: 100%; }
+  body {
+    display: flex; flex-direction: column;
+    touch-action: none;
+    overscroll-behavior: none;
+    --me: var(--glow);
+  }
+
+  .head { padding: max(10px, env(safe-area-inset-top)) 16px 6px; flex-shrink: 0; }
+  .whoami { display: flex; align-items: center; gap: 9px; margin-bottom: 8px; }
+  .dot {
+    width: 26px; height: 26px; border-radius: 50%;
+    background: var(--me); box-shadow: 0 0 16px var(--me);
+    flex-shrink: 0; transition: background .3s, box-shadow .3s;
+  }
+  .whoami .name { font-weight: 700; font-size: 15px; }
+  .whoami .tag {
+    margin-left: auto; font-family: var(--font-mono); font-size: 10px;
+    letter-spacing: .16em; text-transform: uppercase; color: var(--text-faint);
+  }
+  .status { color: var(--text-dim); font-size: 13px; text-align: center; }
+
+  .progress-track {
+    height: 6px; border-radius: 999px; background: rgba(255,255,255,.08);
+    margin-top: 8px; overflow: hidden;
+  }
+  .progress-fill {
+    height: 100%; width: 0; border-radius: 999px;
+    background: var(--me); box-shadow: 0 0 14px var(--me);
+    /* Interpolates between updates. The screen now sends progress at 5Hz (200ms) and only
+       when it changes, so this spans the gap - the bar glides instead of stepping, and it
+       looks the same as the old 10Hz stream for half the messages. */
+    transition: width .22s linear;
+  }
+
+  /* The pad is a plain div, not a button: iOS gives buttons activation behaviour that can
+     swallow or delay the first press, and we want the raw pointer stream. */
+  #pad {
+    flex: 1;
+    margin: 8px 12px max(12px, env(safe-area-inset-bottom));
+    border: 2px solid var(--line);
+    border-radius: 24px;
+    background: linear-gradient(155deg, #1a2038, #0a0c18);
+    position: relative;
+    overflow: hidden;
+    display: grid;
+    place-items: center;
+    touch-action: none;
+    -webkit-touch-callout: none;
+    cursor: pointer;
+    transition: transform .07s ease-out, border-color .1s, box-shadow .1s;
+  }
+  #pad::after {
+    content: "";
+    position: absolute; inset: 0;
+    background: repeating-linear-gradient(to bottom, rgba(255,255,255,.04) 0 1px, transparent 1px 3px);
+    pointer-events: none;
+  }
+  #pad .label {
+    font-family: var(--font-display);
+    font-size: 30px; font-weight: 700; letter-spacing: .1em;
+    color: var(--text-dim); transition: color .1s; z-index: 1;
+    pointer-events: none;
+  }
+  #pad .hint {
+    position: absolute; bottom: 20px; left: 0; right: 0;
+    font-size: 12px; color: var(--text-faint); z-index: 1;
+    pointer-events: none;
+  }
+
+  body.holding #pad {
+    transform: scale(.985);
+    border-color: var(--me);
+    box-shadow: inset 0 0 60px color-mix(in srgb, var(--me) 22%, transparent),
+                0 0 30px color-mix(in srgb, var(--me) 40%, transparent);
+  }
+  body.holding #pad .label { color: var(--me); text-shadow: 0 0 20px var(--me); }
+
+  .rope {
+    position: absolute; top: 0; left: 50%;
+    width: 3px; height: 44%;
+    background: linear-gradient(to bottom, var(--me), transparent);
+    transform-origin: top center;
+    opacity: 0; transition: opacity .1s; z-index: 0;
+    pointer-events: none;
+  }
+  body.holding .rope { opacity: .9; animation: swing 1.5s ease-in-out infinite; }
+  @keyframes swing {
+    0%, 100% { transform: translateX(-50%) rotate(-17deg); }
+    50%      { transform: translateX(-50%) rotate(17deg); }
+  }
+
+  body.out #pad, body.over #pad { opacity: .5; }
+  body.out #pad { border-color: rgba(255,46,136,.5); }
+
+  /* Tap the status line 3x to reveal. Diagnoses input on a real device, where a desktop
+     browser can't reproduce iOS pointer behaviour. */
+  #debug {
+    display: none;
+    font-family: var(--font-mono); font-size: 10px;
+    color: var(--text-faint);
+    padding: 6px 16px 0;
+    line-height: 1.5;
+    max-height: 22vh; overflow-y: auto;
+    flex-shrink: 0;
+  }
+  #debug.show { display: block; }
+  #debug b { color: var(--glow); }
+</style>
+</head>
+<body>
+<div class="head">
+  <div class="whoami">
+    <span class="dot" id="dot"></span>
+    <span class="name" id="myName">You</span>
+    <span class="tag" id="tag">your colour</span>
+  </div>
+  <div class="status" id="status">Connecting…</div>
+  <div class="progress-track"><div class="progress-fill" id="progress"></div></div>
+</div>
+
+<div id="debug"></div>
+
+<div id="pad">
+  <span class="rope"></span>
+  <span class="label" id="padLabel">HOLD</span>
+  <span class="hint" id="padHint">Hold to grapple · let go to fly</span>
+</div>
+
+<script src="/sdk.js"></script>
+<script>
+/**
+ * Rope Raid — controller.
+ *
+ * Sends one bit: whether the pad is held, and only when it changes.
+ *
+ * Input on iOS was the hard part. Three things matter, and all three were previously wrong:
+ *
+ *   1. Bind ONE event family. A phone synthesises pointer events from touch, so listening
+ *      for both pointerdown and touchstart makes a single press fire twice - the second
+ *      pair cancelling the first. That produced the "have to tap twice" behaviour.
+ *
+ *   2. Don't use setPointerCapture here. Capture retargets pointerup to the capturing
+ *      element, so a release handler bound to window may never fire on iOS and the hold
+ *      sticks on forever.
+ *
+ *   3. Belt and braces on release. Any of pointerup, pointercancel, blur, visibilitychange
+ *      or a pointer that simply stops existing must clear the hold, because a stuck hold is
+ *      far worse than a missed one - it makes the game unplayable rather than just clumsy.
+ *
+ * Touch events are kept as an explicit fallback for browsers without PointerEvent, chosen
+ * once at startup so the two families can never both be live.
+ */
+(function () {
+  "use strict";
+
+  var freeconsole = new FreeConsole();
+
+  var pad = document.getElementById("pad");
+  var statusEl = document.getElementById("status");
+  var progressEl = document.getElementById("progress");
+  var labelEl = document.getElementById("padLabel");
+  var hintEl = document.getElementById("padHint");
+  var debugEl = document.getElementById("debug");
+
+  var holding = false;
+  var ready = false;
+  var frozen = false;
+  var sent = 0, acked = 0;
+
+  /* ------------------------------------------------------------ diagnostics */
+
+  var lines = [];
+  function log(msg) {
+    lines.unshift(msg);
+    if (lines.length > 14) lines.pop();
+    if (debugEl.classList.contains("show")) {
+      debugEl.innerHTML = lines.join("<br>");
+    }
+  }
+
+  var tapCount = 0, tapTimer = null;
+  statusEl.addEventListener("click", function () {
+    tapCount++;
+    clearTimeout(tapTimer);
+    tapTimer = setTimeout(function () { tapCount = 0; }, 700);
+    if (tapCount >= 3) {
+      tapCount = 0;
+      debugEl.classList.toggle("show");
+      log("<b>diagnostics</b> pointer=" + ("PointerEvent" in window) +
+          " touch=" + ("ontouchstart" in window) +
+          " id=" + freeconsole.getDeviceId());
+    }
+  });
+
+  /* ------------------------------------------------------------ hold state */
+
+  function setHold(next, why) {
+    if (!ready || frozen) return;
+    if (next === holding) return;
+    holding = next;
+    document.body.classList.toggle("holding", holding);
+    labelEl.textContent = holding ? "SWING" : "HOLD";
+    if (holding && freeconsole.vibrate) freeconsole.vibrate(12);
+
+    sent++;
+    freeconsole.message(FreeConsole.SCREEN, { hold: holding });
+    log((holding ? "HOLD  " : "release") + " (" + why + ") sent#" + sent);
+  }
+
+  /* ------------------------------------------------------------ input */
+
+  if ("PointerEvent" in window) {
+    // Pointer events cover touch, pen and mouse. No setPointerCapture: on iOS it
+    // retargets pointerup and the release can be lost, leaving the rope stuck out.
+    pad.addEventListener("pointerdown", function (e) {
+      e.preventDefault();
+      setHold(true, "pointerdown");
+    }, { passive: false });
+
+    // Release is listened for in several places because a missed release is fatal to
+    // play, while a duplicate is harmless (setHold ignores no-op transitions).
+    var release = function (e) { setHold(false, e ? e.type : "manual"); };
+    pad.addEventListener("pointerup", release);
+    pad.addEventListener("pointercancel", release);
+    pad.addEventListener("pointerleave", release);
+    window.addEventListener("pointerup", release);
+    window.addEventListener("pointercancel", release);
+  } else {
+    // Fallback only for browsers with no PointerEvent at all.
+    pad.addEventListener("touchstart", function (e) {
+      e.preventDefault();
+      setHold(true, "touchstart");
+    }, { passive: false });
+    var touchRelease = function (e) { setHold(false, e ? e.type : "manual"); };
+    pad.addEventListener("touchend", touchRelease);
+    pad.addEventListener("touchcancel", touchRelease);
+    window.addEventListener("touchend", touchRelease);
+    window.addEventListener("touchcancel", touchRelease);
+  }
+
+  // Mouse, for testing the controller on a laptop.
+  pad.addEventListener("mousedown", function (e) {
+    if ("PointerEvent" in window) return;   // already covered
+    e.preventDefault();
+    setHold(true, "mousedown");
+  });
+  window.addEventListener("mouseup", function () {
+    if ("PointerEvent" in window) return;
+    setHold(false, "mouseup");
+  });
+
+  // A hold that survives losing focus would be unrecoverable, so clear it aggressively.
+  window.addEventListener("blur", function () { setHold(false, "blur"); });
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) setHold(false, "hidden");
+  });
+  window.addEventListener("contextmenu", function (e) { e.preventDefault(); });
+
+  /* ------------------------------------------------------------ session */
+
+  freeconsole.onReady = function () {
+    ready = true;
+    statusEl.textContent = "Swing to the finish!";
+    document.getElementById("myName").textContent = freeconsole.getNickname();
+    log("<b>ready</b> device " + freeconsole.getDeviceId());
+  };
+
+  freeconsole.onMessage = function (device_id, data) {
+    if (device_id !== FreeConsole.SCREEN || !data) return;
+    var me = freeconsole.getDeviceId();
+
+    if (data.color) document.body.style.setProperty("--me", data.color);
+
+    // The screen echoes what it believes this device's hold state is. If that ever
+    // disagrees with the phone, the phone is the source of truth and re-sends - so a
+    // dropped message self-heals instead of stranding the player.
+    if (data.holdAck !== undefined) {
+      acked++;
+      if (data.holdAck !== holding) {
+        log("resync: screen had " + data.holdAck + ", we have " + holding);
+        freeconsole.message(FreeConsole.SCREEN, { hold: holding });
+      }
+    }
+
+    if (data.eliminated) {
+      frozen = true;
+      holding = false;
+      document.body.classList.remove("holding");
+      document.body.classList.add("out");
+      statusEl.textContent = "Out — " + data.reason + "!";
+      labelEl.textContent = "OUT";
+      hintEl.textContent = "Back in the next race";
+      if (freeconsole.vibrate) freeconsole.vibrate([60, 50, 60]);
+      return;
+    }
+
+    if (data.phase === "racing") {
+      if (frozen) {
+        frozen = false;
+        document.body.classList.remove("out", "over");
+        labelEl.textContent = "HOLD";
+        hintEl.textContent = "Hold to grapple · let go to fly";
+      }
+      statusEl.textContent = "Swing to the finish!";
+      if (data.progress && data.progress[me] !== undefined) {
+        progressEl.style.width = Math.min(100, data.progress[me]) + "%";
+      }
+    } else if (data.phase === "finished") {
+      frozen = true;
+      holding = false;
+      document.body.classList.remove("holding");
+      document.body.classList.add("over");
+      var won = data.winner === me;
+      statusEl.textContent = won ? "You win! 🎉" : "Race over";
+      labelEl.textContent = won ? "WINNER" : "DONE";
+      hintEl.textContent = "Next race starting soon…";
+      if (won && freeconsole.vibrate) freeconsole.vibrate(220);
+    }
+  };
+
+  // Heartbeat: if the pad is held, restate it periodically. A single lost message would
+  // otherwise leave the player hanging with no rope and no way to recover except letting
+  // go and pressing again.
+  setInterval(function () {
+    if (ready && !frozen && holding) {
+      freeconsole.message(FreeConsole.SCREEN, { hold: true });
+    }
+  }, 700);
+})();
+</script>
+</body>
+</html>

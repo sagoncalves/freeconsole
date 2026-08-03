@@ -1,0 +1,99 @@
+<!doctype html>
+<meta charset="utf-8"><title>pending</title>
+<style>
+html,body{margin:0;height:100%;background:#111}
+iframe{border:0;width:32%;height:55%;float:left}
+#out{position:fixed;bottom:0;left:0;right:0;height:44%;overflow:auto;color:#0f0;
+     font:11px/1.45 monospace;white-space:pre-wrap;background:#000;padding:8px;z-index:99}
+</style>
+<div id="out">running…</div>
+<iframe id="screen" src="/games/beachvolley/screen.html"></iframe>
+<iframe id="ctrl1" src="/games/beachvolley/controller.html"></iframe>
+<iframe id="ctrl2" src="/games/beachvolley/controller.html"></iframe>
+<script>
+/**
+ * Minimal shell implementing console-sdk/2, enough to route messages between one screen and
+ * one controller so the ready flow can be exercised end to end.
+ */
+const PROTOCOL = "console-sdk/2";
+const LOC = "/games/beachvolley/";
+const frames = {};            // device_id -> window
+const devices = [];           // slot -> state
+const log = [];
+
+function post(id, type, payload) {
+  const w = frames[id];
+  if (w) w.postMessage({ protocol: PROTOCOL, type, payload, seq: 0 }, "*");
+}
+function devicesTable() {
+  return devices.map((d) => d ? { connected: true, location: LOC, nickname: d.nickname, custom: d.custom } : null);
+}
+function pushDevices() {
+  for (const id of Object.keys(frames)) post(Number(id), "devices", devicesTable());
+}
+
+addEventListener("message", (e) => {
+  const d = e.data;
+  if (!d || d.protocol !== PROTOCOL) return;
+
+  // Identify which frame spoke.
+  let id = null;
+  for (const k of Object.keys(frames)) if (frames[k] === e.source) id = Number(k);
+
+  if (d.type === "hello") {
+    if (e.source === document.getElementById("screen").contentWindow) id = 0;
+    else if (e.source === document.getElementById("ctrl1").contentWindow) id = 1;
+    else id = 2;
+    frames[id] = e.source;
+    devices[id] = { nickname: id === 0 ? "Screen" : "Phone" + id, custom: undefined };
+    post(id, "welcome", { device_id: id, code: "TEST", devices: devicesTable(), clockOffset: 0 });
+    pushDevices();
+    log.push("hello from " + id);
+    return;
+  }
+
+  if (d.type === "message") {
+    const to = d.payload.to;
+    log.push(id + "->" + to + " " + JSON.stringify(d.payload.data));
+    if (to === null) { for (const k of Object.keys(frames)) if (Number(k) !== id) post(Number(k), "message", { from: id, data: d.payload.data }); }
+    else post(to, "message", { from: id, data: d.payload.data });
+    return;
+  }
+
+  if (d.type === "customState") {
+    if (devices[id]) devices[id].custom = d.payload.custom !== undefined ? d.payload.custom : d.payload;
+    pushDevices();
+    log.push(id + " custom " + JSON.stringify(devices[id].custom));
+    return;
+  }
+  log.push(id + " " + d.type);
+});
+
+// After both frames are up, tap "I'm ready" on the controller and report what happens.
+setTimeout(() => {
+  const c1 = document.getElementById("ctrl1").contentDocument;
+  const c2 = document.getElementById("ctrl2").contentDocument;
+  const sd = document.getElementById("screen").contentDocument;
+
+  log.push("P1 tap ready");
+  c1.getElementById("sheetGo").click();
+
+  setTimeout(() => {
+    log.push("after P1: p1sheet=" + c1.getElementById("sheet").classList.contains("show") +
+             " p2sheet=" + c2.getElementById("sheet").classList.contains("show") +
+             " hint='" + (sd.getElementById("ovHint")||{}).textContent + "'");
+    log.push("P2 tap ready");
+    c2.getElementById("sheetGo").click();
+
+    setTimeout(() => {
+      log.push("after P2: p1hold='" + c1.getElementById("holdText").textContent +
+               "' p2hold='" + c2.getElementById("holdText").textContent + "'");
+      log.push("overlay shown: " + sd.getElementById("overlay").classList.contains("show"));
+      log.push("countdown: '" + (sd.getElementById("count")||{}).textContent + "'");
+      log.push("joiners: '" + (sd.getElementById("joiners")||{}).textContent.trim() + "'");
+      document.title = JSON.stringify(log);
+      document.getElementById("out").textContent = log.join("\n");
+    }, 900);
+  }, 700);
+}, 2500);
+</script>

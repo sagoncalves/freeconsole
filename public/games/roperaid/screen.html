@@ -1,0 +1,1895 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Rope Raid — Screen</title>
+<link rel="stylesheet" href="/console.css" />
+<style>
+  body { height: 100vh; overflow: hidden; margin: 0; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+
+  /* Score roster: top-left, one row per player - avatar, name, three win pips. */
+  #roster {
+    position: fixed; top: 18px; left: 18px; z-index: 8;
+    display: flex; flex-direction: column; gap: 9px;
+    pointer-events: none;
+  }
+  .roster-row { display: flex; align-items: center; gap: 10px; }
+  .roster-av {
+    width: 38px; height: 38px; border-radius: 11px;
+    display: grid; place-items: center;
+    font-family: var(--font-mono); font-size: 15px; font-weight: 700;
+    color: #05060d; box-shadow: 0 0 16px rgba(0,0,0,.5);
+  }
+  .roster-info { display: flex; flex-direction: column; gap: 3px; }
+  .roster-name {
+    font-size: 13.5px; line-height: 1; color: var(--text);
+    text-shadow: 0 1px 6px rgba(5,6,13,.9);
+    max-width: 22ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  /* Three pips per player: empty rings that fill as rounds are won. */
+  .pips { display: flex; gap: 5px; }
+  .pip-mark {
+    width: 11px; height: 11px; border-radius: 50%;
+    border: 2px solid currentColor; opacity: .45;
+    transition: opacity .25s, box-shadow .25s, background .25s;
+  }
+  .pip-mark.filled {
+    background: currentColor; opacity: 1;
+    box-shadow: 0 0 10px currentColor;
+  }
+  .roster-row.eliminated { opacity: .4; }
+
+  /* Same roster, larger, on the lobby screen. */
+  .lobby-roster {
+    display: flex; flex-wrap: wrap; gap: 22px;
+    justify-content: center; margin-top: 8px; max-width: 90vw;
+  }
+  .lobby-player { display: flex; flex-direction: column; align-items: center; gap: 7px; }
+  .lobby-av {
+    width: 62px; height: 62px; border-radius: 18px;
+    display: grid; place-items: center;
+    font-family: var(--font-mono); font-size: 24px; font-weight: 700; color: #05060d;
+  }
+  .lobby-player .roster-name { font-size: 15px; max-width: 14ch; }
+  .lobby-player .pip-mark { width: 13px; height: 13px; }
+
+  /* Centred 3-2-1 before each round. */
+  #countdown {
+    position: fixed; inset: 0; z-index: 12;
+    display: none; align-items: center; justify-content: center;
+    pointer-events: none;
+  }
+  #countdown.show { display: flex; }
+  #countNum {
+    font-size: clamp(90px, 22vw, 260px); font-weight: 800; line-height: 1;
+    color: var(--glow); text-shadow: 0 0 60px var(--glow);
+    animation: countPop .82s ease-out;
+  }
+  @keyframes countPop {
+    0%   { transform: scale(.4); opacity: 0; }
+    22%  { transform: scale(1.12); opacity: 1; }
+    70%  { transform: scale(1); opacity: 1; }
+    100% { transform: scale(.86); opacity: 0; }
+  }
+
+  /* Trophy, drawn in CSS so it needs no asset. */
+  .trophy { display: flex; flex-direction: column; align-items: center; animation: trophyIn .7s ease-out; }
+  .trophy-cup {
+    position: relative;
+    width: 92px; height: 74px;
+    background: linear-gradient(180deg, #ffe9a8, #f0b429);
+    border-radius: 10px 10px 46px 46px;
+    box-shadow: 0 0 40px rgba(240,180,41,.55);
+  }
+  .trophy-handle {
+    position: absolute; top: 10px;
+    width: 26px; height: 38px;
+    border: 7px solid #f0b429; border-radius: 50%;
+  }
+  .trophy-handle.left  { left: -26px; border-right-color: transparent; }
+  .trophy-handle.right { right: -26px; border-left-color: transparent; }
+  .trophy-stem { width: 16px; height: 26px; background: linear-gradient(180deg,#f0b429,#c98f14); }
+  .trophy-base {
+    width: 74px; height: 15px; border-radius: 5px;
+    background: linear-gradient(180deg,#f0b429,#b8830f);
+  }
+  @keyframes trophyIn {
+    0%   { transform: scale(.3) rotate(-16deg); opacity: 0; }
+    60%  { transform: scale(1.1) rotate(4deg); opacity: 1; }
+    100% { transform: scale(1) rotate(0); opacity: 1; }
+  }
+
+  .overlay {
+    position: fixed; inset: 0;
+    display: none; align-items: center; justify-content: center;
+    flex-direction: column; gap: 14px;
+    background: rgba(5,6,13,.92); text-align: center; z-index: 10;
+  }
+  .overlay.show { display: flex; }
+  .overlay h2 { font-size: clamp(26px, 5vw, 62px); line-height: 1; }
+  .overlay .sub { color: var(--text-dim); font-size: clamp(13px, 1.7vw, 21px); }
+  .ring {
+    width: 44px; height: 44px; border-radius: 50%;
+    border: 2px solid rgba(53,240,224,.2); border-top-color: var(--glow);
+    animation: spin 1s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .winner-name { color: var(--glow); text-shadow: var(--bloom-glow); }
+  .standings { display: flex; flex-direction: column; gap: 7px; margin-top: 8px; }
+  .standing { display: flex; align-items: center; gap: 11px; font-size: clamp(13px, 1.5vw, 19px); }
+  .standing .pos { font-family: var(--font-mono); color: var(--text-faint); min-width: 2.2ch; text-align: right; }
+  .standing .swatch { width: 14px; height: 14px; border-radius: 50%; }
+  .standing .out { color: var(--text-faint); font-size: .85em; }
+
+  #hud { position: fixed; inset: 0; pointer-events: none; z-index: 5; }
+  .rail {
+    position: absolute; left: 3vw; right: 3vw; bottom: 3vh;
+    height: 5px; border-radius: 999px; background: rgba(255,255,255,.08);
+  }
+  .pip {
+    position: absolute; top: 50%; width: 13px; height: 13px;
+    border-radius: 50%; transform: translate(-50%, -50%);
+    transition: left .1s linear, opacity .2s;
+  }
+  .pip.out { opacity: .22; }
+  .clock {
+    position: absolute; left: 3vw; bottom: calc(3vh + 16px);
+    font-family: var(--font-mono); font-size: clamp(11px, 1.1vw, 15px);
+    color: rgba(234,242,255,.5);
+  }
+  .tip {
+    position: absolute; right: 3vw; bottom: calc(3vh + 16px);
+    font-family: var(--font-mono); font-size: clamp(10px, 1vw, 14px);
+    color: rgba(234,242,255,.4);
+  }
+  .elim-flash {
+    position: absolute; top: 8vh; left: 0; right: 0; text-align: center;
+    font-size: clamp(16px, 2.4vw, 32px); font-weight: 700; opacity: 0;
+  }
+  .elim-flash.show { animation: flash 1.6s ease-out forwards; }
+  @keyframes flash {
+    0% { opacity: 0; transform: translateY(-12px); }
+    18% { opacity: 1; transform: none; }
+    75% { opacity: 1; }
+    100% { opacity: 0; }
+  }
+</style>
+</head>
+<body>
+<div id="hud">
+  <div class="clock" id="clock"></div>
+  <div class="tip">HOLD to grapple · RELEASE to fly</div>
+  <div class="rail" id="rail"></div>
+  <div class="elim-flash" id="elimFlash"></div>
+</div>
+
+<!-- Score roster: avatar, name and three win pips per player, always on screen. -->
+<div id="roster"></div>
+
+<div class="overlay show" id="lobby">
+  <div class="ring"></div>
+  <h2>Rope Raid</h2>
+  <div class="sub" id="lobbyNote">Loading…</div>
+  <div class="lobby-roster" id="lobbyRoster"></div>
+</div>
+
+<!-- Centred 3-2-1 before each round. -->
+<div id="countdown"><span id="countNum"></span></div>
+
+<div class="overlay" id="finish">
+  <div class="eyebrow">Round winner</div>
+  <h2 class="winner-name" id="winnerName"></h2>
+  <div class="standings" id="standings"></div>
+  <div class="sub" id="finishNote">Back to the lobby…</div>
+</div>
+
+<!-- Match champion: first to three wins. -->
+<div class="overlay" id="champion">
+  <div class="trophy" id="championTrophy">
+    <div class="trophy-cup">
+      <div class="trophy-handle left"></div>
+      <div class="trophy-handle right"></div>
+    </div>
+    <div class="trophy-stem"></div>
+    <div class="trophy-base"></div>
+  </div>
+  <div class="eyebrow">Champion</div>
+  <h2 class="winner-name" id="championName"></h2>
+  <div class="sub" id="championNote">New match starting…</div>
+</div>
+
+<script src="/sdk.js"></script>
+<script type="module">
+/**
+ * Rope Raid — screen.
+ *
+ * Rapier (2D, WASM) runs the physics; Three.js renders it through an orthographic camera,
+ * so it plays as a flat side-view game while leaving room for real 3D avatars later.
+ *
+ * Rapier's RopeJoint is the reason this works: a rope PULLS but never PUSHES, so a player
+ * who swings above the anchor goes slack and falls. A hand-rolled distance constraint got
+ * this wrong and players orbited the anchor forever, which is exactly the bug this replaces.
+ *
+ * The screen is the authority: it simulates everyone and broadcasts state. Phones send one
+ * bit - whether they're holding.
+ */
+import * as THREE from "/vendor/three.js?v=5";
+import { GLTFLoader, cloneSkeleton } from "/vendor/three.js?v=5";
+import RAPIER from "/vendor/rapier.js?v=4";
+import {
+  ROPE_REACH, COURSE_LENGTH, DEFAULT_MOOD, MOOD_PRESETS, CITY_MODELS,
+  buildCity, applyMoodTo, createLights, mulberry32,
+} from "/games/roperaid/course.js?v=14";
+
+const freeconsole = new FreeConsole();
+
+// Test mode runs the game standalone in the editor, with no console shell behind it.
+// Anything that talks to the shell is wrapped so a missing one is simply a no-op.
+function safeCall(fn) {
+  try { return fn(); } catch (err) { /* no shell in test mode */ }
+}
+
+/** Player name, falling back sensibly when there's no shell (test mode). */
+function nameOf(device_id) {
+  try { return freeconsole.getNickname(device_id); } catch { return "Player " + device_id; }
+}
+
+/* ---------------------------------------------------------------- tuning */
+
+// Rapier works best in metres, so the world is modelled at 1 unit = 1 metre and scaled up
+// for rendering. Gravity is y-DOWN in screen terms but Rapier is y-up, so physics y is
+// negated when drawing.
+const GRAVITY = -34;            // m/s^2, heavier than earth so swings feel snappy
+// The rope never changes length once attached: holding grapples, nothing more.
+//
+// Rapier's RopeJoint is essentially lossless - measured at 100% of theoretical bottom
+// speed and 99% height retention on a taut swing - so a well-timed release genuinely
+// converts height into distance. No winch, no clamp, no course tricks are needed.
+//
+// What DOES matter is that the rope starts taut. Anchors used to sit 9-12m up while
+// players flew far below them, so every grab began with a slack rope and a free-fall,
+// which is where the "energy" appeared to vanish. Anchors are now high above the flight
+// path, so grabbing bites immediately and the swing is a real pendulum.
+// No automatic forward push. Every metre of progress comes from a swing the player made,
+// which is the whole point of the game - a constant drift moved you along on its own and
+// made the game feel like it was playing itself.
+// Terminal speed while FREE, so a slingshot can't outrun the camera. It deliberately does
+// not apply while roped: a rope keeps you circling the anchor rather than flying away, and
+// clamping there would cancel the loop a trampoline bounce is meant to produce.
+const MAX_SPEED = 46;           // m/s, free flight only
+// Sideways drive while swinging: extra HORIZONTAL speed, added only on the part of the arc
+// that carries you forward and downward. Adding speed along the full tangent instead would
+// convert straight into altitude on the far side - the swing would throw you upward rather
+// than down the course, which is not what the game wants.
+const SWING_DRIVE = 55;         // m/s^2 of forward push while driving the swing
+// The drive stops once TOTAL speed reaches this. Capping horizontal speed alone was not
+// enough: on a long hold the swing kept gaining across orbits and the surplus came back as
+// altitude - 16m of it over 15 seconds, which is exactly the upward launch this is meant to
+// avoid. Gating on total speed means the drive tops up a slow swing and then gets out of
+// the way, so energy cannot accumulate lap after lap.
+const SWING_DRIVE_MAX_SPEED = 34;
+const MAX_SPEED_ROPED = 150;    // generous cap while attached, purely a safety limit
+// Trampolines RETURN your momentum with interest rather than replacing it, and hard
+// enough that bouncing while grappled sends you right around the anchor.
+//
+// Looping needs sqrt(5*g*L) at the bottom - about 39 m/s on a 9m rope - so the multiplier
+// has to be large. Measured revolutions after a bounce on a 9m rope: 0.2 at 1.35x, 3.6 at
+// 4.0x with the tangential redirect below.
+const TRAMP_RESTITUTION = 4.0;  // a bounce is a launch, not a rebound
+const TRAMP_MIN_BOUNCE = 26;    // floor, so even a gentle landing is worth something
+const TRAMP_MAX_BOUNCE = 130;   // ceiling, high enough to loop a long rope
+// Minimum time between two bounces for the same player. Without it a player resting on a
+// bed re-triggers every frame and saturates at the ceiling within two hits - the bounce
+// stops being an event and becomes a constant force.
+const TRAMP_COOLDOWN_MS = 220;
+// Sized from what the physics actually sustains. A deliberately clumsy bot - one fixed
+// release rule, no anticipation - reaches a median of 164m before mistiming a swing, with
+// good runs going the full distance. 130m sits comfortably inside that, so a person has
+// room to recover from mistakes, and a good run is ~15 seconds.
+const PLAYER_R = 0.62;          // m
+
+const WORLD_TOP = 30;           // above this you've flown off
+const WORLD_BOTTOM = -30;       // below this you've fallen
+const CAMERA_MARGIN = 26;       // m behind the camera before you're left behind
+
+// Spawn well below the anchor band: that gap is what makes the first grab taut, which
+// is what makes it a swing rather than a free-fall.
+const SPAWN = { x: 4, y: -6 };
+// Players launch with forward speed rather than from a standstill. Dropped at rest they
+// simply fell, which put the avatar head-down before anyone could reach a control - the
+// race looked lost before it began.
+const SPAWN_VX = 17;
+const SPAWN_VY = 5;
+// Anchors sit in a narrow band a rope-length above the flight path, so every release
+// lands the player back in grabbing range rather than under the course.
+// Anchors MUST sit inside the camera's view or there is simply nothing to grapple.
+// The camera shows y = -19..19 (viewH 38), so 8..13 puts them in the upper third where
+// they read clearly. An earlier attempt raised them to 20-25 to make the rope taut and
+// put them above the top edge of the screen - correct physics, invisible game.
+const ANCHOR_Y_MIN = 8, ANCHOR_Y_VAR = 5;
+// Every gap must stay inside ROPE_REACH or the chain simply breaks and the player is
+// stranded with nothing to grab. An earlier version let gaps grow to 21m against an 11m
+// reach, which stalled every run at the first wide gap.
+const GAP_MIN = 7, GAP_VAR = 2.5;
+const GAP_GROWTH = 1.2;         // added across the whole course, still under reach
+const FIRST_ANCHOR_X = 10;
+
+
+/* ---------------------------------------------------------------- three */
+
+const scene = new THREE.Scene();
+/**
+ * Lighting and mood.
+ *
+ * Every value that affects how the scene looks lives here, so the whole atmosphere can be
+ * changed in one place rather than hunting through the renderer. Tune it visually at
+ * /games/roperaid/studio.html; a course carries its own mood, so this is only the default.
+ *
+ * `ambient` is the one that matters most: it lifts everything uniformly, and a dark
+ * ambient made the scene read as murky no matter how bright the key light was.
+ */
+let MOOD = { ...DEFAULT_MOOD };
+
+scene.background = new THREE.Color(MOOD.background);
+
+/** Applies MOOD to the scene. Called once, and again whenever the mood changes. */
+const lights = {};
+function applyMood() {
+  applyMoodTo(THREE, scene, renderer, lights, MOOD);
+}
+
+// Perspective, not orthographic: an orthographic camera with everything on z=0 renders
+// real 3D geometry exactly like flat sprites. Distance is derived from the field of view
+// in resize(), so the 38m of visible world height stays constant on any screen.
+const camera = new THREE.PerspectiveCamera(38, 1, 0.1, 900);
+camera.position.z = 56;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+// ACES tone mapping keeps bright emissive materials from blowing out to flat white, and
+// gives MOOD.exposure something meaningful to scale.
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+
+Object.assign(lights, createLights(THREE, scene));
+applyMood();
+
+let viewW = 0, viewH = 0;
+// Handle returned by buildCity(); its update() hides off-screen buildings each frame.
+let cityView = null;
+// Scratch vector for reading the hand bone's world position, reused to avoid per-frame
+// allocation in the render loop.
+const handWorld = new THREE.Vector3();
+// Reused for composing the avatar's orientation each frame.
+const AXIS_Y = new THREE.Vector3(0, 1, 0);
+const AXIS_Z = new THREE.Vector3(0, 0, 1);
+const qTurn = new THREE.Quaternion();
+const qLean = new THREE.Quaternion();
+
+// Everything belonging to the current course - anchors, trampolines, city, finish gate.
+// buildCourse() clears this group rather than rebuilding the whole scene, so the lights
+// and camera survive between races.
+const courseGroup = new THREE.Group();
+scene.add(courseGroup);
+
+function resize() {
+  const w = window.innerWidth, h = window.innerHeight;
+  renderer.setSize(w, h);
+  camera.aspect = w / h;
+
+  // Keep the same 38m of visible world height the gameplay is tuned around, whatever the
+  // aspect ratio: derive the camera distance from the field of view rather than fixing it.
+  viewH = 38;
+  camera.position.z = (viewH / 2) / Math.tan((camera.fov * Math.PI / 180) / 2);
+  viewW = viewH * (w / h);
+  camera.updateProjectionMatrix();
+}
+window.addEventListener("resize", resize);
+resize();
+
+/* ---------------------------------------------------------------- state */
+
+let world = null;
+const players = Object.create(null);
+let anchors = [];
+let trampolines = [];
+let phase = "loading";
+
+/**
+ * Match scoring: first player to WINS_NEEDED round wins takes the match.
+ *
+ * Scores are keyed by device id and survive between rounds, so they are kept here rather
+ * than on the runner objects - those are rebuilt whenever the course is.
+ */
+const WINS_NEEDED = 3;
+const scores = {};                 // device_id -> rounds won this match
+let matchOver = false;
+let cancelCountdown = null;   // set while a countdown is running, so it can be aborted
+let lobbyTimer = null;        // pending 'next round' timer, so nothing double-starts
+let finishedOrder = [];
+let raceStart = 0;
+let cameraX = 0;
+let courseLength = COURSE_LENGTH;   // the active course's finish line
+let raceIndex = 0;                  // which hand-made map to play next
+/**
+ * Loaded .glb scenes, keyed by filename. Loaded once and cloned per placement, so the
+ * count of copies on screen costs nothing extra to download.
+ */
+
+/* ---------------------------------------------------------------- maps */
+
+/**
+ * Hand-made courses, in play order. Empty means every race is generated.
+ *
+ * Design them in the studio at /games/roperaid/studio.html; they are loaded from Firestore
+ * here. Each entry is:
+ *   { name, length, anchors: [{x,y}], trampolines: [{x,y,w}] }
+ *
+ * Anchors must stay within y = -19..19 to be visible, and consecutive gaps under
+ * ROPE_REACH (22m) or the chain breaks and players are stranded. The editor warns about
+ * both, so you don't have to hold them in your head.
+ */
+const MAPS = [];
+
+/* ---------------------------------------------------------------- course */
+
+const anchorGeo = new THREE.SphereGeometry(0.45, 20, 14);
+const anchorMat = new THREE.MeshStandardMaterial({
+  color: 0x1a2038, emissive: 0x35f0e0, emissiveIntensity: 0.4, roughness: 0.4,
+});
+const ringGeo = new THREE.RingGeometry(0.72, 0.92, 32);
+const mastMat = new THREE.MeshBasicMaterial({ color: 0x2a3350 });
+const trampMat = new THREE.MeshStandardMaterial({
+  color: 0xff2e88, emissive: 0xff2e88, emissiveIntensity: 0.55, roughness: 0.3,
+});
+
+/**
+ * Builds a course from an explicit map, or generates one from a seed.
+ *
+ * A map is plain data:
+ *   { length: 130,
+ *     anchors: [{x, y}, ...],
+ *     trampolines: [{x, y, w}, ...] }
+ *
+ * MAPS below holds hand-made levels; anything not listed is generated. Keeping both on
+ * one path means a designed map and a random one behave identically.
+ */
+function buildCourse(seedOrMap) {
+  courseGroup.clear();
+  anchors = [];
+  trampolines = [];
+
+  if (seedOrMap && typeof seedOrMap === "object") {
+    buildFromMap(seedOrMap);
+    return;
+  }
+
+  courseLength = COURSE_LENGTH;
+  const seed = seedOrMap;
+  const rand = mulberry32(seed);
+  let x = FIRST_ANCHOR_X;
+
+  while (x < courseLength + 24) {
+    // Trampolines sit BETWEEN anchors rather than replacing one: skipping an anchor
+    // doubles the gap past what a rope can reach, which strands the player.
+    if (rand() < 0.22 && x > 40) {
+      // Mostly floors, with the occasional angled bed for variety.
+      const angle = rand() < 0.25 ? (rand() - 0.5) * 1.1 : 0;
+      addTrampoline(x - GAP_MIN / 2, -16 - rand() * 2, 5.6, angle);
+    }
+
+    addAnchor(x, ANCHOR_Y_MIN + rand() * ANCHOR_Y_VAR);
+
+    x += GAP_MIN + rand() * GAP_VAR + (x / courseLength) * GAP_GROWTH;
+  }
+
+  addBackdrop(courseLength);
+  addFinishGate(courseLength);
+}
+
+/** Builds a course from explicit map data. */
+function buildFromMap(map) {
+  courseLength = map.length || COURSE_LENGTH;
+
+  // A map may carry its own mood; otherwise the default (evening) stands.
+  MOOD = { ...DEFAULT_MOOD, ...(map.mood || {}) };
+  applyMood();
+
+  for (const a of map.anchors || []) addAnchor(a.x, a.y);
+  for (const t of map.trampolines || []) addTrampoline(t.x, t.y, t.w || 5.6, t.angle || 0);
+  addBackdrop(courseLength);
+  addFinishGate(courseLength);
+}
+
+/**
+ * Hides course objects that are off-screen.
+ *
+ * Anchors and trampolines are built for the whole course up front, so without this the
+ * renderer walks every one of them every frame - including the ones already behind the
+ * player. That cost grows with course length, which is exactly when the game should not
+ * be getting heavier.
+ *
+ * The margin must exceed ROPE_REACH (22m). A player at the edge of the frame can grapple
+ * an anchor that far beyond it, and hiding a grappled anchor would leave a rope attached to
+ * nothing visible. 45m clears that with room to spare.
+ */
+function cullCourse(margin = 45) {
+  const min = cameraX - viewW / 2 - margin;
+  const max = cameraX + viewW / 2 + margin;
+
+  for (const a of anchors) {
+    if (!a.meshes) continue;
+    const on = a.x > min && a.x < max;
+    for (const m of a.meshes) m.visible = on;
+  }
+
+  for (const t of trampolines) {
+    if (!t.group) continue;
+    const halfW = (t.w ?? 5.6) / 2;
+    t.group.visible = t.x + halfW > min && t.x - halfW < max;
+  }
+}
+
+/** One anchor: a floating knob and the proximity ring that lights up in a player's colour. */
+function addAnchor(x, y) {
+  const a = { x, y };
+  anchors.push(a);
+
+  // Anchors are free-floating points, with no mast or supporting structure: the hook is
+  // the whole object, so nothing visually anchors it to the city behind.
+  const knob = new THREE.Mesh(anchorGeo, anchorMat);
+  knob.position.set(x, y, 0);
+  courseGroup.add(knob);
+
+  const ring = new THREE.Mesh(ringGeo, new THREE.MeshBasicMaterial({
+    color: 0xffffff, transparent: true, opacity: 0, side: THREE.DoubleSide,
+  }));
+  ring.position.set(x, y, 0.2);
+  courseGroup.add(ring);
+  a.ring = ring;
+  // Kept so the whole anchor can be hidden when it is off-screen. On a long course most
+  // anchors are behind the camera, and drawing them costs a little more with every metre.
+  a.meshes = [knob, ring];
+  return a;
+}
+
+/**
+ * A trampoline at any angle. 0 is a floor, PI/2 a wall, PI a ceiling.
+ * Both faces bounce, so the legs are drawn on both sides to make that readable.
+ */
+function addTrampoline(x, y, w, angle = 0) {
+  const t = { x, y, w, angle, hitAt: 0, hitSide: 1 };
+  trampolines.push(t);
+
+  const group = new THREE.Group();
+  group.position.set(x, y, 0);
+  group.rotation.z = angle;
+
+  const bed = new THREE.Mesh(new THREE.BoxGeometry(w, 0.6, 3.2), trampMat);
+  group.add(bed);
+  t.bed = bed;
+
+  // Posts at both ends, on both faces: a two-sided bed shouldn't look like it only
+  // works one way up.
+  for (const end of [-1, 1]) {
+    for (const face of [-1, 1]) {
+      const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.16, 1.6, 8), mastMat);
+      leg.position.set(end * (w / 2 - 0.5), face * 1.0, 0);
+      group.add(leg);
+    }
+  }
+
+  courseGroup.add(group);
+  t.group = group;
+  return t;
+}
+
+/**
+ * Background scenery. Purely decorative, but essential: with nothing behind the action
+ * there is no parallax, and without parallax a 3D scene still reads as flat.
+ */
+/**
+ * Background city.
+ *
+ * Generated, not modelled: one line of buildings along the course, repeated twice further
+ * back and offset sideways so the skyline has depth. Buildings outside the camera's span
+ * are hidden every frame by cityView.update(), so off-screen geometry costs nothing.
+ *
+ * Everything sits well behind the play plane (negative z) and is non-interactive - this is
+ * scenery, and the physics never sees it.
+ */
+const loadedModels = new Map();
+
+function addBackdrop(length) {
+  cityView = buildCity(THREE, courseGroup, length, loadedModels);
+}
+
+/**
+ * Loads the scenery models once, before the first course is built.
+ *
+ * A failure is non-fatal: the affected buildings are skipped and the game still runs, which
+ * matters because scenery is decorative and the physics never sees it.
+ */
+async function loadCityModels() {
+  const loader = new GLTFLoader();
+  await Promise.all(Object.keys(CITY_MODELS).map((file) => new Promise((resolve) => {
+    loader.load(
+      `/games/roperaid/models/${file}`,
+      (gltf) => { loadedModels.set(file, gltf.scene); resolve(); },
+      undefined,
+      (err) => { console.warn(`scenery model failed: ${file}`, err); resolve(); }
+    );
+  })));
+}
+
+function addFinishGate(x) {
+  const gate = new THREE.Mesh(
+    new THREE.BoxGeometry(1.2, 54, 3),
+    new THREE.MeshStandardMaterial({ color: 0xeaf2ff, emissive: 0x35f0e0, emissiveIntensity: 0.45 })
+  );
+  gate.position.set(x, 4, -0.5);
+  courseGroup.add(gate);
+}
+
+/* ---------------------------------------------------------------- players */
+
+// Enough segments to read as a curve without being wasteful.
+const ROPE_SEGMENTS = 10;
+
+const bodyGeo = new THREE.CapsuleGeometry(PLAYER_R * 0.72, PLAYER_R * 1.1, 6, 16);
+
+/**
+ * Optional player avatar.
+ *
+ * Drop a rigged .glb at models/ninja.glb and every player becomes that model, tinted to
+ * their colour, with the rope leaving their hand. Absent, the capsule fallback is used, so
+ * the game runs either way.
+ *
+ * What the model needs:
+ *   - Authored facing +X (down-course), standing on the origin, about 1.2m tall. Scale is
+ *     corrected below, so being off by a constant factor is fine.
+ *   - A node or bone whose name contains "hand" - "Hand_R", "mixamorig:RightHand" and
+ *     "hand.R" all work. The rope is drawn from wherever that node ends up in world space,
+ *     so if it is skinned to an animation, the rope follows the animation for free.
+ *   - Any mesh or material whose name contains "team", "color" or "colour" is tinted to the
+ *     player's colour. Everything else keeps its authored look, so only the parts you mark
+ *     get recoloured. If nothing is marked, the whole model is tinted, which is a
+ *     reasonable default for a plain untextured model.
+ */
+const AVATAR_FILE = "ninja-jump.glb";
+// Avatar size.
+//
+// The physics body is a 0.62m ball and never changes. Earlier builds looked like the
+// character was teleporting around because the avatar was ~5x that: the head and feet swept
+// metres of arc while the simulated point barely moved.
+//
+// The fix is not to make the avatar tiny, it is to keep it PROPORTIONATE. At 3x the collider
+// the model is clearly readable while still moving as one piece with the point it is drawn
+// at, because the rope now attaches near the hand rather than the centre.
+const AVATAR_HEIGHT = PLAYER_R * 5.6;   // ~3.5m
+let avatarModel = null;            // the loaded GLB scene, or null to use the capsule
+let avatarClips = [];              // animation clips shipped with the model
+// False until the scenery and avatar have finished loading. Runners created before this
+// would silently fall back to the placeholder capsule.
+let assetsReady = false;
+
+/**
+ * The single pose the avatar is frozen in: the apex of the jump clip.
+ *
+ * Held at 0.45 of the clip, where the ninja is fully airborne - arms up, legs tucked. The
+ * player is in the air for the whole race, so there is no state worth animating between,
+ * and a clip playing through would show a landing that never happens.
+ */
+const JUMP_POSE_AT = 0.45;
+
+async function loadAvatar() {
+  const loader = new GLTFLoader();
+  await new Promise((resolve) => {
+    loader.load(
+      `/games/roperaid/models/${AVATAR_FILE}`,
+      (gltf) => {
+        avatarModel = gltf.scene;
+        avatarClips = gltf.animations || [];
+        // Normalise scale so the model is AVATAR_HEIGHT tall whatever units it was
+        // authored in - a model exported in centimetres would otherwise be 100x too big.
+        const box = new THREE.Box3().setFromObject(avatarModel);
+        const h = box.max.y - box.min.y;
+        avatarModel.userData.fitScale = h > 1e-4 ? AVATAR_HEIGHT / h : 1;
+        resolve();
+      },
+      undefined,
+      () => {
+        // No avatar is a normal state, not an error: the capsule is a complete fallback.
+        console.info(`no ${AVATAR_FILE}; using the built-in capsule avatar`);
+        resolve();
+      }
+    );
+  });
+}
+
+/** True if a name marks something as taking the player's colour. */
+function isTeamPart(name) {
+  const n = (name || "").toLowerCase();
+  return n.includes("team") || n.includes("color") || n.includes("colour");
+}
+
+/**
+ * Clones the avatar and tints it for one player.
+ *
+ * cloneSkeleton (SkeletonUtils) rather than .clone(): a plain clone shares skinned-mesh
+ * bindings, so every player would move as one puppet.
+ *
+ * The model is textured, so tinting replaces the base colour outright would erase the
+ * artwork. Instead the texture is kept and the material is tinted THROUGH it - the base
+ * colour multiplies the map, so the ninja keeps its detail while reading as the player's
+ * colour.
+ */
+function cloneAvatar(source, color) {
+  const copy = cloneSkeleton(source);
+  copy.scale.setScalar(source.userData.fitScale || 1);
+  copy.position.y = -AVATAR_HEIGHT / 2;
+
+  let marked = false;
+  copy.traverse((child) => {
+    if (child.isMesh && (isTeamPart(child.name) || isTeamPart(child.material?.name))) marked = true;
+  });
+
+  copy.traverse((child) => {
+    if (!child.isMesh && !child.isSkinnedMesh) return;
+    if (!child.material) return;
+    const wants = marked
+      ? (isTeamPart(child.name) || isTeamPart(child.material.name))
+      : true;
+
+    // Materials must be cloned per player, or tinting one recolours them all.
+    const recolour = (m) => {
+      const c = m.clone();
+      if (!wants || !c.color) return c;
+
+      // The base colour multiplies the texture, so tinting keeps the artwork and just
+      // shifts its hue. A model with no texture is tinted flat, which looks the same.
+      c.color.setHex(color);
+      if (c.emissive) {
+        c.emissive.setHex(color);
+        // Enough glow to read as "this is player N" against a dark city, not so much that
+        // the texture detail is blown out.
+        c.emissiveIntensity = 0.55;
+      }
+      // Meshy exports arrive fairly metallic, which drinks the light in this scene and
+      // leaves the avatar looking black.
+      if ("metalness" in c) c.metalness = 0.1;
+      if ("roughness" in c) c.roughness = 0.55;
+      return c;
+    };
+    child.material = Array.isArray(child.material)
+      ? child.material.map(recolour)
+      : recolour(child.material);
+    child.frustumCulled = false;   // skinned bounds go stale; culling makes limbs vanish
+  });
+
+  return copy;
+}
+
+/** The node the rope should leave from. The rig names hands RightHand / LeftHand. */
+function findHandNode(root) {
+  let right = null, any = null;
+  root.traverse((child) => {
+    const n = (child.name || "").toLowerCase();
+    if (!n.includes("hand")) return;
+    if (!any) any = child;
+    if (!right && n.includes("right")) right = child;
+  });
+  // Prefer the right hand: the model faces +X, so that is the leading arm.
+  return right || any;
+}
+
+/**
+ * Freezes the avatar at one frame of the jump clip.
+ *
+ * mixer.update() is doing the real work here. Setting action.time (or mixer.setTime())
+ * only moves the playhead - the mixer writes bone transforms during update(), so without
+ * it every bone stays in its bind pose and the model renders as a static T-shape. That is
+ * exactly what made earlier builds look like the animations were not loaded at all.
+ */
+function freezePose(root) {
+  if (!avatarClips.length) return;
+  const clip = avatarClips[0];
+  const mixer = new THREE.AnimationMixer(root);
+  const action = mixer.clipAction(clip);
+  action.play();
+  action.time = clip.duration * JUMP_POSE_AT;
+  action.paused = true;
+  mixer.update(0);          // evaluate the tracks once; the pose then never changes
+}
+
+function makeRunner(device_id, index) {
+  // Colour comes from the SDK, keyed by device slot, so a player's colour is the same
+  // here, in the room bar, and on their phone.
+  const color = freeconsole.getPlayerColorHex(device_id);
+
+  const group = new THREE.Group();
+  const mat = new THREE.MeshStandardMaterial({
+    color, emissive: color, emissiveIntensity: 0.45, roughness: 0.3, metalness: 0.2,
+  });
+
+  let body, handBone = null, turnGroup = null;
+
+  if (avatarModel) {
+    // Custom avatar: clone the loaded GLB, tint the parts marked as team-coloured, and
+    // find the hand the rope should come from.
+    body = cloneAvatar(avatarModel, color);
+    handBone = findHandNode(body);
+    // A separate turn-group carries the left/right facing, so the lean applied to the outer
+    // group stays a lean in the screen plane instead of tipping the model over.
+    turnGroup = new THREE.Group();
+    turnGroup.add(body);
+    group.add(turnGroup);
+    // Start facing down-course. Without this the model shows its default +Z orientation
+    // until the player first moves, which reads as the ninja looking backwards on the line.
+    turnGroup.rotation.y = -Math.PI / 2;
+    freezePose(body);
+  } else {
+    // Fallback capsule. A capsule rather than a sphere: it has an obvious long axis, so
+    // rotating it to face the direction of travel actually reads.
+    body = new THREE.Mesh(bodyGeo, mat);
+    group.add(body);
+
+    // A visor on the front, so the avatar has a facing and the lighting has something to
+    // catch.
+    const visor = new THREE.Mesh(
+      new THREE.SphereGeometry(PLAYER_R * 0.42, 14, 10),
+      new THREE.MeshStandardMaterial({ color: 0x05060d, roughness: 0.15, metalness: 0.6 })
+    );
+    visor.position.set(PLAYER_R * 0.55, 0, PLAYER_R * 0.5);
+    group.add(visor);
+  }
+
+  scene.add(group);
+
+  // Segmented rope, so it can hang in a curve when slack. A single cylinder can only be
+  // straight: offsetting it to fake a sag detaches it from the anchor and the player.
+  const rope = new THREE.Group();
+  const segMat = new THREE.MeshStandardMaterial({
+    color, emissive: color, emissiveIntensity: 0.5,
+  });
+  const segGeo = new THREE.CylinderGeometry(0.07, 0.07, 1, 6);
+  for (let i = 0; i < ROPE_SEGMENTS; i++) {
+    rope.add(new THREE.Mesh(segGeo, segMat));
+  }
+  rope.visible = false;
+  scene.add(rope);
+
+  const rb = world.createRigidBody(
+    RAPIER.RigidBodyDesc.dynamic()
+      .setTranslation(SPAWN.x, SPAWN.y)
+      // Launched, not dropped: see SPAWN_VX. The countdown holds everyone in place until
+      // it reaches zero, so this is a start, not the game playing itself.
+      .setLinvel(SPAWN_VX, SPAWN_VY)
+      .setLinearDamping(0)          // a real pendulum has no drag; any is a slow height leak
+      .setCcdEnabled(true)          // stops a fast swing tunnelling past a trampoline
+  );
+  world.createCollider(RAPIER.ColliderDesc.ball(PLAYER_R).setRestitution(0), rb);
+
+  return {
+    id: device_id, index, color,
+    cssColor: freeconsole.getPlayerColor(device_id),
+    rb, joint: null, anchor: null, anchorBody: null, ropeLength: 0, lastBounceAt: 0,
+    holding: false, finished: false, out: false, outReason: null,
+    lean: 0,                      // current body angle, eased toward the target each frame
+    time: 0, best: SPAWN.x,
+    mesh: group, body, ropeMesh: rope, handBone, turnGroup,
+  };
+}
+
+/* ---------------------------------------------------------------- input */
+
+freeconsole.onReady = () => syncPlayers();
+freeconsole.onConnect = () => syncPlayers();
+freeconsole.onDisconnect = (device_id) => {
+  const r = players[device_id];
+  if (r) {
+    detachRope(r);
+    world.removeRigidBody(r.rb);
+    scene.remove(r.mesh);
+    scene.remove(r.ropeMesh);
+  }
+  delete players[device_id];
+  syncPlayers();
+};
+
+freeconsole.onMessage = (device_id, data) => {
+  const r = players[device_id];
+  if (!r || !data) return;
+  if (data.hold === undefined) return;
+
+  if (data.hold === true) {
+    r.holding = true;
+    // Re-attach on every "hold" message, not just the first. The controller re-states a
+    // held button periodically, so a single dropped message can't leave a player pressing
+    // with no rope - the next heartbeat recovers them.
+    if (phase === "racing" && !r.finished && !r.out && !r.joint) attachRope(r);
+  } else {
+    r.holding = false;
+    detachRope(r);
+  }
+
+  // Echo what we now believe, so a phone whose message went missing can notice the
+  // disagreement and re-send rather than silently doing nothing.
+  freeconsole.message(Number(device_id), { holdAck: r.holding });
+};
+
+function syncPlayers() {
+  if (!world) return;
+  // Wait for the avatar too, not just physics.
+  //
+  // The shell fires onReady as soon as it connects, which is BEFORE the top-level await
+  // that loads the ninja - so runners built here got the fallback capsule and kept it for
+  // the whole session. Test mode never hit this because it starts after the await, which
+  // is exactly why the ninja only appeared there. assetsReady is set once loading is done,
+  // and syncPlayers() is called again at that point to pick up anyone already waiting.
+  if (!assetsReady) return;
+  // Test mode runs standalone with no shell, so there are no controllers to sync.
+  if (new URLSearchParams(location.search).get("test") === "1") return;
+  const ids = freeconsole.getControllerDeviceIds();
+  ids.forEach((id, i) => {
+    if (!players[id]) players[id] = makeRunner(id, i);
+  });
+  freeconsole.setActivePlayers();
+
+  // Each phone is told its colour, so the controller UI matches the runner on screen.
+  for (const id of ids) {
+    freeconsole.message(Number(id), { color: players[id].cssColor });
+  }
+
+  document.getElementById("lobbyNote").textContent =
+    ids.length === 0 ? "Waiting for players…" : "Starting…";
+  // Only kick off a round from a standing start. Between rounds returnToLobby() owns the
+  // timing, and starting here as well would run two countdowns over each other.
+  if (phase === "lobby" && ids.length > 0 && !lobbyTimer) startRace();
+  buildRail();
+  renderRoster();
+}
+
+/* ---------------------------------------------------------------- rope */
+
+/**
+ * The single anchor this player would grab right now, or null.
+ *
+ * Deliberately shared with the highlight: the marker must show the anchor you will
+ * actually get. Lighting up every anchor in range told the player nothing about where
+ * the hook would go, and lit half the course at once.
+ */
+function targetAnchor(r) {
+  const p = r.rb.translation();
+  let best = null, bestScore = Infinity;
+
+  for (const a of anchors) {
+    const dx = a.x - p.x, dy = a.y - p.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist > ROPE_REACH || dist < 2) continue;
+
+    // Anchors BELOW the player are grabbable too. Requiring them to be above meant that
+    // flying over one made it unreachable, which is exactly when you most want to hook
+    // it - you just swing under it instead of over.
+    //
+    // Nearest anchor ahead wins; grabbing something behind wastes a swing, and one
+    // far below is a worse swing than one at height, so both are penalised rather than
+    // excluded.
+    const score = dist + (dx > 0 ? 0 : 14) + (dy < 0 ? 3 : 0);
+    if (score < bestScore) { bestScore = score; best = a; }
+  }
+  return best;
+}
+
+function attachRope(r) {
+  const p = r.rb.translation();
+  const best = targetAnchor(r);
+  if (!best) return;
+
+  detachRope(r);
+
+  // The rope is exactly as long as the gap at the moment you grab.
+  //
+  // It must NEVER be shorter than the current distance: a RopeJoint enforces a maximum,
+  // so a clamped length makes Rapier snap the player up to satisfy it the instant it's
+  // created. Grabbing from 20m below a 7m rope teleported players 13m into the air, which
+  // is the "I'm low, then suddenly very high" glitch. Length is chosen by WHERE you grab
+  // from, which is the player's decision, not something the game should override.
+  const len = Math.hypot(best.x - p.x, best.y - p.y);
+
+  const anchorBody = world.createRigidBody(
+    RAPIER.RigidBodyDesc.fixed().setTranslation(best.x, best.y)
+  );
+  // RopeJoint: a maximum distance that only pulls. This is the whole fix for the orbiting
+  // bug - above the anchor the joint is slack and gravity simply takes over.
+  const joint = world.createImpulseJoint(
+    RAPIER.JointData.rope(len, { x: 0, y: 0 }, { x: 0, y: 0 }),
+    anchorBody, r.rb, true
+  );
+  r.joint = joint;
+  r.anchorBody = anchorBody;
+  r.anchor = best;
+  r.ropeLength = len;           // fixed for the life of the grapple; the renderer needs it
+
+  // Arcade taut-on-grab.
+  //
+  // A rope joint only limits distance, so grabbing from above the anchor leaves it slack:
+  // gravity pulls you straight down until you reach rope-length BELOW the anchor - a drop
+  // of twice your height above it, which reads as the rope "elongating" before the swing
+  // starts. Shortening the rope would fix it but teleports the player, so instead the
+  // velocity is rotated onto the tangent: the radial part that would have been a dead fall
+  // becomes orbital motion. Deliberately not real physics - a real rope cannot do this -
+  // but the swing starts on contact and the grab feels like a hook, not a stumble.
+  //
+  // Speed is carried through exactly - never raised. An earlier version floored it at a
+  // minimum orbit speed, which handed out free energy on every grab: tapping grapple while
+  // falling beside an anchor pumped in ~40% extra energy per burst and levitated the player
+  // over to the far side. The grab may redirect momentum but must never manufacture it.
+  //
+  // The tangent keeps whichever direction the player is already travelling, so a grab never
+  // reverses them either.
+  const dx = p.x - best.x, dy = p.y - best.y;
+  const d = Math.hypot(dx, dy);
+  if (d > 1e-4) {
+    const v = r.rb.linvel();
+    const speed = Math.hypot(v.x, v.y);
+    let tx = dy / d, ty = -dx / d;
+    if (v.x * tx + v.y * ty < 0) { tx = -tx; ty = -ty; }
+    r.rb.setLinvel({ x: tx * speed, y: ty * speed }, true);
+  }
+}
+
+function detachRope(r) {
+  if (r.joint) { world.removeImpulseJoint(r.joint, true); r.joint = null; }
+  if (r.anchorBody) { world.removeRigidBody(r.anchorBody); r.anchorBody = null; }
+  r.anchor = null;
+  r.ropeLength = 0;
+}
+
+/* ---------------------------------------------------------------- step */
+
+function step() {
+  const now = performance.now();
+
+  for (const id in players) {
+    const r = players[id];
+    if (r.finished || r.out) continue;
+
+    const p = r.rb.translation();
+    const v = r.rb.linvel();
+
+    // Gentle forward nudge while free, so a missed grab isn't instantly fatal.
+    // Terminal speed, so the camera can keep up and a lucky slingshot doesn't break framing.
+    const speed = Math.hypot(v.x, v.y);
+    const cap = r.joint ? MAX_SPEED_ROPED : MAX_SPEED;
+    if (speed > cap) {
+      r.rb.setLinvel({ x: v.x / speed * cap, y: v.y / speed * cap }, true);
+    }
+
+    // Trampolines. Each has a rotation, so a bed can be a floor, a wall, a ceiling or
+    // anything between, and BOTH faces bounce - hit a wall from either side and you're
+    // thrown back the way you came.
+    //
+    // Worked in the trampoline's own local space: rotate the player's offset by -angle,
+    // and it becomes a plain axis-aligned test regardless of how the bed is turned. The
+    // launch is then a fixed impulse along the bed's normal, pointing at whichever side
+    // the player arrived from.
+    // One bounce per cooldown window, however long contact lasts.
+    if (now - (r.lastBounceAt || 0) < TRAMP_COOLDOWN_MS) continue;
+
+    for (const t of trampolines) {
+      const angle = t.angle || 0;
+      const cos = Math.cos(-angle), sin = Math.sin(-angle);
+
+      // Player position relative to the bed, in the bed's local frame.
+      const dx = p.x - t.x, dy = p.y - t.y;
+      const lx = dx * cos - dy * sin;
+      const ly = dx * sin + dy * cos;
+
+      if (Math.abs(lx) > t.w / 2 + PLAYER_R) continue;
+      if (Math.abs(ly) > PLAYER_R + 0.5) continue;
+
+      // Velocity in the same frame; only a bounce INTO the bed counts, so a player
+      // resting against it isn't launched repeatedly.
+      const lvy = v.x * sin + v.y * cos;
+      const side = ly >= 0 ? 1 : -1;          // which face was hit
+      if (lvy * side > 0) continue;           // already moving away
+
+      // Launch along the bed's normal, on the side the player came from.
+      const nx = -Math.sin(angle) * side;
+      const ny = Math.cos(angle) * side;
+
+      // The rope is deliberately NOT detached. Bouncing while attached is a real move -
+      // the rope keeps pulling and the bounce adds energy to the swing - and yanking it
+      // away mid-bounce took control from the player at the exact moment they'd earned
+      // something. If the player has let go, they're simply free as usual.
+      //
+      // Nudge clear of the surface so the next frame can't re-trigger the same bounce.
+      r.rb.setTranslation({
+        x: t.x + nx * (PLAYER_R + 0.6) + (lx * Math.cos(angle)),
+        y: t.y + ny * (PLAYER_R + 0.6) + (lx * Math.sin(angle)),
+      }, true);
+      // Momentum in, momentum out. The speed INTO the bed is reflected and amplified, so
+      // arriving fast launches you further - the reward for a good swing into a bounce.
+      // The component ALONG the bed is preserved untouched, which is what lets an angled
+      // bed redirect you rather than simply stopping you.
+      const along = v.x * Math.cos(angle) + v.y * Math.sin(angle);
+      const impact = Math.abs(lvy);
+      const launch = Math.min(
+        TRAMP_MAX_BOUNCE,
+        Math.max(TRAMP_MIN_BOUNCE, impact * TRAMP_RESTITUTION)
+      );
+
+      if (r.joint && r.anchor) {
+        // Grappled: send the bounce AROUND the anchor rather than away from the bed.
+        //
+        // A rope only permits motion perpendicular to itself, so a bounce fired along the
+        // bed normal is mostly cancelled by the constraint - at the bottom of a swing the
+        // rope points straight down and an upward launch fights it head-on. Redirecting
+        // the same energy along the tangent is what turns a bounce into a full loop:
+        // measured 3.6 revolutions versus 0.8 for the same speed applied normally.
+        const rx = p.x - r.anchor.x, ry = p.y - r.anchor.y;
+        const rlen = Math.hypot(rx, ry) || 1;
+        let tx = -ry / rlen, ty = rx / rlen;
+
+        // REVERSE the direction of travel, don't preserve it.
+        //
+        // Preserving it meant every bounce added energy to the same rotation, so a player
+        // parked over a trampoline span up forever - infinite momentum in one direction.
+        // A trampoline is a bounce: you come back the way you came. Repeated hits now
+        // rock the player back and forth instead of winding them up.
+        if (tx * v.x + ty * v.y > 0) { tx = -tx; ty = -ty; }
+        r.rb.setLinvel({ x: tx * launch, y: ty * launch }, true);
+      } else {
+        // Free: a normal bounce off the bed's face.
+        r.rb.setLinvel({
+          x: Math.cos(angle) * along + nx * launch,
+          y: Math.sin(angle) * along + ny * launch,
+        }, true);
+      }
+      // Scale the squash with the impact, so a big hit visibly hits harder.
+      t.hitStrength = Math.min(1, impact / 30);
+
+      r.lastBounceAt = now;
+      // Tell the renderer to play the squash animation on this bed.
+      t.hitAt = now;
+      t.hitSide = side;
+      break;
+    }
+
+    r.best = Math.max(r.best, p.x);
+
+    if (p.y < WORLD_BOTTOM) eliminate(r, "fell");
+    else if (p.y > WORLD_TOP) eliminate(r, "flew off");
+    else if (p.x < cameraX - viewW / 2 - CAMERA_MARGIN) eliminate(r, "left behind");
+
+    if (!r.finished && !r.out && p.x >= courseLength) {
+      r.finished = true;
+      r.time = (Date.now() - raceStart) / 1000;
+      detachRope(r);
+      finishedOrder.push(r.id);
+      if (finishedOrder.length === 1) endRace();
+    }
+  }
+
+  world.step();
+
+  // Hold every grappled player exactly ropeLength from their anchor.
+  //
+  // Rapier's RopeJoint enforces a MAXIMUM distance, so it lets the rope go slack whenever
+  // the player swings inside that radius - and a drawn rope then visibly shortens. Since
+  // this game only wants gravity plus a swing, the rope is a rigid pendulum instead: the
+  // player is projected back onto the circle and the radial part of their velocity removed,
+  // which is what a taut rope does. The distance is then constant to within floating-point
+  // error, so the rope can never appear to stretch, shrink, or run past the player.
+  for (const id in players) {
+    const r = players[id];
+    if (!r.anchor || !r.ropeLength || r.out || r.finished) continue;
+
+    const p = r.rb.translation();
+    let dx = p.x - r.anchor.x, dy = p.y - r.anchor.y;
+    const d = Math.hypot(dx, dy);
+    if (d < 1e-6) continue;
+
+    const rx = dx / d, ry = dy / d;
+    r.rb.setTranslation(
+      { x: r.anchor.x + rx * r.ropeLength, y: r.anchor.y + ry * r.ropeLength },
+      true
+    );
+
+    // Strip the radial component; only motion around the anchor survives.
+    const v = r.rb.linvel();
+    const radial = v.x * rx + v.y * ry;
+    let nvx = v.x - radial * rx;
+    const nvy = v.y - radial * ry;
+
+    // Drive the swing sideways, not upward. The push is horizontal only, and only while
+    // already moving forward and hanging below the anchor - the quarter of the arc that
+    // turns into distance down the course. Outside that window it would just be launching
+    // the player into the sky.
+    // Only on the DOWNSWING, and only while below the anchor and heading forward.
+    //
+    // Driving on the upswing is what turned into altitude: the extra speed carried the
+    // player higher on the far side, and over several orbits that compounded into a 16m
+    // climb. Restricted to the descending quarter, the same push becomes forward distance
+    // and the swing cannot wind itself up.
+    if (nvx > 0 && nvy < 0 && p.y < r.anchor.y
+        && Math.hypot(nvx, nvy) < SWING_DRIVE_MAX_SPEED) {
+      nvx += SWING_DRIVE * (1 / 60);
+    }
+
+    r.rb.setLinvel({ x: nvx, y: nvy }, true);
+  }
+
+  // A total wipeout must still end the race, or it would hang forever.
+  if (phase === "racing") {
+    const ids = Object.keys(players);
+    const alive = ids.filter((id) => !players[id].out && !players[id].finished);
+    if (ids.length > 0 && alive.length === 0) endRace();
+  }
+}
+
+function eliminate(r, reason) {
+  if (r.out || r.finished) return;
+  r.out = true;
+  r.outReason = reason;
+  detachRope(r);
+  r.mesh.visible = false;
+  r.ropeMesh.visible = false;
+  r.rb.setLinvel({ x: 0, y: 0 }, true);
+
+  const flash = document.getElementById("elimFlash");
+  flash.textContent = `${nameOf(Number(r.id))} — ${reason}!`;
+  flash.style.color = r.cssColor;
+  flash.classList.remove("show");
+  void flash.offsetWidth;
+  flash.classList.add("show");
+
+  safeCall(() => freeconsole.message(Number(r.id), { eliminated: true, reason }));
+}
+
+/* ---------------------------------------------------------------- race flow */
+
+/**
+ * Sets up a round and counts it in.
+ *
+ * The course is built and players are placed before the countdown so there is something to
+ * look at while it runs, but the clock and physics only start when it reaches zero -
+ * otherwise the count is just a head start for whoever reacts first.
+ */
+function startRace() {
+  if (cancelCountdown) { cancelCountdown(); cancelCountdown = null; }
+  clearTimeout(lobbyTimer);
+  lobbyTimer = null;
+
+  phase = "countdown";
+  finishedOrder = [];
+  // Cycle the hand-made maps in order, then generate once they're exhausted. With no
+  // maps defined every race is generated, which is the current default.
+  if (MAPS.length > 0) {
+    buildCourse(MAPS[raceIndex % MAPS.length]);
+    raceIndex++;
+  } else {
+    buildCourse(Math.floor(Math.random() * 1e9));
+  }
+
+  for (const id in players) {
+    const r = players[id];
+    detachRope(r);
+    r.rb.setTranslation({ x: SPAWN.x, y: SPAWN.y }, true);
+    r.rb.setLinvel({ x: SPAWN_VX, y: SPAWN_VY }, true);
+    // Stand upright on the start line. The launch velocity is already set, but the avatar
+    // must not lean into it until the countdown finishes - see the phase check below.
+    r.lean = 0;
+    r.finished = false; r.out = false; r.outReason = null;
+    r.time = 0; r.best = SPAWN.x;
+    r.mesh.visible = true;
+  }
+  cameraX = 0;
+
+  document.getElementById("lobby").classList.remove("show");
+  document.getElementById("finish").classList.remove("show");
+  document.getElementById("champion").classList.remove("show");
+  buildRail();
+  renderRoster();
+
+  cancelCountdown = runCountdown(() => {
+    phase = "racing";
+    raceStart = Date.now();
+    safeCall(() => freeconsole.broadcast({ phase: "racing" }));
+  });
+}
+
+function endRace() {
+  phase = "finished";
+  const winner = finishedOrder[0];
+
+  // Award the round and check whether that takes the match.
+  if (winner !== undefined) {
+    scores[winner] = (scores[winner] || 0) + 1;
+    if (scores[winner] >= WINS_NEEDED) matchOver = true;
+  }
+  renderRoster();
+
+  document.getElementById("winnerName").textContent =
+    winner !== undefined ? nameOf(winner) : "Nobody";
+
+  const standings = document.getElementById("standings");
+  standings.innerHTML = "";
+
+  const ranked = Object.keys(players).sort((a, b) => {
+    const ai = finishedOrder.indexOf(Number(a));
+    const bi = finishedOrder.indexOf(Number(b));
+    if (ai !== -1 || bi !== -1) {
+      if (ai === -1) return 1;
+      if (bi === -1) return -1;
+      return ai - bi;
+    }
+    return players[b].best - players[a].best;
+  });
+
+  ranked.forEach((id, i) => {
+    const r = players[id];
+    const row = document.createElement("div");
+    row.className = "standing";
+
+    const pos = document.createElement("span");
+    pos.className = "pos";
+    pos.textContent = (i + 1) + ".";
+
+    const swatch = document.createElement("span");
+    swatch.className = "swatch";
+    swatch.style.background = r.cssColor;
+
+    const name = document.createElement("span");
+    name.textContent = nameOf(Number(id));
+
+    row.append(pos, swatch, name);
+    if (r.out) {
+      const out = document.createElement("span");
+      out.className = "out";
+      out.textContent = r.outReason;
+      row.appendChild(out);
+    }
+    standings.appendChild(row);
+  });
+
+  const wins = winner !== undefined ? (scores[winner] || 0) : 0;
+  document.getElementById("finishNote").textContent =
+    matchOver ? "Match over!"
+              : winner !== undefined
+                ? `${wins} of ${WINS_NEEDED} — back to the lobby…`
+                : "Back to the lobby…";
+
+  document.getElementById("finish").classList.add("show");
+  safeCall(() => freeconsole.broadcast({
+    phase: "finished", winner: winner ?? null, scores, matchOver,
+  }));
+  safeCall(() => freeconsole.setActivePlayers(0));
+
+  setTimeout(() => {
+    document.getElementById("finish").classList.remove("show");
+    if (matchOver) showChampion(winner);
+    else returnToLobby();
+  }, 4200);
+}
+
+/**
+ * Match champion screen: the player who reached three wins, with a trophy.
+ *
+ * After a pause the scores are cleared and a fresh match begins, so a room left running
+ * keeps playing rather than parking on a victory screen forever.
+ */
+function showChampion(winner) {
+  phase = "champion";
+  document.getElementById("championName").textContent =
+    winner !== undefined ? nameOf(winner) : "Nobody";
+  document.getElementById("champion").classList.add("show");
+  safeCall(() => freeconsole.broadcast({ phase: "champion", winner: winner ?? null }));
+
+  setTimeout(() => {
+    document.getElementById("champion").classList.remove("show");
+    for (const id in scores) delete scores[id];
+    matchOver = false;
+    renderRoster();
+    returnToLobby();
+  }, 8000);
+}
+
+/**
+ * Back to the lobby between rounds, where the roster and scores are on show.
+ *
+ * Rounds always pass through here rather than restarting directly, so there is a moment to
+ * read the scoreboard and see who is one win from taking it.
+ */
+function returnToLobby() {
+  phase = "lobby";
+  renderRoster();
+  const hasPlayers = freeconsole.getControllerDeviceIds().length > 0
+    || Object.keys(players).length > 0;
+  document.getElementById("lobbyNote").textContent =
+    hasPlayers ? "Next round starting…" : "Waiting for players…";
+  document.getElementById("lobby").classList.add("show");
+
+  clearTimeout(lobbyTimer);
+  lobbyTimer = null;
+  if (!hasPlayers) return;
+
+  lobbyTimer = setTimeout(() => {
+    lobbyTimer = null;
+    if (phase !== "lobby") return;              // something else already moved us on
+    if (freeconsole.getControllerDeviceIds().length > 0 || isTest) startRace();
+  }, 2600);
+}
+
+/* ---------------------------------------------------------------- roster */
+
+/** First letter of a player's name, for the avatar tile. */
+function initialOf(id) {
+  const n = nameOf(id);
+  return (n && n.trim()[0] ? n.trim()[0] : "?").toUpperCase();
+}
+
+/**
+ * Renders the score roster - avatar, name and three win pips per player.
+ *
+ * Drawn into both the top-left HUD and the lobby, from the same data, so a player's score
+ * reads the same wherever they look.
+ */
+function renderRoster() {
+  const ids = Object.keys(players);
+
+  const build = (host, big) => {
+    if (!host) return;
+    host.innerHTML = "";
+
+    for (const id of ids) {
+      const r = players[id];
+      const row = document.createElement("div");
+      row.className = big ? "lobby-player" : "roster-row";
+      if (!big && r.out) row.classList.add("eliminated");
+
+      const av = document.createElement("div");
+      av.className = big ? "lobby-av" : "roster-av";
+      av.style.background = r.cssColor;
+      av.textContent = initialOf(Number(id));
+
+      const info = document.createElement("div");
+      info.className = big ? "" : "roster-info";
+
+      const name = document.createElement("div");
+      name.className = "roster-name";
+      name.textContent = nameOf(Number(id));
+
+      // Three marks: filled for each round won, hollow for each still to play for.
+      const pips = document.createElement("div");
+      pips.className = "pips";
+      pips.style.color = r.cssColor;
+      const won = scores[id] || 0;
+      for (let i = 0; i < WINS_NEEDED; i++) {
+        const pip = document.createElement("div");
+        pip.className = "pip-mark" + (i < won ? " filled" : "");
+        pips.appendChild(pip);
+      }
+
+      if (big) {
+        row.append(av, name, pips);
+      } else {
+        info.append(name, pips);
+        row.append(av, info);
+      }
+      host.appendChild(row);
+    }
+  };
+
+  build(document.getElementById("roster"), false);
+  build(document.getElementById("lobbyRoster"), true);
+}
+
+/**
+ * Counts 3-2-1 in the centre of the screen, then runs `done`.
+ *
+ * Returns a cancel function: a player leaving mid-countdown should not strand the game in
+ * a count that resolves into a race with nobody in it.
+ */
+function runCountdown(done) {
+  const el = document.getElementById("countdown");
+  const num = document.getElementById("countNum");
+  let n = 3;
+  let timer = null;
+  let cancelled = false;
+
+  el.classList.add("show");
+
+  const tick = () => {
+    if (cancelled) return;
+    if (n === 0) {
+      el.classList.remove("show");
+      done();
+      return;
+    }
+    num.textContent = n;
+    // Restart the pop animation on every number.
+    num.style.animation = "none";
+    void num.offsetWidth;
+    num.style.animation = "";
+    safeCall(() => freeconsole.broadcast({ phase: "countdown", count: n }));
+    n--;
+    timer = setTimeout(tick, 850);
+  };
+  tick();
+
+  return () => {
+    cancelled = true;
+    clearTimeout(timer);
+    el.classList.remove("show");
+  };
+}
+
+/* ---------------------------------------------------------------- hud */
+
+function buildRail() {
+  const rail = document.getElementById("rail");
+  rail.innerHTML = "";
+  for (const id in players) {
+    const pip = document.createElement("div");
+    pip.className = "pip";
+    pip.style.background = players[id].cssColor;
+    pip.style.boxShadow = `0 0 10px ${players[id].cssColor}`;
+    pip.dataset.id = id;
+    rail.appendChild(pip);
+  }
+}
+
+function updateHud() {
+  for (const pip of document.getElementById("rail").children) {
+    const r = players[pip.dataset.id];
+    if (!r) continue;
+    const x = r.rb.translation().x;
+    pip.style.left = Math.max(0, Math.min(1, x / courseLength)) * 100 + "%";
+    pip.classList.toggle("out", r.out);
+  }
+  document.getElementById("clock").textContent =
+    phase === "racing" ? ((Date.now() - raceStart) / 1000).toFixed(1) + "s" : "";
+}
+
+/* ---------------------------------------------------------------- render */
+
+function syncMeshes(dt = 1 / 60) {
+
+  // Trampoline recoil: the bed squashes toward the face that was hit and springs back.
+  // Purely cosmetic, but without it a bounce reads as the player randomly changing
+  // direction rather than as an impact.
+  const now = performance.now();
+  for (const t of trampolines) {
+    if (!t.bed) continue;
+    const age = now - (t.hitAt || 0);
+    if (age > 420) {
+      t.bed.scale.set(1, 1, 1);
+      t.bed.position.set(0, 0, 0);
+      continue;
+    }
+    // Decaying spring: a fast dip, then an overshoot back to rest.
+    const k = age / 420;
+    const spring = Math.sin(k * Math.PI * 2.4) * (1 - k) * (1 - k);
+    t.bed.scale.set(1 + spring * 0.16, 1 - spring * 0.5, 1);
+    t.bed.position.set(0, -spring * 0.7 * (t.hitSide || 1), 0);
+  }
+
+  // Exactly ONE marked anchor per player: the one they'd actually grab. Walk players
+  // rather than anchors, so the count of lit rings can never exceed the player count.
+  for (const a of anchors) {
+    if (a.ring) { a.ring.material.opacity = 0; a.ring.scale.set(1, 1, 1); }
+  }
+
+  const beat = performance.now() * 0.005;
+  for (const id in players) {
+    const r = players[id];
+    if (r.out || r.finished) continue;
+
+    // While attached, keep marking the anchor you're actually on rather than the next
+    // candidate - otherwise the highlight jumps around mid-swing.
+    const target = r.anchor || targetAnchor(r);
+    if (!target || !target.ring) continue;
+
+    target.ring.material.color.setHex(r.color);
+    target.ring.material.opacity = r.anchor ? 0.95 : 0.8;
+    // A gentle pulse while it's merely a candidate; steady once you're attached, so the
+    // two states are distinguishable at a glance.
+    const pulse = r.anchor ? 1.25 : 1 + Math.sin(beat) * 0.12;
+    target.ring.scale.set(pulse, pulse, 1);
+  }
+
+  for (const id in players) {
+    const r = players[id];
+    const p = r.rb.translation();
+    const v = r.rb.linvel();
+    r.mesh.position.set(p.x, p.y, 0);
+
+    const speed = Math.hypot(v.x, v.y);
+
+    if (r.handBone) {
+      // Orientation follows the ROPE, not the velocity: the ninja hangs along the line to
+      // the anchor, so it ends up upside-down, sideways or anywhere between depending on
+      // where it is in the arc - which is what swinging on a rope actually looks like.
+      // Free-falling, it points along its own motion instead.
+      let ax, ay;
+      if (r.anchor) {
+        ax = r.anchor.x - p.x;
+        ay = r.anchor.y - p.y;
+      } else {
+        ax = v.x; ay = v.y;
+      }
+
+      // On a taut rope the velocity is tangential - perpendicular to the rope - so the
+      // instant the rope is released the target angle jumps by up to 180 degrees. Snapping
+      // to it looks like the character teleports into a new pose. Easing instead keeps the
+      // release smooth: the ninja rotates out of the hanging pose into the flight pose over
+      // a few frames, which is also what a real body would do.
+      // Before the race starts, the target is simply upright. The launch velocity is
+      // already set so physics can release cleanly on GO, but leaning into it during the
+      // countdown laid the avatar flat while it was still standing on the line.
+      const racing = phase === "racing";
+      const targetLean = !racing
+        ? 0
+        : (Math.hypot(ax, ay) > 1e-4 ? Math.atan2(ay, ax) - Math.PI / 2 : r.lean);
+      // Shortest way round, so easing never takes the long way through a full turn.
+      let delta = targetLean - r.lean;
+      while (delta > Math.PI) delta -= Math.PI * 2;
+      while (delta < -Math.PI) delta += Math.PI * 2;
+      // Attached, the pose should track the rope tightly; free, it can settle gently.
+      // Attached, the pose tracks the rope tightly. Free, it settles slowly - a quick
+      // rotation to head-down looked like the character was yanked rather than let go.
+      // Before the race, snap: there is nothing to animate from on the start line.
+      r.lean += delta * (!racing ? 1 : (r.anchor ? 0.55 : 0.012));
+
+      // Always facing right, never mirrored. Flipping to match the direction of travel
+      // mirrored the whole model, which teleported the hand - and with it the drawn rope
+      // endpoint - about 1.5m across in a single frame at the far end of every swing. The
+      // anchor never actually changed; the rope just appeared to jump to a new attachment.
+
+      // Both rotations are composed as quaternions and applied in a fixed order, because
+      // Euler angles on nested groups do not survive this: the lean tips the model's own
+      // axes, so a "turn sideways" applied after it stops pointing sideways. Turn first
+      // (about world Y), then lean about world Z, and each stays what it means.
+      //
+      // The model is authored facing +Z, straight at the camera - its bounding box is 1.70
+      // wide in x but only 0.34 deep in z - so +90 degrees about Y puts its nose down-course.
+      qTurn.setFromAxisAngle(AXIS_Y, Math.PI / 2);
+      qLean.setFromAxisAngle(AXIS_Z, r.lean);
+      r.mesh.quaternion.copy(qLean).multiply(qTurn);
+      r.turnGroup.rotation.set(0, 0, 0);
+
+    } else {
+      // Squash and stretch along travel: cheap, and it sells the speed of a good swing.
+      // Only the capsule gets this - on a rigged model it would distort the mesh, and
+      // r.body.scale is where the avatar's fit scale lives.
+      const stretch = 1 + Math.min(speed / 110, 0.3);
+      r.body.scale.set(1 / stretch, stretch, 1);
+      // Capsules are tall on Y, so point that axis along the direction of travel.
+      r.mesh.rotation.z = Math.atan2(v.y, v.x) - Math.PI / 2;
+      // A slow roll gives the 3D form something to show off as it flies.
+      r.mesh.rotation.y += 0.02 + Math.min(speed / 900, 0.06);
+    }
+
+    if (r.anchor && !r.out) {
+      // Always drawn TAUT, straight from anchor to player.
+      //
+      // A RopeJoint enforces a maximum distance, so the player is often nearer the anchor
+      // than the rope is long and a physically honest rope would sag. That was tried and
+      // rejected: this reads as a rigid grapple line, and a bending rope looks like a bug
+      // even though it's the more realistic behaviour.
+      //
+      // The earlier bug this replaces was different - the rope was drawn at the LIVE
+      // distance with the mesh scaled to match, so it visibly shrank and stretched. A
+      // straight line between two points has no such problem: it simply stays connected.
+      // The rope leaves the player's hand when the avatar has one, and the body centre
+      // otherwise. Using the bone's WORLD position means a skinned or animated arm drags
+      // the rope with it for free - no separate rig to keep in sync.
+      // The rope is a straight line from the anchor to the player. That is all.
+      //
+      // Two previous attempts overcomplicated this and each broke it in a different way.
+      // Measuring the length from the hand made it stretch and shrink, because the hand
+      // orbits the body as it rotates. Then forcing the drawn length to the grapple length
+      // made the rope overshoot whenever the player was nearer than that - it ran straight
+      // through them and they slid along it like a pole.
+      //
+      // Anchor to player. The physics decides where the player is; the rope just connects
+      // the two points, so it can never disagree with what the simulation is doing.
+      const dx = p.x - r.anchor.x, dy = p.y - r.anchor.y;
+      const len = Math.hypot(dx, dy) || 0.001;
+
+      r.ropeMesh.visible = true;
+      r.ropeMesh.position.set(0, 0, 0);
+      r.ropeMesh.rotation.set(0, 0, 0);
+
+      // The rope is still built from segments (so a future rope could curve), but they
+      // are laid in a straight line, sharing the span evenly.
+      const angle = Math.atan2(dy, dx) - Math.PI / 2;
+      const segLen = len / ROPE_SEGMENTS;
+      for (let i = 0; i < ROPE_SEGMENTS; i++) {
+        const t = (i + 0.5) / ROPE_SEGMENTS;
+        const seg = r.ropeMesh.children[i];
+        seg.position.set(r.anchor.x + dx * t, r.anchor.y + dy * t, 0.1);
+        seg.scale.set(1, segLen, 1);
+        seg.rotation.z = angle;
+      }
+    } else {
+      r.ropeMesh.visible = false;
+    }
+  }
+}
+
+/* ---------------------------------------------------------------- loop */
+
+function frame() {
+  if (phase === "racing") {
+    step();
+    // Progress updates: send on CHANGE, not on a timer.
+    //
+    // This used to fire 10x a second regardless, so a stationary player still generated 600
+    // messages a minute to every phone. Over a link with real latency that is bandwidth
+    // spent on nothing, and it queues behind the input that actually matters. Phones
+    // interpolate between updates, so a lower rate looks the same and costs a fraction.
+    const now = performance.now();
+    if (now - lastBroadcast > PROGRESS_MIN_MS) {
+      const progress = {};
+      let changed = false;
+      for (const id in players) {
+        const pct = Math.round((players[id].rb.translation().x / courseLength) * 100);
+        progress[id] = pct;
+        if (pct !== lastProgress[id]) changed = true;
+      }
+      // Resend periodically even when unchanged, so a phone that missed one recovers.
+      if (changed || now - lastBroadcast > PROGRESS_KEEPALIVE_MS) {
+        lastBroadcast = now;
+        Object.assign(lastProgress, progress);
+        freeconsole.broadcast({ phase: "racing", progress });
+      }
+    }
+  }
+
+  // Camera follows the furthest live player and never retreats - that's what makes
+  // "left behind" a genuine threat.
+  let lead = 0;
+  for (const id in players) {
+    const r = players[id];
+    if (!r.out) lead = Math.max(lead, r.rb.translation().x);
+  }
+  cameraX = Math.max(cameraX, cameraX + (lead + viewW * 0.16 - cameraX) * 0.06);
+  camera.position.x = cameraX;
+  // Look very slightly down and along the course rather than straight down the z axis.
+  // Dead-on, perspective has nothing to work with and the scene flattens out again.
+  camera.lookAt(cameraX + 6, 1, 0);
+  // The camera stays put vertically. Tracking the leader up and down was pushing the
+  // anchor band off the top of the screen, which left nothing visible to grapple - the
+  // whole play area fits in the 38m view, so there is nothing to follow.
+  camera.position.y = 0;
+
+  // Hide buildings outside the visible span. The camera's own z and aspect are passed so
+  // each depth row is culled against its own frustum width rather than the play plane's -
+  // otherwise the far rows pop into view at the screen edge.
+  if (cityView) cityView.update(cameraX, viewW, camera.position.z, camera.aspect);
+  cullCourse();
+
+  syncMeshes();
+  updateHud();
+  renderer.render(scene, camera);
+  requestAnimationFrame(frame);
+}
+
+let lastBroadcast = 0;
+const lastProgress = {};        // last values sent, so unchanged frames send nothing
+// 5Hz when something is moving: phones interpolate between updates, so this looks
+// identical to 10Hz while halving the traffic.
+const PROGRESS_MIN_MS = 200;
+// ...and a resend every second regardless, so a dropped update self-heals.
+const PROGRESS_KEEPALIVE_MS = 1000;
+
+/* ---------------------------------------------------------------- boot */
+
+// Rapier is WASM, so everything waits on its init.
+await RAPIER.init();
+world = new RAPIER.World({ x: 0, y: GRAVITY });
+world.timestep = 1 / 60;
+
+/**
+ * Editor test mode: ?test=1 with a map in the URL hash.
+ *
+ * Runs the real game against a map being designed, with a keyboard-driven dummy player,
+ * so a course can be played before it's exported. Everything else - physics, rendering,
+ * elimination - is exactly the live game.
+ */
+// Scenery first, so the first course is built with buildings rather than an empty skyline.
+await Promise.all([loadCityModels(), loadAvatar()]);
+assetsReady = true;
+// Anyone who connected while the assets were loading is still waiting for a runner.
+syncPlayers();
+
+const params = new URLSearchParams(location.search);
+const isTest = params.get("test") === "1";
+let testMap = null;
+if (isTest && location.hash.length > 1) {
+  try { testMap = JSON.parse(decodeURIComponent(location.hash.slice(1))); }
+  catch (err) { console.error("bad test map", err); }
+}
+
+if (isTest) {
+  startTestMode(testMap);
+} else {
+
+  buildCourse(1);
+  phase = "lobby";
+  document.getElementById("lobbyNote").textContent = "Waiting for players…";
+  syncPlayers();
+}
+requestAnimationFrame(frame);
+
+/**
+ * A single local player driven by the keyboard, for testing a map without phones.
+ * Space or click holds the grapple, exactly as a controller would.
+ */
+function startTestMode(map) {
+  const runner = makeRunner(0, 0);
+  players[0] = runner;
+  buildCourse(map || 1);
+  document.getElementById("lobby").classList.remove("show");
+  buildRail();
+  renderRoster();
+
+  // Same countdown the real game uses, so testing exercises the real start sequence.
+  phase = "countdown";
+  cancelCountdown = runCountdown(() => {
+    phase = "racing";
+    raceStart = Date.now();
+  });
+
+  const setHold = (held) => {
+    if (phase !== "racing") return;
+    runner.holding = held;
+    if (held) attachRope(runner);
+    else detachRope(runner);
+  };
+
+  window.addEventListener("keydown", (e) => {
+    if (e.code === "Space") { e.preventDefault(); setHold(true); }
+    if (e.code === "KeyR") restartTest(map);
+  });
+  window.addEventListener("keyup", (e) => {
+    if (e.code === "Space") { e.preventDefault(); setHold(false); }
+  });
+  window.addEventListener("pointerdown", () => setHold(true));
+  window.addEventListener("pointerup", () => setHold(false));
+
+  const tip = document.querySelector(".tip");
+  if (tip) tip.textContent = "TEST — hold SPACE or click to grapple · R to restart";
+}
+
+function restartTest(map) {
+  const runner = players[0];
+  if (!runner) return;
+  detachRope(runner);
+  runner.rb.setTranslation({ x: SPAWN.x, y: SPAWN.y }, true);
+  runner.rb.setLinvel({ x: SPAWN_VX, y: SPAWN_VY }, true);
+  runner.lean = 0;
+  runner.finished = false; runner.out = false; runner.outReason = null;
+  runner.mesh.visible = true;
+  finishedOrder = [];
+  document.getElementById("finish").classList.remove("show");
+  buildCourse(map || 1);
+
+  // Count the restart in as well, so R exercises the same start sequence as a real round.
+  if (cancelCountdown) { cancelCountdown(); cancelCountdown = null; }
+  phase = "countdown";
+  cancelCountdown = runCountdown(() => {
+    phase = "racing";
+    raceStart = Date.now();
+  });
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,57 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // An admin is a user carrying the `admin: true` custom claim, set only by the
+    // claimFirstAdmin / grantAdmin Cloud Functions. Claims live in the signed ID token, so
+    // this costs no extra reads and cannot be forged by a client.
+    function isAdmin() {
+      return request.auth != null && request.auth.token.admin == true;
+    }
+
+    // Shape check for a catalog entry. The shell drops screenUrl/controllerUrl straight
+    // into an iframe src, so they must be a same-origin path or an explicit https URL -
+    // never javascript:, data:, or protocol-relative.
+    function validUrl(value) {
+      return value is string
+        && value.size() > 0
+        && value.size() <= 500
+        && (
+          (value.matches('/[^/].*') )
+          || value.matches('https://.+')
+        );
+    }
+
+    function validGame(data) {
+      return data.name is string && data.name.size() > 0 && data.name.size() <= 60
+        && (!('description' in data) || (data.description is string && data.description.size() <= 300))
+        && data.minPlayers is int && data.minPlayers >= 1
+        && data.maxPlayers is int && data.maxPlayers >= data.minPlayers
+        && validUrl(data.screenUrl)
+        && validUrl(data.controllerUrl)
+        && (!('thumbnailUrl' in data) || data.thumbnailUrl == null || validUrl(data.thumbnailUrl));
+    }
+
+    // The catalog is public reference data - every screen reads it to build the game list.
+    // Only an admin may change it, and only into a shape the shell can actually load.
+    match /games/{gameId} {
+      allow read: if true;
+      allow create, update: if isAdmin() && validGame(request.resource.data);
+      allow delete: if isAdmin();
+    }
+
+    // Tracks whether an admin exists yet. Readable by anyone so the admin page can decide
+    // whether to offer the one-time bootstrap; written only by Cloud Functions (the admin
+    // SDK bypasses these rules), so a client cannot reset it to re-open the bootstrap.
+    match /admin_meta/{doc} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // Everything else is closed until it has an explicit rule.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Tap War — Screen</title>
+<link rel="stylesheet" href="/console.css" />
+<style>
+  /* The game screen is shown on a TV across the room, so everything scales with the
+     viewport and contrast stays high. Palette comes from console.css so a game feels
+     like part of the same machine. */
+  body {
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    padding: 4vh 4vw;
+    overflow: hidden;
+  }
+
+  h1 {
+    font-size: clamp(24px, 4.2vw, 52px);
+    line-height: 1;
+    color: var(--glow);
+    text-shadow: var(--bloom-glow);
+  }
+  .sub { color: var(--text-dim); font-size: clamp(12px, 1.4vw, 18px); margin-top: 8px; }
+
+  #waiting {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-dim);
+    font-size: clamp(15px, 2vw, 26px);
+    text-align: center;
+  }
+  #waiting.hidden { display: none; }
+  #waiting .ring {
+    width: 44px; height: 44px;
+    border-radius: 50%;
+    border: 2px solid rgba(53,240,224,.2);
+    border-top-color: var(--glow);
+    animation: spin 1s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  #board { flex: 1; display: none; flex-direction: column; gap: 2.2vh; padding-top: 3vh; }
+  #board.active { display: flex; }
+
+  .row { display: grid; grid-template-columns: minmax(90px, 14%) 1fr auto; gap: 18px; align-items: center; }
+  .who {
+    font-size: clamp(13px, 1.7vw, 22px);
+    font-weight: 700;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .who.off { opacity: .35; text-decoration: line-through; }
+  .track {
+    background: rgba(5,6,13,.7);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    height: clamp(22px, 4.4vh, 46px);
+    overflow: hidden;
+    position: relative;
+  }
+  .fill {
+    height: 100%;
+    border-radius: 999px;
+    width: 0;
+    transition: width .12s ease-out;
+    box-shadow: 0 0 22px currentColor;
+  }
+  .score {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    font-size: clamp(16px, 2.2vw, 30px);
+    font-weight: 700;
+    min-width: 2.5ch;
+    text-align: right;
+  }
+
+  #winner {
+    position: fixed;
+    inset: 0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 14px;
+    background: rgba(5, 6, 13, .94);
+    text-align: center;
+    z-index: 10;
+  }
+  #winner.show { display: flex; animation: rise .5s cubic-bezier(.2,.8,.25,1) forwards; }
+  #winner .name {
+    font-size: clamp(34px, 8vw, 96px);
+    font-weight: 700;
+    color: var(--glow);
+    text-shadow: var(--bloom-glow);
+    line-height: 1;
+  }
+</style>
+</head>
+<body>
+<h1>Tap War</h1>
+<div class="sub">First to 50 taps wins. Tap as fast as you can on your phone.</div>
+
+<div id="waiting">
+  <div class="ring"></div>
+  <div>Waiting for players to join…</div>
+</div>
+<div id="board"></div>
+
+<div id="winner">
+  <div class="eyebrow">Winner</div>
+  <div class="name" id="winnerName"></div>
+</div>
+
+<script src="/sdk.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  var TARGET = 50;
+  // Player colours, ordered so the first few are maximally distinguishable on a TV.
+  var COLORS = ["#35f0e0", "#ff2e88", "#9dff4f", "#ffc247", "#7b6cff", "#4fd2ff", "#ff7a3d", "#ff5ec4"];
+
+  var freeconsole = new FreeConsole();
+
+  var scores = Object.create(null);   // device_id -> taps
+  var lastSeq = Object.create(null);  // device_id -> last processed tap sequence
+  var finished = false;
+  var dirty = true;
+
+  freeconsole.onReady = function () {
+    // Assign player numbers to whoever is here. Doing it on ready (and on every
+    // connect/disconnect) keeps numbers consecutive as people come and go.
+    freeconsole.setActivePlayers();
+    dirty = true;
+  };
+
+  freeconsole.onConnect = function (device_id) {
+    if (scores[device_id] === undefined) scores[device_id] = 0;
+    freeconsole.setActivePlayers();
+    dirty = true;
+  };
+
+  freeconsole.onDisconnect = function () {
+    freeconsole.setActivePlayers();
+    dirty = true;
+  };
+
+  // Controllers send { seq } on each tap. Counting distinct seq values rather than
+  // message arrivals keeps the score honest if a message is re-delivered.
+  freeconsole.onMessage = function (device_id, data) {
+    if (finished) return;
+    var seq = data && data.seq;
+    if (typeof seq !== "number") return;
+    if (lastSeq[device_id] === seq) return;
+
+    var delta = lastSeq[device_id] === undefined ? 1 : Math.max(0, Math.min(seq - lastSeq[device_id], 10));
+    lastSeq[device_id] = seq;
+    scores[device_id] = (scores[device_id] || 0) + delta;
+    dirty = true;
+
+    if (scores[device_id] >= TARGET) declareWinner(device_id);
+  };
+
+  function declareWinner(device_id) {
+    finished = true;
+    document.getElementById("winnerName").textContent = freeconsole.getNickname(device_id);
+    document.getElementById("winner").classList.add("show");
+    freeconsole.broadcast({ phase: "over", winner: device_id, scores: scores });
+    // Signals the end of the round, per the FreeConsole convention.
+    freeconsole.setActivePlayers(0);
+  }
+
+  function render() {
+    var ids = freeconsole.getControllerDeviceIds();
+    var board = document.getElementById("board");
+    var waiting = document.getElementById("waiting");
+
+    if (ids.length === 0) {
+      waiting.classList.remove("hidden");
+      board.classList.remove("active");
+      return;
+    }
+    waiting.classList.add("hidden");
+    board.classList.add("active");
+
+    board.innerHTML = "";
+    ids.forEach(function (device_id, i) {
+      var score = scores[device_id] || 0;
+      var row = document.createElement("div");
+      row.className = "row";
+
+      var who = document.createElement("div");
+      who.className = "who";
+      who.textContent = freeconsole.getNickname(device_id);
+
+      var track = document.createElement("div");
+      track.className = "track";
+      var fill = document.createElement("div");
+      fill.className = "fill";
+      // color drives the box-shadow glow via currentColor as well as the bar itself.
+      fill.style.color = COLORS[i % COLORS.length];
+      fill.style.background = COLORS[i % COLORS.length];
+      fill.style.width = Math.min(100, (score / TARGET) * 100) + "%";
+      track.appendChild(fill);
+
+      var value = document.createElement("div");
+      value.className = "score";
+      value.textContent = score;
+
+      row.appendChild(who);
+      row.appendChild(track);
+      row.appendChild(value);
+      board.appendChild(row);
+    });
+  }
+
+  // The screen is the authoritative host: it owns the loop and publishes state. Redrawing
+  // and broadcasting on a frame tick rather than per input keeps a fast tapper from
+  // driving a write per tap.
+  var lastBroadcast = 0;
+  function tick(now) {
+    if (dirty) {
+      render();
+      dirty = false;
+      if (!finished && now - lastBroadcast > 200) {
+        lastBroadcast = now;
+        freeconsole.broadcast({ phase: "play", target: TARGET, scores: scores });
+      }
+    }
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,593 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Nidhogg — Screen</title>
+<link rel="stylesheet" href="/console.css" />
+<style>
+  html, body { height: 100%; overflow: hidden; }
+  body { display: flex; flex-direction: column; }
+
+  /* The canvas is the game. Everything else is a thin band above it. */
+  #stage { flex: 1; position: relative; background: #05060d; }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+
+  /* Territory bar: the whole match state in one line. Nine cells, one per screen, filling
+     from each player's edge toward the middle as ground is taken. */
+  #hud {
+    display: flex; align-items: center; gap: 14px;
+    padding: 10px 20px; border-bottom: 1px solid var(--line);
+    background: rgba(5,6,13,.85);
+  }
+  .who {
+    font-size: clamp(12px, 1.3vw, 17px); font-weight: 700;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 22vw;
+  }
+  .who .tag {
+    font-family: var(--font-mono); font-size: 9px; letter-spacing: .14em;
+    text-transform: uppercase; color: var(--text-faint); display: block;
+  }
+  #territory { flex: 1; display: flex; gap: 3px; height: clamp(14px, 2.2vh, 22px); }
+  .cell {
+    flex: 1; border-radius: 2px; background: rgba(26,32,56,.75);
+    border: 1px solid var(--line); transition: background .18s ease-out, box-shadow .18s;
+  }
+  .cell.a { background: var(--pa); border-color: var(--pa); box-shadow: 0 0 12px var(--pa); }
+  .cell.b { background: var(--pb); border-color: var(--pb); box-shadow: 0 0 12px var(--pb); }
+  .cell.active { outline: 1px solid rgba(234,242,255,.55); outline-offset: 1px; }
+
+  #overlay {
+    position: absolute; inset: 0; display: flex;
+    flex-direction: column; align-items: center; justify-content: center;
+    gap: 12px; text-align: center; background: rgba(5,6,13,.9); z-index: 5;
+  }
+  #overlay.hidden { display: none; }
+  #overlay .big {
+    font-size: clamp(30px, 6vw, 76px); font-weight: 700; line-height: 1;
+    color: var(--glow); text-shadow: var(--bloom-glow);
+  }
+  #overlay .sub { color: var(--text-dim); font-size: clamp(13px, 1.6vw, 20px); max-width: 60ch; }
+  #overlay .ring {
+    width: 40px; height: 40px; border-radius: 50%;
+    border: 2px solid rgba(53,240,224,.2); border-top-color: var(--glow);
+    animation: spin 1s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<div id="hud">
+  <div class="who" id="nameA"><span class="tag">Left</span><span id="labelA">—</span></div>
+  <div id="territory"></div>
+  <div class="who" id="nameB" style="text-align:right"><span class="tag">Right</span><span id="labelB">—</span></div>
+</div>
+
+<div id="stage">
+  <canvas id="c"></canvas>
+  <div id="overlay">
+    <div class="ring"></div>
+    <div class="sub">Waiting for two players…</div>
+  </div>
+</div>
+
+<script src="/sdk.js"></script>
+<script type="module">
+import {
+  createMatch, addPlayer, removePlayer, setInput, clearInput, press, setGuard,
+  step, restart, assignSides, scheduleRespawns, swordBox,
+  BODY_W, BODY_H, GUARD_Y, HIGH, MID, LOW,
+} from "/games/nidhogg/sim.js?v=1";
+import {
+  SCREEN_W, SCREEN_H, GROUND_Y, MIN_SCREEN, MAX_SCREEN, SCREENS,
+  screenLeft, buildSolids,
+} from "/games/nidhogg/arena.js?v=1";
+
+const freeconsole = new FreeConsole();
+
+/* ------------------------------------------------------------ test harness */
+
+// ?test=1 runs the whole game with no shell behind it: two keyboard fencers, so the sim can
+// be reloaded on every edit without re-joining a room. Anything that touches the shell goes
+// through safeCall, so a missing one is a no-op rather than a crash.
+const TEST = new URLSearchParams(location.search).has("test");
+
+function safeCall(fn, fallback) {
+  try { return fn(); } catch (err) { return fallback; }
+}
+function nameOf(id) {
+  return safeCall(() => freeconsole.getNickname(id), "Player " + id) || ("Player " + id);
+}
+function colorOf(id) {
+  return safeCall(() => freeconsole.getPlayerColor(id), "#35f0e0") || "#35f0e0";
+}
+/** Room-wide clock. Never Date.now() — phones and the TV disagree by seconds. */
+function now() {
+  return safeCall(() => freeconsole.getServerTime(), Date.now());
+}
+
+/* -------------------------------------------------------------------- setup */
+
+const match = createMatch();
+const solids = buildSolids();
+
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+const overlay = document.getElementById("overlay");
+const territory = document.getElementById("territory");
+
+/** One cell per playable screen, left to right. */
+const cells = [];
+for (let i = MIN_SCREEN; i <= MAX_SCREEN; i++) {
+  const cell = document.createElement("div");
+  cell.className = "cell";
+  territory.appendChild(cell);
+  cells.push(cell);
+}
+
+let cssW = 0, cssH = 0, scale = 1, offX = 0, offY = 0;
+
+/** Height of the world band actually drawn, in world units. Set by resize(). */
+let viewH = SCREEN_H;
+
+function resize() {
+  const rect = canvas.getBoundingClientRect();
+  const dpr = Math.min(devicePixelRatio || 1, 2);
+  cssW = rect.width;
+  cssH = rect.height;
+  canvas.width = Math.round(cssW * dpr);
+  canvas.height = Math.round(cssH * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  // Letterbox one screen's worth of world into the canvas. The camera never zooms, so the
+  // scale is fixed by the viewport and nothing else.
+  //
+  // The fit is computed against VIEW_H rather than the full SCREEN_H: everything below the
+  // ground line is solid fill, so fitting the whole band wastes a third of a wide display on
+  // dirt and leaves the fencers small and high. Framing to just below the floor fills the
+  // screen with the part that is actually played on.
+  viewH = GROUND_Y + 70;
+  scale = Math.min(cssW / SCREEN_W, cssH / viewH);
+  offX = (cssW - SCREEN_W * scale) / 2;
+  offY = (cssH - viewH * scale) / 2;
+}
+addEventListener("resize", resize);
+
+/* ------------------------------------------------------------------- roster */
+
+function sideOf(deviceId) {
+  const p = match.players.get(deviceId);
+  return p ? p.side : 0;
+}
+
+function joinPlayer(deviceId) {
+  // Already seated: a reconnect or a duplicate onConnect. Keep the seat, but drop anything
+  // the old session left held — a stale key is what makes a player refuse to move.
+  if (match.players.has(deviceId)) {
+    clearInput(match, deviceId);
+    return;
+  }
+  if (match.players.size >= 2) return;   // 1v1 only (spec 33)
+
+  addPlayer(match, deviceId, match.players.size === 0 ? 0 : 1);
+  assignSides(match);
+  renderHud();
+  maybeStart();
+  broadcastPhase();
+}
+
+function leavePlayer(deviceId) {
+  if (!match.players.has(deviceId)) return;
+  removePlayer(match, deviceId);
+  if (match.players.size < 2 && match.phase === "fight") {
+    match.phase = "waiting";
+    showOverlay("Waiting for two players…", null);
+  }
+  assignSides(match);
+  renderHud();
+  broadcastPhase();
+}
+
+function maybeStart() {
+  if (match.players.size < 2) {
+    showOverlay("Waiting for two players…", null);
+    return;
+  }
+  if (match.phase === "fight") return;
+  safeCall(() => freeconsole.setActivePlayers(2));
+  restart(match);
+  showOverlay(null);
+  broadcastPhase();
+}
+
+/* ---------------------------------------------------------------- shell wiring */
+
+freeconsole.onReady = function () {
+  safeCall(() => freeconsole.setActivePlayers(2));
+  for (const id of safeCall(() => freeconsole.getControllerDeviceIds(), []) || []) joinPlayer(id);
+  renderHud();
+};
+
+freeconsole.onConnect = joinPlayer;
+freeconsole.onDisconnect = leavePlayer;
+
+/**
+ * Controllers send intent only — held directions, one-shot actions, and a guard height.
+ * Nothing here trusts a phone with position or with a kill.
+ */
+freeconsole.onMessage = function (deviceId, data) {
+  if (!data || !match.players.has(deviceId)) return;
+
+  if (data.t === "hold") {
+    setInput(match, deviceId, data.k, data.v);
+    return;
+  }
+  if (data.t === "press") {
+    press(match, deviceId, data.k);
+    return;
+  }
+  if (data.t === "guard") {
+    setGuard(match, deviceId, data.g);
+    return;
+  }
+  if (data.t === "restart" && match.phase === "over") {
+    maybeStart();
+  }
+};
+
+/**
+ * Phase and score go out on change, not per frame (spec: never stream). Controllers only need
+ * to know whether they are fighting, which side they are, and whether they still hold a sword.
+ */
+let lastPhaseKey = "";
+function broadcastPhase() {
+  const ids = [...match.players.keys()].sort((a, b) => a - b);
+  const armed = {};
+  const dead = {};
+  for (const [id, p] of match.players) { armed[id] = p.armed; dead[id] = p.dead; }
+
+  const key = JSON.stringify([match.phase, match.winner, match.screen, armed, dead, ids]);
+  if (key === lastPhaseKey) return;
+  lastPhaseKey = key;
+
+  safeCall(() => freeconsole.broadcast({
+    phase: match.phase,
+    winner: match.winner,
+    screen: match.screen,
+    armed,
+    dead,
+    sides: Object.fromEntries([...match.players].map(([id, p]) => [id, p.side])),
+  }));
+}
+
+/* ---------------------------------------------------------------------- hud */
+
+function renderHud() {
+  const ids = [...match.players.keys()].sort((a, b) => a - b);
+  const a = ids.find((id) => sideOf(id) === 0);
+  const b = ids.find((id) => sideOf(id) === 1);
+
+  document.getElementById("labelA").textContent = a === undefined ? "—" : nameOf(a);
+  document.getElementById("labelB").textContent = b === undefined ? "—" : nameOf(b);
+
+  const ca = a === undefined ? "#35f0e0" : colorOf(a);
+  const cb = b === undefined ? "#ff2e88" : colorOf(b);
+  document.documentElement.style.setProperty("--pa", ca);
+  document.documentElement.style.setProperty("--pb", cb);
+  document.getElementById("labelA").style.color = ca;
+  document.getElementById("labelB").style.color = cb;
+}
+
+/**
+ * The territory bar mirrors the active screen: every cell from the left edge up to the
+ * current screen belongs to the left player, and the mirror for the right.
+ */
+function renderTerritory() {
+  const active = match.screen;
+  cells.forEach((cell, i) => {
+    const index = MIN_SCREEN + i;
+    cell.classList.toggle("a", index < active);
+    cell.classList.toggle("b", index > active);
+    cell.classList.toggle("active", index === active);
+  });
+}
+
+function showOverlay(big, sub) {
+  if (big === null) { overlay.classList.add("hidden"); return; }
+  overlay.classList.remove("hidden");
+  overlay.innerHTML = sub === null
+    ? '<div class="ring"></div><div class="sub">' + big + "</div>"
+    : '<div class="big">' + big + '</div><div class="sub">' + (sub || "") + "</div>";
+}
+
+/* ------------------------------------------------------------------- effects */
+
+// Short-lived sparks and flashes, drawn in world space and aged out by the frame loop. Purely
+// cosmetic — the sim never reads them back.
+const fx = [];
+
+function addFx(type, x, y, color) {
+  fx.push({ type, x, y, color: color || "#eaf2ff", life: 1 });
+}
+
+function drainEvents() {
+  for (const e of match.events) {
+    if (e.type === "clash" || e.type === "scrape") addFx("spark", e.x, e.y, "#ffc247");
+    else if (e.type === "disarm") addFx("burst", e.x + BODY_W / 2, e.y + 20, "#ffc247");
+    else if (e.type === "death") addFx("blood", e.x + BODY_W / 2, e.y + BODY_H / 2, "#ff2e88");
+    else if (e.type === "divehit" || e.type === "kick" || e.type === "punch") addFx("burst", e.x, e.y, "#eaf2ff");
+    else if (e.type === "advance") { flashScreen = 1; renderTerritory(); }
+    else if (e.type === "win") {
+      const name = nameOf(e.id);
+      showOverlay(name + " wins", "Devoured by Nidhogg. Press any button to fight again.");
+      safeCall(() => freeconsole.setActivePlayers(0));
+    }
+    else if (e.type === "start") renderTerritory();
+  }
+  match.events.length = 0;
+}
+
+let flashScreen = 0;
+
+/* ------------------------------------------------------------------- drawing */
+
+/** World -> canvas. The camera x is the left edge of the visible screen. */
+function tx(x) { return offX + (x - match.cameraX) * scale; }
+function ty(y) { return offY + y * scale; }
+
+function draw() {
+  ctx.clearRect(0, 0, cssW, cssH);
+
+  // Backdrop. A cold sky over the active screen, with the letterbox left black so the
+  // playfield edge is unambiguous on a TV.
+  const g = ctx.createLinearGradient(0, offY, 0, offY + viewH * scale);
+  g.addColorStop(0, "#0a0c18");
+  g.addColorStop(0.7, "#101425");
+  g.addColorStop(1, "#161b30");
+  ctx.fillStyle = g;
+  ctx.fillRect(offX, offY, SCREEN_W * scale, viewH * scale);
+
+  drawParallax();
+  drawSolids();
+  drawSwords();
+  for (const p of match.players.values()) drawPlayer(p);
+  drawFx();
+  drawGoalMarkers();
+
+  // A white wash on the frame territory changes hands, so the advance is impossible to miss.
+  if (flashScreen > 0) {
+    ctx.fillStyle = "rgba(234,242,255," + (flashScreen * 0.22).toFixed(3) + ")";
+    ctx.fillRect(offX, offY, SCREEN_W * scale, viewH * scale);
+  }
+}
+
+/** Distant bands that shift with the camera, so a screen change reads as travel. */
+function drawParallax() {
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(offX, offY, SCREEN_W * scale, viewH * scale);
+  ctx.clip();
+
+  // Distant towers, all standing *on* the ground line and rising into the sky. Bands that
+  // float at platform height instead read as level geometry the player can land on, which is
+  // exactly the wrong cue on a game where every surface matters.
+  const depth = [
+    { k: 0.12, top: 176, c: "#111830", w: 150, period: 300 },
+    { k: 0.26, top: 248, c: "#16203c", w: 108, period: 214 },
+  ];
+  for (const layer of depth) {
+    ctx.fillStyle = layer.c;
+    const shift = -(match.cameraX * layer.k) % layer.period;
+    for (let x = shift - layer.period; x < SCREEN_W + layer.period; x += layer.period) {
+      ctx.fillRect(offX + x * scale, ty(layer.top), layer.w * scale, (GROUND_Y - layer.top) * scale);
+    }
+  }
+
+  // Horizon haze where the towers meet the floor, so the backdrop settles behind the arena.
+  const haze = ctx.createLinearGradient(0, ty(GROUND_Y - 120), 0, ty(GROUND_Y));
+  haze.addColorStop(0, "rgba(16,20,37,0)");
+  haze.addColorStop(1, "rgba(16,20,37,.85)");
+  ctx.fillStyle = haze;
+  ctx.fillRect(offX, ty(GROUND_Y - 120), SCREEN_W * scale, 120 * scale);
+  ctx.restore();
+}
+
+function drawSolids() {
+  const left = match.cameraX - 80;
+  const right = match.cameraX + SCREEN_W + 80;
+  for (const s of solids) {
+    if (s.x > right || s.x + s.w < left) continue;
+
+    // Ground fill sits below the floor line and is deliberately dark and inert; raised
+    // platforms are lighter, so a ledge you can land on never reads as bulk terrain.
+    const isGround = s.y >= GROUND_Y;
+    ctx.fillStyle = isGround ? "#0c1020" : "#232c4a";
+    ctx.fillRect(tx(s.x), ty(s.y), s.w * scale, s.h * scale);
+
+    // A bright top edge is the only lighting cue, and it makes landable surfaces obvious.
+    // It has to out-contrast the backdrop towers, or a ledge you can stand on looks the same
+    // as scenery you cannot.
+    ctx.fillStyle = "rgba(53,240,224,.55)";
+    ctx.fillRect(tx(s.x), ty(s.y), s.w * scale, Math.max(2, 3 * scale));
+  }
+}
+
+function drawSwords() {
+  for (const s of match.swords) {
+    ctx.save();
+    ctx.translate(tx(s.x), ty(s.y));
+    ctx.rotate(s.angle);
+    ctx.fillStyle = s.live ? "#ffc247" : "#8492b8";
+    if (s.live) { ctx.shadowColor = "#ffc247"; ctx.shadowBlur = 14 * scale; }
+    ctx.fillRect(-22 * scale, -2 * scale, 44 * scale, 4 * scale);
+    ctx.fillStyle = "#56628a";
+    ctx.fillRect(-24 * scale, -5 * scale, 5 * scale, 10 * scale);
+    ctx.restore();
+  }
+}
+
+/**
+ * Players are flat silhouettes in their platform colour: no shading, no blending, a handful
+ * of poses (spec 28). Readability at TV distance beats detail, so the pose changes shape
+ * rather than adding lines.
+ */
+function drawPlayer(p) {
+  const color = colorOf(p.id);
+  const x = tx(p.x);
+  const y = ty(p.y);
+  const w = BODY_W * scale;
+  const h = p.height * scale;
+
+  if (p.dead) {
+    // A body on the floor, flat and dim, until the respawn takes it away.
+    ctx.fillStyle = "rgba(255,46,136,.45)";
+    ctx.fillRect(x - 8 * scale, ty(p.y + p.height - 10), (BODY_W + 16) * scale, 10 * scale);
+    return;
+  }
+
+  ctx.save();
+  ctx.fillStyle = color;
+  ctx.shadowColor = color;
+  ctx.shadowBlur = 16 * scale;
+
+  // Body.
+  ctx.fillRect(x, y, w, h);
+
+  // Head, tucked toward the facing side so the silhouette has a direction at a glance.
+  const headSize = 13 * scale;
+  const headX = p.facing > 0 ? x + w - headSize * 0.85 : x - headSize * 0.15;
+  ctx.fillRect(headX, y - headSize * 0.5, headSize, headSize);
+  ctx.restore();
+
+  // Guard indicator: a bar in front of the chest at the sword's height, so the opponent can
+  // read the guard even when the blade itself is off-screen behind a body.
+  if (p.armed) {
+    const s = swordBox(p);
+    if (s) {
+      ctx.save();
+      ctx.fillStyle = "#eaf2ff";
+      ctx.shadowColor = "#eaf2ff";
+      ctx.shadowBlur = 12 * scale;
+      ctx.fillRect(tx(s.x), ty(s.y), s.w * scale, s.h * scale);
+      ctx.restore();
+    }
+  } else {
+    // Unarmed: a hollow ring above the head, the one piece of state that changes how you play.
+    ctx.strokeStyle = "rgba(234,242,255,.5)";
+    ctx.lineWidth = Math.max(1, 2 * scale);
+    ctx.beginPath();
+    ctx.arc(x + w / 2, y - 22 * scale, 5 * scale, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+}
+
+function drawFx() {
+  for (const f of fx) {
+    const a = f.life;
+    ctx.save();
+    ctx.globalAlpha = a;
+    ctx.fillStyle = f.color;
+    ctx.shadowColor = f.color;
+    ctx.shadowBlur = 18 * scale;
+    const r = (f.type === "blood" ? 26 : 12) * (1.3 - a) * scale;
+    ctx.beginPath();
+    ctx.arc(tx(f.x), ty(f.y), Math.max(1, r), 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+/** The goal line, drawn only when the camera is on the screen that contains it. */
+function drawGoalMarkers() {
+  if (match.screen === MAX_SCREEN) {
+    const x = tx(screenLeft(MAX_SCREEN) + SCREEN_W - 6);
+    ctx.fillStyle = "var(--pa)";
+    ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--pa") || "#35f0e0";
+    ctx.globalAlpha = 0.5;
+    ctx.fillRect(x, offY, 6 * scale, viewH * scale);
+    ctx.globalAlpha = 1;
+  }
+  if (match.screen === MIN_SCREEN) {
+    const x = tx(screenLeft(MIN_SCREEN));
+    ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--pb") || "#ff2e88";
+    ctx.globalAlpha = 0.5;
+    ctx.fillRect(x, offY, 6 * scale, viewH * scale);
+    ctx.globalAlpha = 1;
+  }
+}
+
+/* --------------------------------------------------------------------- loop */
+
+let last = 0;
+
+function frame(ts) {
+  requestAnimationFrame(frame);
+  if (!last) { last = ts; resize(); }
+
+  // Clamp dt so a backgrounded tab does not teleport anyone through a wall on return.
+  const dt = Math.min(0.05, (ts - last) / 1000);
+  last = ts;
+
+  step(match, dt, now());
+  scheduleRespawns(match, now());
+  drainEvents();
+
+  for (const f of fx) f.life -= dt * 2.4;
+  for (let i = fx.length - 1; i >= 0; i--) if (fx[i].life <= 0) fx.splice(i, 1);
+  if (flashScreen > 0) flashScreen = Math.max(0, flashScreen - dt * 3.5);
+
+  draw();
+  broadcastPhase();
+}
+
+resize();
+requestAnimationFrame(frame);
+renderHud();
+renderTerritory();
+
+/* --------------------------------------------------------------- test mode */
+
+if (TEST) {
+  // Two local fencers. Left: WASD + F attack, G kick, T throw, R roll, 1/2/3 guard.
+  // Right: arrows + . attack, / kick, , throw, ; roll, 7/8/9 guard.
+  addPlayer(match, 1, 0);
+  addPlayer(match, 2, 1);
+  renderHud();
+  restart(match);
+  showOverlay(null);
+
+  // Expose the live match so a driver script can assert on it. Test mode only, so the shipped
+  // game keeps nothing on the global.
+  window.__match = match;
+
+  const holds = {
+    KeyA: [1, "left"], KeyD: [1, "right"], KeyW: [1, "up"], KeyS: [1, "down"],
+    ShiftLeft: [1, "run"],
+    ArrowLeft: [2, "left"], ArrowRight: [2, "right"], ArrowUp: [2, "up"], ArrowDown: [2, "down"],
+    ShiftRight: [2, "run"],
+  };
+  const presses = {
+    KeyW: [1, "jump"], KeyF: [1, "attack"], KeyG: [1, "kick"], KeyT: [1, "throw"], KeyR: [1, "roll"],
+    ArrowUp: [2, "jump"], Period: [2, "attack"], Slash: [2, "kick"], Comma: [2, "throw"], Semicolon: [2, "roll"],
+  };
+  const guards = {
+    Digit1: [1, HIGH], Digit2: [1, MID], Digit3: [1, LOW],
+    Digit7: [2, HIGH], Digit8: [2, MID], Digit9: [2, LOW],
+  };
+
+  addEventListener("keydown", (e) => {
+    if (e.repeat) return;
+    if (holds[e.code]) { const [id, k] = holds[e.code]; setInput(match, id, k, true); }
+    if (presses[e.code]) { const [id, k] = presses[e.code]; press(match, id, k); }
+    if (guards[e.code]) { const [id, g] = guards[e.code]; setGuard(match, id, g); }
+    if (e.code === "Enter") { restart(match); showOverlay(null); }
+    if (holds[e.code] || presses[e.code]) e.preventDefault();
+  });
+  addEventListener("keyup", (e) => {
+    if (holds[e.code]) { const [id, k] = holds[e.code]; setInput(match, id, k, false); }
+  });
+}
+</script>
+</body>
+</html>

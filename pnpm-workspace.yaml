@@ -1,0 +1,9 @@
+# pnpm 11 reads these settings here rather than from package.json.
+#
+# `functions/` is deliberately NOT a workspace package: Firebase deploys that directory as a
+# standalone unit and installs it itself, so it keeps its own package.json and lockfile.
+allowBuilds:
+  # protobufjs' postinstall backs the gRPC transport firebase-admin uses; @firebase/util is
+  # pulled in by the client SDK. Skipping these fails at runtime, not at install time.
+  '@firebase/util': true
+  protobufjs: true
