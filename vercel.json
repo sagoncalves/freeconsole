@@ -1,8 +1,9 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "pnpm build",
+  "outputDirectory": "dist",
   "cleanUrls": false,
   "trailingSlash": false,
-  "outputDirectory": "public",
   "headers": [
     {
       "source": "/:_path(.*\\.(?:js|mjs|html))",
