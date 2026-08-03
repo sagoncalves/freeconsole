@@ -1,0 +1,61 @@
+---
+/**
+ * The site nav.
+ *
+ * Server-rendered so it is present in the very first frame. It used to be built in JS by
+ * chrome.js' mountChrome(), which meant every page shipped without a nav and then had one
+ * prepended once the module (and Firebase auth, from a CDN) had loaded - a visible pop-in
+ * that shoved the page down, because .nav is position:sticky and reserves no height.
+ *
+ * Only the account slot still depends on runtime auth state, so only that part is filled
+ * in by script (see account.js). It renders a reserved-width placeholder here so swapping
+ * "Sign in" for an admin's email doesn't reflow the bar.
+ */
+const LINKS = [
+  { href: "/", label: "Games", match: (p: string) => p === "/" || p === "/index.html" },
+  // play.html owns a live room session and a game iframe, and signup.html owns the admin
+  // auth flow; both bind their listeners at module-evaluation time. Client-side routing
+  // would hand them a fresh DOM without re-running that setup, so links into them force a
+  // real page load via data-astro-reload.
+  { href: "/play.html", label: "Join a game", match: (p: string) => p === "/play.html", reload: true },
+  { href: "/docs.html", label: "Build a game", match: (p: string) => p === "/docs.html" },
+];
+
+// Astro.url.pathname is the build-time path for a static page, which is exactly the
+// "which link is active" answer the old code computed from location.pathname at runtime.
+const path = Astro.url.pathname;
+---
+
+<a class="skip-link" href="#main">Skip to content</a>
+
+<nav class="nav" transition:persist id="nav">
+  <a class="brand" href="/">
+    <span class="brand-mark" aria-hidden="true">FC</span>
+    <span class="brand-name">FreeConsole</span>
+  </a>
+  <div class="nav-links">
+    {LINKS.map((l) => (
+      <a
+        class:list={["nav-link", l.match(path) && "active"]}
+        href={l.href}
+        data-astro-reload={l.reload ? "" : undefined}
+      >{l.label}</a>
+    ))}
+    <span class="nav-account" data-account></span>
+  </div>
+</nav>
+
+<script>
+  // transition:persist keeps these exact nodes across a navigation, which is the point -
+  // the bar never repaints. The cost is that the server-rendered .active class is the one
+  // from whichever page first rendered the nav, so it has to be recomputed after each swap.
+  document.addEventListener("astro:page-load", () => {
+    const path = location.pathname;
+    for (const link of document.querySelectorAll("#nav .nav-links a[href]")) {
+      const href = link.getAttribute("href");
+      const active =
+        href === "/" ? path === "/" || path === "/index.html" : path === href;
+      link.classList.toggle("active", active);
+    }
+  });
+</script>

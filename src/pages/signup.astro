@@ -5,7 +5,7 @@ const title = "Sign up — FreeConsole";
 const themeColor = "#05060d";
 ---
 
-<BaseLayout title={title} themeColor={themeColor}>
+<BaseLayout title={title} themeColor={themeColor} footer={false}>
   <Fragment slot="head">
     <style is:global>
       /* ---------------------------------------------------------------- auth */
@@ -335,7 +335,7 @@ const themeColor = "#05060d";
       </div>
 
       <p class="auth-alt">
-        Just here to play? <a href="/play.html" style="color:var(--glow);text-decoration:none">Join a game</a> — no account needed.
+        Just here to play? <a href="/play.html" data-astro-reload style="color:var(--glow);text-decoration:none">Join a game</a> — no account needed.
       </p>
     </section>
 
@@ -474,12 +474,13 @@ const themeColor = "#05060d";
     import { getFunctions, httpsCallable } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-functions.js";
     import { initializeApp } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-app.js";
     import { firebaseConfig } from "/firebase-config.js";
-    import { mountChrome, toast } from "/chrome.js";
+    import { toast } from "/chrome.js";
+    import { mountAccount } from "/account.js";
 
     // Initialized directly rather than reusing relay.js: that module also spins up RTDB and the
     // anonymous-auth flow for gameplay, none of which this page needs.
     const app = initializeApp(firebaseConfig);
-    mountChrome({ app, footer: false });
+    mountAccount(app);
     const auth = getAuth(app);
     const firestore = getFirestore(app);
     const functions = getFunctions(app);

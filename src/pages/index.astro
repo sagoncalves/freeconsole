@@ -432,7 +432,7 @@ const description =
             </p>
             <div class="hero-actions reveal" style="--i:3">
               <button class="btn btn-primary btn-lg" id="startRoom">Start a room</button>
-              <a class="btn btn-ghost btn-lg" href="/play.html">I have a code</a>
+              <a class="btn btn-ghost btn-lg" href="/play.html" data-astro-reload>I have a code</a>
             </div>
             <ul class="hero-steps reveal" style="--i:4">
               <li><span class="n">1</span> Open a room</li>
@@ -517,9 +517,10 @@ const description =
     import { startSession, STORE_LOCATION, gameUrl } from "/session.js";
     import { masterControllerId } from "/room.js";
     import { renderQR } from "/qr.js";
-    import { mountChrome, toast } from "/chrome.js";
+    import { toast } from "/chrome.js";
+    import { mountAccount } from "/account.js";
 
-    mountChrome({ app });
+    mountAccount(app);
 
     const firestore = getFirestore(app);
     const functions = getFunctions(app);
@@ -563,7 +564,7 @@ const description =
         empty.innerHTML = `
           <h3>No games yet</h3>
           <p class="muted" style="margin:8px 0 18px">Add one from the admin page to get started.</p>
-          <a class="btn btn-ghost" href="/signup.html">Open admin</a>`;
+          <a class="btn btn-ghost" href="/signup.html" data-astro-reload>Open admin</a>`;
         host.appendChild(empty);
         return;
       }
@@ -800,7 +801,16 @@ const description =
       }
     }
 
-    $("startRoom").addEventListener("click", startRoom);
-    loadCatalog();
+    // With <ClientRouter /> the document survives navigation, so this module is evaluated
+    // once and never again - returning to this page would otherwise leave the new DOM with
+    // no listeners bound and a dead "Start a room" button. astro:page-load fires on the
+    // first load and after every swap, so binding happens against whatever DOM is current.
+    document.addEventListener("astro:page-load", () => {
+      const button = $("startRoom");
+      // Only this page has the button; the event fires for every route.
+      if (!button) return;
+      button.addEventListener("click", startRoom);
+      loadCatalog();
+    });
   </script>
 </BaseLayout>

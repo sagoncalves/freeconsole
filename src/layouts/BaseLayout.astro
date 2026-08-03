@@ -2,16 +2,22 @@
 /**
  * BaseLayout — every page on the platform shares this shell.
  *
- * Each original HTML file had its own <head> and called mountChrome() from chrome.js
- * (inline) to inject the nav, footer, and CRT atmosphere in JS. That is preserved here:
- * chrome.js still owns the chrome because it reflects Firebase auth state at runtime.
+ * The nav, footer and atmosphere are server-rendered here as real markup. They used to be
+ * built in JS by chrome.js' mountChrome(), which meant every page shipped chrome-less and
+ * then grew a nav once that module (and Firebase auth, from a CDN) had loaded — a visible
+ * pop-in that also shifted the page, since .nav is position:sticky and reserves no height.
+ * None of that markup ever depended on anything but the current path, so none of it needed
+ * to be deferred to the client. Only the account slot is still filled in at runtime, by
+ * account.js.
  *
- * This layout only standardises what every page always agreed on — charset, viewport,
- * theme-colour, console.css, the <html>/<body> scaffolding — and exposes slots for the
- * per-page <title>, description, inline <style>, and main body. Each page still calls
- * mountChrome() itself from its inline <script type="module">, with the options it wants
- * (e.g. signup passes { app, footer: false }).
+ * <ClientRouter /> then keeps navigation from tearing the document down: Astro swaps only
+ * the changed part of the page, and the nav/footer carry transition:persist so the very
+ * same DOM nodes survive a route change rather than being rebuilt.
  */
+import { ClientRouter } from "astro:transitions";
+import Nav from "../components/Nav.astro";
+import Footer from "../components/Footer.astro";
+
 interface Props {
   title: string;
   description?: string;
@@ -23,6 +29,10 @@ interface Props {
   appCapable?: boolean;
   /** Extra class on <body> applied at first paint, e.g. bodyClass="in-room" to hide nav. */
   bodyClass?: string;
+  /** Signup is an app screen, not a website page, so it opts out of the footer. */
+  footer?: boolean;
+  /** diag is a bare diagnostics page with none of the cabinet chrome. */
+  chrome?: boolean;
 }
 
 const {
@@ -32,6 +42,8 @@ const {
   viewport = "width=device-width, initial-scale=1",
   appCapable = false,
   bodyClass,
+  footer = true,
+  chrome = true,
 } = Astro.props;
 ---
 
@@ -60,8 +72,14 @@ const {
     {/* Per-page inline styles: Astro scopes <style> by default but we want the original
         global rules verbatim, so pages opt into is:global inside their own <style> block. */}
     <slot name="head" />
+    <ClientRouter />
   </head>
   <body class={bodyClass}>
+    {chrome && (
+      <div class="atmosphere" aria-hidden="true" transition:persist></div>
+    )}
+    {chrome && <Nav />}
     <slot />
+    {chrome && footer && <Footer />}
   </body>
 </html>

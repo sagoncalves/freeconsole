@@ -43,7 +43,7 @@ export default defineConfig({
         //   - these modules reference each other by absolute path, so they can't move to src/
         // Marking them external keeps `import "/relay.js"` as a literal URL in the output,
         // which the browser then serves from public/ as it always has.
-        external: [/^\/(relay|session|room|peer|sdk|chrome|qr|player-colors|firebase-config)\.js($|\?)/],
+        external: [/^\/(relay|session|room|peer|sdk|chrome|account|qr|player-colors|firebase-config)\.js($|\?)/],
       },
     },
   },
