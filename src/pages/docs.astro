@@ -1,0 +1,562 @@
+---
+import BaseLayout from "../layouts/BaseLayout.astro";
+
+const title = "Build a game — FreeConsole SDK";
+
+// Each docs code block contains literal {, }, < and > characters, which Astro's JSX-like
+// parser tries to evaluate. Holding them here as plain template strings and injecting via
+// set:html keeps them as inert text exactly as the original docs.html served them.
+const codeScreen = `<span class="cm"><!-- Loaded on the TV. There is exactly one screen per room. --></span>
+<script src=<span class="st">"/sdk.js"</span>></script>
+<script>
+  <span class="kw">const</span> freeconsole = <span class="kw">new</span> <span class="fn">FreeConsole</span>();
+  <span class="kw">const</span> scores = {};
+
+  freeconsole.<span class="fn">onMessage</span> = <span class="kw">function</span> (device_id, data) {
+    <span class="kw">if</span> (data.action !== <span class="st">"tap"</span>) <span class="kw">return</span>;
+    scores[device_id] = (scores[device_id] || 0) + 1;
+    <span class="fn">render</span>();
+  };
+
+  freeconsole.<span class="fn">onConnect</span> = <span class="fn">render</span>;
+  freeconsole.<span class="fn">onDisconnect</span> = <span class="kw">function</span> (device_id) {
+    <span class="kw">delete</span> scores[device_id];
+    <span class="fn">render</span>();
+  };
+
+  <span class="kw">function</span> <span class="fn">render</span>() {
+    document.body.innerHTML = freeconsole.<span class="fn">getControllerDeviceIds</span>()
+      .<span class="fn">map</span>((id) => freeconsole.<span class="fn">getNickname</span>(id) + <span class="st">": "</span> + (scores[id] || 0))
+      .<span class="fn">join</span>(<span class="st">"<br>"</span>);
+  }
+</script>`;
+
+const codeController = `<span class="cm"><!-- Loaded on every phone that joins. --></span>
+<script src=<span class="st">"/sdk.js"</span>></script>
+<button id=<span class="st">"tap"</span>>TAP</button>
+<script>
+  <span class="kw">const</span> freeconsole = <span class="kw">new</span> <span class="fn">FreeConsole</span>();
+
+  document.<span class="fn">getElementById</span>(<span class="st">"tap"</span>).<span class="fn">addEventListener</span>(<span class="st">"pointerdown"</span>, () => {
+    <span class="cm">// FreeConsole.SCREEN is 0 — always the screen.</span>
+    freeconsole.<span class="fn">message</span>(FreeConsole.SCREEN, { action: <span class="st">"tap"</span> });
+  });
+</script>`;
+
+const codeDiagram = `  phone                    shell                    TV
+   ┌──────────────┐         ┌──────────┐         ┌──────────────┐
+   │ controller   │◄──────► │  room    │ ◄─────► │   screen     │
+   │   + sdk.js   │ postMsg │  + net   │ postMsg │   + sdk.js   │
+   └──────────────┘         └──────────┘         └──────────────┘`;
+
+const codeDevices = `freeconsole.<span class="fn">getDeviceId</span>()                <span class="cm">// this device's id</span>
+freeconsole.<span class="fn">getControllerDeviceIds</span>()     <span class="cm">// [1, 3, 4] — phones on this game</span>
+freeconsole.<span class="fn">getMasterControllerDeviceId</span>()<span class="cm">// lowest connected controller</span>
+freeconsole.<span class="fn">getNickname</span>(3)               <span class="cm">// "Sam", or "Player 3"</span>`;
+
+const codeColorsRef = `freeconsole.<span class="fn">getPlayerColor</span>()        <span class="cm">// "#35f0e0" — this device</span>
+freeconsole.<span class="fn">getPlayerColor</span>(3)       <span class="cm">// "#9dff4f" — device 3</span>
+freeconsole.<span class="fn">getPlayerColorHex</span>(3)    <span class="cm">// 0x9dff4f, for WebGL / canvas</span>
+
+FreeConsole.PLAYER_COLORS          <span class="cm">// the whole palette, 8 entries</span>`;
+
+const codeColorsUse = `<span class="cm">// controller — paint your own UI</span>
+document.body.style.setProperty(<span class="st">"--me"</span>, freeconsole.<span class="fn">getPlayerColor</span>());
+
+<span class="cm">// screen — colour each player's avatar</span>
+<span class="kw">for</span> (<span class="kw">const</span> id <span class="kw">of</span> freeconsole.<span class="fn">getControllerDeviceIds</span>()) {
+  sprites[id].color = freeconsole.<span class="fn">getPlayerColorHex</span>(id);
+}`;
+
+const codeMessaging = `<span class="cm">// controller → screen</span>
+freeconsole.<span class="fn">message</span>(FreeConsole.SCREEN, { action: <span class="st">"hold"</span>, on: <span class="kw">true</span> });
+
+<span class="cm">// screen → everyone</span>
+freeconsole.<span class="fn">broadcast</span>({ phase: <span class="st">"racing"</span> });`;
+
+const codeState = `freeconsole.<span class="fn">setCustomDeviceState</span>({ character: <span class="st">"ninja"</span>, ready: <span class="kw">true</span> });
+freeconsole.<span class="fn">setCustomDeviceStateProperty</span>(<span class="st">"ready"</span>, <span class="kw">false</span>);  <span class="cm">// one key</span>
+
+freeconsole.<span class="fn">getCustomDeviceState</span>(3);        <span class="cm">// what device 3 published</span>
+
+freeconsole.<span class="fn">onCustomDeviceStateChange</span> = <span class="kw">function</span> (device_id, custom) {
+  <span class="cm">// someone updated theirs</span>
+};`;
+
+const codeTime = `freeconsole.<span class="fn">getServerTime</span>()    <span class="cm">// a clock the whole room agrees on</span>
+freeconsole.<span class="fn">getClockOffset</span>()   <span class="cm">// this device's error, in ms</span>`;
+
+const codeActive = `<span class="cm">// screen only — throws on a controller</span>
+freeconsole.<span class="fn">setActivePlayers</span>();     <span class="cm">// everyone currently connected</span>
+freeconsole.<span class="fn">setActivePlayers</span>(4);    <span class="cm">// at most the first 4</span>
+freeconsole.<span class="fn">setActivePlayers</span>(0);    <span class="cm">// clear, e.g. back to the lobby</span>
+
+freeconsole.<span class="fn">getActivePlayerDeviceIds</span>();          <span class="cm">// [1, 3] in player order</span>
+freeconsole.<span class="fn">convertPlayerNumberToDeviceId</span>(0);     <span class="cm">// 1</span>
+freeconsole.<span class="fn">convertDeviceIdToPlayerNumber</span>(3);     <span class="cm">// 1</span>
+
+<span class="cm">// on a controller: your number, or undefined if you are not playing</span>
+freeconsole.<span class="fn">onActivePlayersChange</span> = <span class="kw">function</span> (player_number) { ... };`;
+
+const codeNav = `freeconsole.<span class="fn">navigateTo</span>(<span class="st">"/games/roperaid/screen.html"</span>);  <span class="cm">// all devices follow</span>
+freeconsole.<span class="fn">navigateHome</span>();                            <span class="cm">// back to the catalog</span>`;
+---
+
+<BaseLayout title={title}>
+  <Fragment slot="head">
+    <style is:global>{`
+      .docs { max-width: 900px; margin: 0 auto; padding: 32px 22px 120px; }
+
+      .lede { color: var(--text-dim); font-size: 16px; line-height: 1.65; margin-bottom: 8px; }
+
+      /* Sticky contents rail on wide screens, inline on narrow ones. */
+      .layout { display: flex; gap: 40px; align-items: flex-start; }
+      .toc {
+        position: sticky; top: 20px; flex-shrink: 0; width: 190px;
+        font-size: 13px; line-height: 1.9;
+      }
+      .toc a { color: var(--text-faint); text-decoration: none; display: block; }
+      .toc a:hover { color: var(--glow); }
+      .toc .toc-head {
+        font-family: var(--font-mono); font-size: 10px; letter-spacing: .14em;
+        text-transform: uppercase; color: var(--text-faint); margin-bottom: 6px;
+      }
+      .body { flex: 1; min-width: 0; }
+      @media (max-width: 780px) { .layout { display: block; } .toc { display: none; } }
+
+      h2 {
+        font-size: 22px; margin: 44px 0 12px;
+        padding-top: 14px; border-top: 1px solid var(--line);
+      }
+      h2:first-of-type { border-top: 0; margin-top: 20px; }
+      h3 { font-size: 15px; margin: 24px 0 8px; color: var(--text); }
+      p { color: var(--text-dim); line-height: 1.7; margin-bottom: 12px; }
+
+      code {
+        font-family: var(--font-mono); font-size: 12.5px;
+        background: rgba(53,240,224,.09); color: var(--glow);
+        padding: 1px 5px; border-radius: 4px;
+      }
+      pre {
+        background: var(--ink-900); border: 1px solid var(--line);
+        border-radius: 10px; padding: 14px 16px; overflow-x: auto;
+        margin: 12px 0 16px;
+      }
+      pre code {
+        background: none; color: var(--text); padding: 0;
+        font-size: 12.5px; line-height: 1.65; display: block; white-space: pre;
+      }
+      .cm { color: var(--text-faint); }
+      .kw { color: #ff8ab8; }
+      .st { color: var(--lime); }
+      .fn { color: var(--glow); }
+
+      /* Tables and code can both be wider than a phone. Each scrolls inside its own box so
+         the page itself never shifts sideways. */
+      .scroller { overflow-x: auto; margin: 12px 0 18px; }
+      table { width: 100%; border-collapse: collapse; font-size: 13.5px; min-width: 380px; }
+      th, td {
+        text-align: left; padding: 9px 12px;
+        border-bottom: 1px solid var(--line); vertical-align: top;
+      }
+      th {
+        font-family: var(--font-mono); font-size: 10px; letter-spacing: .12em;
+        text-transform: uppercase; color: var(--text-faint); font-weight: 400;
+      }
+      td:first-child { white-space: nowrap; }
+      td code { white-space: nowrap; }
+      td p { margin: 0; font-size: 13px; }
+
+      .note {
+        border-left: 2px solid var(--glow); background: rgba(53,240,224,.05);
+        padding: 11px 14px; margin: 14px 0; border-radius: 0 8px 8px 0;
+      }
+      .note p:last-child { margin-bottom: 0; }
+      .note.warn { border-left-color: var(--amber); background: rgba(255,194,71,.06); }
+      .note strong { color: var(--text); }
+
+      .steps { counter-reset: step; list-style: none; padding: 0; }
+      .steps > li {
+        counter-increment: step; position: relative;
+        padding-left: 38px; margin-bottom: 20px;
+      }
+      .steps > li::before {
+        content: counter(step);
+        position: absolute; left: 0; top: -1px;
+        width: 25px; height: 25px; border-radius: 8px;
+        background: rgba(53,240,224,.12); color: var(--glow);
+        display: grid; place-items: center;
+        font-family: var(--font-mono); font-size: 12px;
+      }
+      .steps h3 { margin-top: 0; }
+    `}</style>
+  </Fragment>
+
+  <div class="docs">
+    <h1 style="font-size:30px;margin-bottom:10px">Build a game</h1>
+    <p class="lede">
+      Games are plain static web pages. Two of them: one for the TV or laptop
+      (<strong>screen</strong>), one for each phone (<strong>controller</strong>). They talk to
+      each other through a single SDK file and nothing else — no build step, no framework, no
+      server of your own.
+    </p>
+
+    <div class="layout">
+      <nav class="toc">
+        <div class="toc-head">Contents</div>
+        <a href="#start">Quick start</a>
+        <a href="#model">How it works</a>
+        <a href="#devices">Devices & ids</a>
+        <a href="#colors">Player colours</a>
+        <a href="#messaging">Messaging</a>
+        <a href="#state">Device state</a>
+        <a href="#time">Timing</a>
+        <a href="#players">Active players</a>
+        <a href="#nav">Navigation</a>
+        <a href="#callbacks">Callbacks</a>
+        <a href="#reference">Full reference</a>
+        <a href="#publish">Publishing</a>
+        <a href="#testing">Testing</a>
+        <a href="#gotchas">Gotchas</a>
+      </nav>
+
+      <div class="body">
+
+        <h2 id="start">Quick start</h2>
+
+        <p>
+          A complete two-file game. The screen counts taps; every phone has a button. Copy these
+          two files, open the console, and it runs.
+        </p>
+
+        <h3>screen.html</h3>
+        <pre><code set:html={codeScreen}></code></pre>
+
+        <h3>controller.html</h3>
+        <pre><code set:html={codeController}></code></pre>
+
+        <div class="note">
+          <p>
+            That is the whole API surface most games need: <code>message()</code> to send,
+            <code>onMessage</code> to receive. Everything below is for when you want more.
+          </p>
+        </div>
+
+        <div class="note">
+          <p>
+            <strong>Porting an AirConsole game?</strong> The API deliberately mirrors theirs, and
+            <code>AirConsole</code> still works as an alias for <code>FreeConsole</code> — so an
+            existing game usually runs here with no changes beyond pointing the
+            <code><script></code> tag at <code>/sdk.js</code>.
+          </p>
+        </div>
+
+        <h2 id="model">How it works</h2>
+
+        <p>
+          Your game runs inside a sandboxed iframe. The shell — the page hosting the room —
+          handles the room code, the join flow, and the network. Your game never sees any of it,
+          and never touches the platform's database or auth.
+        </p>
+
+        <p>
+          Messages take the fastest route available. Where the browser can open a direct
+          peer-to-peer connection, devices talk over the network node they share — usually the
+          router in the room — and the traffic never leaves the building. Where it cannot, they
+          fall back to the server. <strong>Your game cannot tell which was used</strong>, and does
+          not need to.
+        </p>
+
+        <pre><code set:html={codeDiagram}></code></pre>
+
+        <p>
+          Everything you call before the connection is ready is queued, so you never have to wait
+          for a handshake. Just construct the SDK and start using it.
+        </p>
+
+        <h2 id="devices">Devices & ids</h2>
+
+        <p>
+          Every device in a room has a numeric <strong>device id</strong>, which is its slot.
+          The screen is always <code>0</code>. Controllers get <code>1</code>, <code>2</code>,
+          <code>3</code>… in join order.
+        </p>
+
+        <div class="note warn">
+          <p>
+            <strong>Ids are not contiguous.</strong> If device 2 leaves, the remaining ids stay
+            <code>1</code> and <code>3</code> — they do not shuffle down. Key everything by device
+            id, never by position in an array. This is the single most common source of bugs, and
+            it is why player colours are derived from the id.
+          </p>
+        </div>
+
+        <pre><code set:html={codeDevices}></code></pre>
+
+        <p>
+          The <strong>master controller</strong> is simply the lowest-numbered connected
+          controller, recomputed on every call. When they leave, the next one already <em>is</em>
+          the master — there is no handover to coordinate. Use it when exactly one phone should
+          make a decision, like choosing the next level.
+        </p>
+
+        <h2 id="colors">Player colours</h2>
+
+        <p>
+          The platform assigns every device a colour, and uses it in the room bar and the join
+          screen. Read it from the SDK so your game matches — do not invent your own palette, or a
+          player will be teal on their phone and pink in your game.
+        </p>
+
+        <pre><code set:html={codeColorsRef}></code></pre>
+
+        <p>Typical use on each side:</p>
+
+        <pre><code set:html={codeColorsUse}></code></pre>
+
+        <div class="note warn">
+          <p>
+            <strong>Pass the device id, not a loop index.</strong>
+            <code>getPlayerColor(ids[i])</code> is right; <code>getPlayerColor(i)</code> is wrong.
+            They agree until someone disconnects, and then every colour after the gap shifts — the
+            exact bug this API exists to prevent.
+          </p>
+        </div>
+
+        <p>
+          The palette has 8 colours and wraps, so device 9 shares device 1's colour. Colours are
+          tied to the device slot, so a player keeps theirs for as long as they stay in the room.
+        </p>
+
+        <h2 id="messaging">Messaging</h2>
+
+        <div class="scroller"><table>
+          <tr><th>Call</th><th>Does</th></tr>
+          <tr>
+            <td><code>message(device_id, data)</code></td>
+            <td><p>Sends <code>data</code> to one device. Pass <code>FreeConsole.SCREEN</code> to reach the screen.</p></td>
+          </tr>
+          <tr>
+            <td><code>broadcast(data)</code></td>
+            <td><p>Sends <code>data</code> to every device in the room.</p></td>
+          </tr>
+          <tr>
+            <td><code>onMessage(device_id, data)</code></td>
+            <td><p>Called on arrival. <code>device_id</code> is the sender.</p></td>
+          </tr>
+        </table></div>
+
+        <p>
+          <code>data</code> is any JSON-serialisable value. Keep it small and send it no more often
+          than you need — a held button should send once on press and once on release, not every
+          frame.
+        </p>
+
+        <pre><code set:html={codeMessaging}></code></pre>
+
+        <h2 id="state">Device state</h2>
+
+        <p>
+          Custom device state is a small object each device publishes about itself. Unlike a
+          message, it <strong>persists</strong>: a device joining later can read what everyone
+          already set. Use it for things that are true continuously — a chosen character, a
+          ready flag, a score — rather than for events.
+        </p>
+
+        <pre><code set:html={codeState}></code></pre>
+
+        <div class="note">
+          <p>
+            <strong>Rule of thumb:</strong> if a device joining halfway through would need to know
+            it, it belongs in device state. If it only matters at the moment it happens, send a
+            message.
+          </p>
+        </div>
+
+        <h2 id="time">Timing</h2>
+
+        <p>
+          Device clocks disagree. A phone can be seconds away from the screen, so two devices can
+          never compare their own timestamps — doing that silently broke input handling early in
+          this platform's life, because messages looked older than the subscription that received
+          them and were dropped.
+        </p>
+
+        <pre><code set:html={codeTime}></code></pre>
+
+        <div class="note warn">
+          <p>
+            <strong>Any time you send to another device, use <code>getServerTime()</code>, never
+            <code>Date.now()</code>.</strong> The platform measures each device's offset from a
+            shared clock and applies it, so these values are comparable across devices.
+          </p>
+        </div>
+
+        <p>
+          Knowing the offset also lets a screen compensate for a slow controller: if a phone's
+          input is 80ms old on arrival, the screen can apply it as of when it was actually pressed
+          rather than when it landed.
+        </p>
+
+        <h2 id="players">Active players</h2>
+
+        <p>
+          Player numbers are a stable, zero-based ordering over the controllers, separate from
+          device ids. Only the <strong>screen</strong> may assign them, normally at the start of a
+          round.
+        </p>
+
+        <pre><code set:html={codeActive}></code></pre>
+
+        <p>
+          Freezing the roster at the start of a round means a phone that drops mid-game keeps its
+          slot, and a phone that joins mid-game waits for the next one.
+        </p>
+
+        <h2 id="nav">Navigation</h2>
+
+        <pre><code set:html={codeNav}></code></pre>
+
+        <p>
+          Navigation moves every device in the room together. Controllers automatically load the
+          matching controller page — you do not navigate them separately.
+        </p>
+
+        <h2 id="callbacks">Callbacks</h2>
+
+        <p>
+          Assign these; all default to no-ops, so you only implement what you need.
+        </p>
+
+        <div class="scroller"><table>
+          <tr><th>Callback</th><th>When</th></tr>
+          <tr><td><code>onReady(code)</code></td><td><p>Connected. <code>code</code> is the room's join code.</p></td></tr>
+          <tr><td><code>onConnect(device_id)</code></td><td><p>A device joined this game.</p></td></tr>
+          <tr><td><code>onDisconnect(device_id)</code></td><td><p>A device left. Clean up its state here.</p></td></tr>
+          <tr><td><code>onMessage(device_id, data)</code></td><td><p>A message arrived.</p></td></tr>
+          <tr><td><code>onDeviceStateChange(device_id, data)</code></td><td><p>Any device's state changed.</p></td></tr>
+          <tr><td><code>onCustomDeviceStateChange(device_id, custom)</code></td><td><p>A device published new custom state.</p></td></tr>
+          <tr><td><code>onActivePlayersChange(player_number)</code></td><td><p>This device's player number changed.</p></td></tr>
+        </table></div>
+
+        <h2 id="reference">Full reference</h2>
+
+        <div class="scroller"><table>
+          <tr><th>Member</th><th>Where</th><th>Returns</th></tr>
+          <tr><td><code>FreeConsole.SCREEN</code></td><td>both</td><td><p><code>0</code> — the screen's device id.</p></td></tr>
+          <tr><td><code>new FreeConsole(opts)</code></td><td>both</td><td><p><code>opts.orientation</code> is optional.</p></td></tr>
+          <tr><td><code>getDeviceId()</code></td><td>both</td><td><p>number</p></td></tr>
+          <tr><td><code>getControllerDeviceIds()</code></td><td>both</td><td><p>number[]</p></td></tr>
+          <tr><td><code>getMasterControllerDeviceId()</code></td><td>both</td><td><p>number | undefined</p></td></tr>
+          <tr><td><code>getNickname(id?)</code></td><td>both</td><td><p>string</p></td></tr>
+          <tr><td><code>getServerTime()</code></td><td>both</td><td><p>number (ms) — room-wide clock</p></td></tr>
+          <tr><td><code>getClockOffset()</code></td><td>both</td><td><p>number (ms) — this device's error</p></td></tr>
+          <tr><td><code>getPlayerColor(id?)</code></td><td>both</td><td><p>string, e.g. <code>"#35f0e0"</code></p></td></tr>
+          <tr><td><code>getPlayerColorHex(id?)</code></td><td>both</td><td><p>number, e.g. <code>0x35f0e0</code></p></td></tr>
+          <tr><td><code>FreeConsole.PLAYER_COLORS</code></td><td>both</td><td><p>string[] — the 8-colour palette</p></td></tr>
+          <tr><td><code>message(id, data)</code></td><td>both</td><td><p>—</p></td></tr>
+          <tr><td><code>broadcast(data)</code></td><td>both</td><td><p>—</p></td></tr>
+          <tr><td><code>getCustomDeviceState(id?)</code></td><td>both</td><td><p>object | undefined</p></td></tr>
+          <tr><td><code>setCustomDeviceState(data)</code></td><td>both</td><td><p>—</p></td></tr>
+          <tr><td><code>setCustomDeviceStateProperty(k, v)</code></td><td>both</td><td><p>—</p></td></tr>
+          <tr><td><code>setActivePlayers(max?)</code></td><td><strong>screen</strong></td><td><p>throws elsewhere</p></td></tr>
+          <tr><td><code>getActivePlayerDeviceIds()</code></td><td>both</td><td><p>number[]</p></td></tr>
+          <tr><td><code>convertPlayerNumberToDeviceId(n)</code></td><td>both</td><td><p>number | undefined</p></td></tr>
+          <tr><td><code>convertDeviceIdToPlayerNumber(id)</code></td><td>both</td><td><p>number | undefined</p></td></tr>
+          <tr><td><code>navigateTo(url)</code></td><td>both</td><td><p>—</p></td></tr>
+          <tr><td><code>navigateHome()</code></td><td>both</td><td><p>—</p></td></tr>
+          <tr><td><code>setOrientation(o)</code></td><td>both</td><td><p><code>"portrait"</code> / <code>"landscape"</code></p></td></tr>
+          <tr><td><code>vibrate(ms)</code></td><td>controller</td><td><p>where supported</p></td></tr>
+        </table></div>
+
+        <h2 id="publish">Publishing your game</h2>
+
+        <ol class="steps">
+          <li>
+            <h3>Host two pages</h3>
+            <p>
+              Anywhere reachable over <code>https://</code>, or under <code>/games/yourgame/</code>
+              on this host. Static files only.
+            </p>
+          </li>
+          <li>
+            <h3>Load the SDK</h3>
+            <p>
+              Add <code>&lt;script src="/sdk.js"&gt;&lt;/script&gt;</code> to both pages. Use the
+              hosted copy rather than vendoring it, so your game keeps working as the platform
+              updates.
+            </p>
+          </li>
+          <li>
+            <h3>Add it to the catalog</h3>
+            <p>An admin creates the entry with these fields:</p>
+            <div class="scroller"><table>
+              <tr><th>Field</th><th>Notes</th></tr>
+              <tr><td><code>name</code></td><td><p>Required, ≤ 60 characters.</p></td></tr>
+              <tr><td><code>description</code></td><td><p>Optional, ≤ 300 characters.</p></td></tr>
+              <tr><td><code>minPlayers</code></td><td><p>Integer ≥ 1.</p></td></tr>
+              <tr><td><code>maxPlayers</code></td><td><p>Integer ≥ <code>minPlayers</code>.</p></td></tr>
+              <tr><td><code>screenUrl</code></td><td><p>A <code>/path</code> or an <code>https://</code> URL.</p></td></tr>
+              <tr><td><code>controllerUrl</code></td><td><p>Same rules.</p></td></tr>
+              <tr><td><code>thumbnailUrl</code></td><td><p>Optional cover image.</p></td></tr>
+            </table></div>
+          </li>
+        </ol>
+
+        <h2 id="testing">Testing without phones</h2>
+
+        <p>
+          Open the screen page in one browser tab and the controller page in another, then join
+          with the room code. The controller works with a mouse.
+        </p>
+
+        <p>
+          For quicker iteration, give your screen page a keyboard-driven test mode that runs
+          standalone. Rope Raid uses <code>?test=1</code>: it creates one local player, drives it
+          from the keyboard, and skips the shell entirely, so you can reload on every edit without
+          re-joining a room.
+        </p>
+
+        <h2 id="gotchas">Gotchas</h2>
+
+        <div class="note warn">
+          <p><strong>Device ids have gaps.</strong> Never index an array by position to identify a
+          player. Key by device id.</p>
+        </div>
+
+        <div class="note warn">
+          <p><strong>Clocks differ between devices.</strong> Never compare a timestamp made on one
+          device with <code>Date.now()</code> on another — phones can be seconds out. Order
+          messages by arrival, not by an embedded time.</p>
+        </div>
+
+        <div class="note warn">
+          <p><strong>Only the screen may call <code>setActivePlayers()</code>.</strong> It throws
+          anywhere else.</p>
+        </div>
+
+        <div class="note warn">
+          <p><strong>Do not send per-frame messages.</strong> Send on state change — a button press,
+          a release — and let each side animate locally between them. A value that has not changed
+          costs latency for every message queued behind it; interpolating between sparse updates
+          looks smoother than streaming dense ones.</p>
+        </div>
+
+        <div class="note">
+          <p>
+            <strong>Look at a real game.</strong> Rope Raid ships with the platform:
+            <code>/games/roperaid/screen.html</code> and
+            <code>/games/roperaid/controller.html</code> are readable, commented, and use every
+            part of this API.
+          </p>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <script type="module">
+    import { mountChrome } from "/chrome.js";
+    mountChrome();
+  </script>
+</BaseLayout>

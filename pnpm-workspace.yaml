@@ -6,4 +6,5 @@ allowBuilds:
   # protobufjs' postinstall backs the gRPC transport firebase-admin uses; @firebase/util is
   # pulled in by the client SDK. Skipping these fails at runtime, not at install time.
   '@firebase/util': true
+  esbuild: true
   protobufjs: true

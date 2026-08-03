@@ -1,0 +1,689 @@
+---
+import BaseLayout from "../layouts/BaseLayout.astro";
+
+const title = "FreeConsole — party games on any screen";
+const description =
+  "The browser is the game screen, phones are the controllers. No installs, no accounts.";
+---
+
+<BaseLayout title={title} description={description}>
+  <Fragment slot="head">
+    <style is:global>{`
+      /* ---------------------------------------------------------------- hero */
+      .hero { padding: clamp(46px, 9vw, 96px) 0 clamp(34px, 6vw, 64px); }
+      .hero-grid {
+        display: grid;
+        grid-template-columns: 1.15fr 0.85fr;
+        gap: clamp(28px, 5vw, 60px);
+        align-items: center;
+      }
+      @media (max-width: 900px) { .hero-grid { grid-template-columns: 1fr; } }
+
+      .hero h1 {
+        font-size: clamp(40px, 8vw, 78px);
+        line-height: .94;
+        letter-spacing: -.035em;
+        margin: 14px 0 0;
+      }
+      .hero h1 em {
+        font-style: normal;
+        color: var(--glow);
+        text-shadow: 0 0 24px rgba(53,240,224,.5), 0 0 70px rgba(53,240,224,.2);
+      }
+      .hero h1 .hot {
+        color: var(--hot);
+        text-shadow: 0 0 24px rgba(255,46,136,.5), 0 0 70px rgba(255,46,136,.2);
+      }
+      .hero p.lede {
+        font-size: clamp(15.5px, 1.9vw, 19px);
+        color: var(--text-dim);
+        max-width: 46ch;
+        margin: 20px 0 30px;
+      }
+      .hero-actions { display: flex; gap: 13px; flex-wrap: wrap; }
+      .hero-steps { display: flex; gap: 22px; margin-top: 38px; flex-wrap: wrap; font-size: 13.5px; color: var(--text-faint); padding: 0; }
+      .hero-steps li { list-style: none; display: flex; align-items: center; gap: 9px; }
+      .hero-steps .n {
+        width: 23px; height: 23px;
+        border-radius: 50%;
+        border: 1px solid var(--line-bright);
+        color: var(--glow);
+        display: grid; place-items: center;
+        font-family: var(--font-mono); font-size: 11px;
+        flex-shrink: 0;
+      }
+
+      .mock { position: relative; perspective: 1100px; }
+      .tv {
+        aspect-ratio: 16/10;
+        border-radius: 16px;
+        background: linear-gradient(155deg, #131a30, #070912);
+        border: 1px solid var(--line);
+        box-shadow: 0 40px 90px rgba(0,0,0,.6), inset 0 0 90px rgba(53,240,224,.06);
+        padding: 20px;
+        display: flex; flex-direction: column; gap: 13px;
+        transform: rotateY(-9deg) rotateX(3deg);
+        overflow: hidden;
+      }
+      .tv::after {
+        content: ""; position: absolute; inset: 0;
+        background: repeating-linear-gradient(to bottom, rgba(255,255,255,.035) 0 1px, transparent 1px 3px);
+      }
+      .tv-code {
+        font-family: var(--font-mono);
+        font-size: clamp(26px, 4.4vw, 42px);
+        font-weight: 700; letter-spacing: .2em;
+        color: var(--glow); text-shadow: var(--bloom-glow);
+        text-align: center; padding-top: 6px;
+      }
+      .tv-label { text-align: center; font-family: var(--font-mono); font-size: 9.5px; letter-spacing: .22em; text-transform: uppercase; color: var(--text-faint); }
+      .tv-bars { display: flex; flex-direction: column; gap: 8px; margin-top: auto; }
+      .tv-bar { height: 11px; border-radius: 999px; background: rgba(255,255,255,.07); overflow: hidden; }
+      .tv-bar span {
+        display: block; height: 100%; border-radius: 999px;
+        background: linear-gradient(90deg, var(--glow), var(--hot));
+        animation: race 3.4s ease-in-out infinite alternate;
+      }
+      .tv-bar:nth-child(2) span { animation-delay: .5s; }
+      .tv-bar:nth-child(3) span { animation-delay: 1s; }
+      @keyframes race { from { width: 18%; } to { width: 88%; } }
+
+      .phone {
+        position: absolute; right: -6px; bottom: -34px;
+        width: 27%; min-width: 96px; aspect-ratio: 9/17;
+        border-radius: 18px;
+        background: linear-gradient(165deg, #1b2340, #090c16);
+        border: 1px solid var(--line);
+        box-shadow: 0 26px 54px rgba(0,0,0,.65);
+        padding: 13px 10px;
+        display: flex; flex-direction: column;
+        transform: rotate(6deg);
+      }
+      .phone-pad {
+        flex: 1; border-radius: 12px;
+        background: linear-gradient(135deg, var(--hot), #a81a58);
+        box-shadow: var(--bloom-hot);
+        display: grid; place-items: center;
+        font-weight: 700; font-size: 12px; color: #fff; letter-spacing: .08em;
+        animation: tap 1.7s ease-in-out infinite;
+      }
+      @keyframes tap { 0%,100% { transform: scale(1); } 50% { transform: scale(.94); } }
+
+      /* ---------------------------------------------------------------- session */
+      /* Once a room is open the page becomes the console: a thin code bar, and everything
+         else is the stage. In a game the stage is the entire viewport. */
+      #landing.hidden { display: none; }
+      #session { display: none; }
+      #session.active { display: flex; flex-direction: column; height: 100dvh; }
+
+      /* Two levels of hiding.
+         In a room (store or game): the site nav and footer go entirely — this is a console
+         now, not a web page. The code bar stays so people can join. */
+      body.in-room .nav,
+      body.in-room .footer { display: none; }
+
+      /* In a game: the code bar goes too. #stage is already flex:1 inside a 100dvh column,
+         so removing the bar leaves the game filling the entire viewport on its own. */
+      body.in-game .code-bar { display: none; }
+
+      .code-bar {
+        display: flex;
+        align-items: center;
+        gap: clamp(12px, 2vw, 26px);
+        padding: 1.2vh clamp(14px, 2.4vw, 30px);
+        border-bottom: 1px solid var(--line);
+        background: rgba(5,6,13,.9);
+        flex-shrink: 0;
+      }
+      .code-bar .code {
+        font-family: var(--font-mono);
+        font-size: clamp(20px, 2.6vw, 34px);
+        font-weight: 700; letter-spacing: .16em;
+        color: var(--glow); text-shadow: var(--bloom-glow);
+        line-height: 1;
+      }
+      .join-block { text-align: right; margin-left: auto; }
+      .join-label {
+        font-family: var(--font-mono);
+        font-size: clamp(8px, .68vw, 10px);
+        letter-spacing: .2em; text-transform: uppercase;
+        color: var(--text-faint);
+      }
+      .code-bar .join-at { font-size: clamp(10px, 1vw, 13px); color: var(--text-dim); }
+      #qr { background: #fff; padding: 5px; border-radius: 7px; line-height: 0; flex-shrink: 0; }
+
+      /* Players: a coloured disc per person, left to right in join order. Reads at a glance
+         from across a room, and the colours match the ones games use for each device. */
+      .roster { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+      .player-dot {
+        width: clamp(28px, 3.2vw, 44px);
+        height: clamp(28px, 3.2vw, 44px);
+        border-radius: 50%;
+        display: grid; place-items: center;
+        font-weight: 700;
+        font-size: clamp(13px, 1.5vw, 20px);
+        color: #05060d;
+        line-height: 1;
+        flex-shrink: 0;
+        position: relative;
+        transition: opacity .2s, transform .2s;
+      }
+      .player-dot.off { opacity: .28; }
+      .player-dot .crown {
+        position: absolute;
+        top: -7px; right: -3px;
+        font-size: clamp(9px, 1vw, 13px);
+        color: var(--amber);
+        text-shadow: 0 0 6px rgba(255,194,71,.7);
+      }
+      .roster-empty { color: var(--text-faint); font-size: clamp(10px, 1vw, 13px); }
+
+      #stage { flex: 1; position: relative; background: #000; overflow: hidden; }
+      #stage .game-frame { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+
+      /* Store, rendered by the screen itself rather than loaded in a frame. */
+      #store {
+        position: absolute; inset: 0;
+        display: none;
+        flex-direction: column;
+        padding: 2.4vw 2.8vw;
+        background: radial-gradient(70% 60% at 50% 30%, rgba(53,240,224,.08), transparent 70%), var(--ink-900);
+      }
+      #store.active { display: flex; }
+
+      .store-head { display: flex; align-items: flex-end; gap: 2vw; margin-bottom: 2vh; }
+      .store-title { font-size: clamp(18px, 2.4vw, 34px); line-height: 1.05; margin: 4px 0 0; }
+      .store-sub { color: var(--text-dim); font-size: clamp(11px, 1.1vw, 16px); margin: 3px 0 0; }
+
+      .store-grid {
+        flex: 1;
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(clamp(120px, 13vw, 210px), 1fr));
+        gap: 1.3vw;
+        align-content: start;
+        overflow: hidden;
+      }
+
+      .tile {
+        position: relative;
+        border-radius: 12px;
+        overflow: hidden;
+        aspect-ratio: 3/4;
+        background: linear-gradient(150deg, rgba(53,240,224,.28), rgba(255,46,136,.28));
+        transition: transform .22s cubic-bezier(.2,.8,.3,1.4), box-shadow .22s, outline-color .22s, opacity .22s;
+        outline: 2px solid transparent;
+        outline-offset: 3px;
+      }
+      .tile img { width: 100%; height: 100%; object-fit: cover; }
+      .tile .letter {
+        position: absolute; inset: 0;
+        display: grid; place-items: center;
+        font-family: var(--font-marquee);
+        font-size: clamp(28px, 3.8vw, 64px);
+        color: var(--glow); text-shadow: var(--bloom-glow);
+      }
+      .tile::after {
+        content: ""; position: absolute; inset: 0;
+        background: repeating-linear-gradient(to bottom, rgba(0,0,0,.2) 0 1px, transparent 1px 3px);
+      }
+      .tile.focused {
+        transform: scale(1.06);
+        outline-color: var(--glow);
+        box-shadow: 0 0 0 4px rgba(53,240,224,.18), 0 20px 50px rgba(0,0,0,.6), var(--bloom-glow);
+        z-index: 2;
+      }
+      .tile.dim { opacity: .48; }
+      .tile .plate {
+        position: absolute; left: 0; right: 0; bottom: 0; z-index: 1;
+        padding: 3.2vh .8vw .7vh;
+        background: linear-gradient(to top, rgba(5,6,13,.97) 32%, transparent);
+      }
+      .tile .t { font-weight: 700; font-size: clamp(11px, 1.1vw, 17px); line-height: 1.15; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .tile .d { font-family: var(--font-mono); font-size: clamp(8px, .7vw, 12px); letter-spacing: .06em; color: var(--text-faint); margin-top: 2px; }
+
+      .store-empty { flex: 1; display: grid; place-items: center; text-align: center; color: var(--text-dim); font-size: clamp(13px, 1.5vw, 19px); }
+
+      /* Landing catalog: same artwork treatment as the in-room store, so a game looks the
+         same wherever it appears. */
+      .games { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 17px; margin-top: 22px; }
+
+      .game-card {
+        background: linear-gradient(160deg, rgba(26,32,56,.7), rgba(10,12,24,.9));
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        overflow: hidden;
+        transition: transform .2s cubic-bezier(.2,.8,.3,1.2), border-color .2s, box-shadow .2s;
+      }
+      .game-card:hover {
+        transform: translateY(-4px);
+        border-color: var(--line-bright);
+        box-shadow: 0 18px 44px rgba(0,0,0,.5), 0 0 30px rgba(53,240,224,.12);
+      }
+
+      .game-art {
+        position: relative;
+        aspect-ratio: 16 / 9;
+        background: linear-gradient(135deg, rgba(53,240,224,.18), rgba(255,46,136,.18));
+        display: grid;
+        place-items: center;
+        overflow: hidden;
+      }
+      .game-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
+      .game-art::after {
+        content: ""; position: absolute; inset: 0;
+        background: repeating-linear-gradient(to bottom, rgba(0,0,0,.16) 0 1px, transparent 1px 3px);
+      }
+      .game-letter {
+        font-family: var(--font-marquee);
+        font-size: 42px;
+        color: var(--glow);
+        text-shadow: var(--bloom-glow);
+        line-height: 1;
+        padding-top: 8px;
+      }
+
+      .game-body { padding: 15px 17px 17px; }
+      .game-body h3 { font-size: 17px; margin: 0 0 5px; }
+      .game-body p {
+        color: var(--text-dim);
+        font-size: 13.5px;
+        margin: 0;
+        min-height: 2.9em;
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+      }
+      .game-meta {
+        font-family: var(--font-mono);
+        font-size: 11px;
+        letter-spacing: .08em;
+        text-transform: uppercase;
+        color: var(--text-faint);
+        margin-top: 11px;
+      }
+      .skeleton {
+        height: 232px; border-radius: var(--radius);
+        background: linear-gradient(100deg, rgba(26,32,56,.5) 30%, rgba(53,240,224,.07) 50%, rgba(26,32,56,.5) 70%);
+        background-size: 220% 100%;
+        animation: shimmer 1.5s infinite;
+      }
+      @keyframes shimmer { to { background-position: -120% 0; } }
+    `}</style>
+  </Fragment>
+
+  <main id="main" class="shell">
+    <div id="error" class="msg msg-error wrap" style="margin-top:18px"></div>
+
+    <!-- ------------------------------------------------------------ landing -->
+    <div id="landing">
+      <section class="hero wrap">
+        <div class="hero-grid">
+          <div>
+            <div class="eyebrow reveal" style="--i:0">No app · No login · Just play</div>
+            <h1 class="reveal" style="--i:1">
+              Your screen is the <em>console</em>.<br />
+              Their phones are the <span class="hot">controllers</span>.
+            </h1>
+            <p class="lede reveal" style="--i:2">
+              Open a room on the TV, everyone scans the code, and the first player in picks
+              the game. Nothing to install on any device.
+            </p>
+            <div class="hero-actions reveal" style="--i:3">
+              <button class="btn btn-primary btn-lg" id="startRoom">Start a room</button>
+              <a class="btn btn-ghost btn-lg" href="/play.html">I have a code</a>
+            </div>
+            <ul class="hero-steps reveal" style="--i:4">
+              <li><span class="n">1</span> Open a room</li>
+              <li><span class="n">2</span> Players scan the code</li>
+              <li><span class="n">3</span> First player picks a game</li>
+            </ul>
+          </div>
+
+          <div class="mock reveal" style="--i:3" aria-hidden="true">
+            <div class="tv">
+              <div class="tv-label">Room code</div>
+              <div class="tv-code">K7QP</div>
+              <div class="tv-bars">
+                <div class="tv-bar"><span></span></div>
+                <div class="tv-bar"><span></span></div>
+                <div class="tv-bar"><span></span></div>
+              </div>
+            </div>
+            <div class="phone"><div class="phone-pad">TAP</div></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="wrap" style="padding-bottom:40px">
+        <h2 class="section-title reveal" style="--i:5">Games</h2>
+        <div class="games" id="games">
+          <div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>
+        </div>
+      </section>
+    </div>
+
+    <!-- ------------------------------------------------------------ session -->
+    <section id="session">
+      <!-- Players on the left, join code on the right. Stays visible during a game so
+           latecomers can always see how to join. -->
+      <div class="code-bar">
+        <div class="roster" id="roster"></div>
+        <div class="join-block">
+          <div class="join-label">Join at</div>
+          <div class="join-at" id="joinUrl"></div>
+        </div>
+        <div class="code" id="roomCode">----</div>
+        <div id="qr"></div>
+      </div>
+
+      <div id="stage">
+        <div id="store">
+          <div class="store-head">
+            <div>
+              <div class="eyebrow" id="storeEyebrow">Store</div>
+              <h2 class="store-title" id="storeTitle">Waiting for players</h2>
+              <p class="store-sub" id="storeSub">Scan the code to join.</p>
+            </div>
+          </div>
+          <div class="store-grid" id="storeGrid"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script type="module">
+    import { collection, getDocs, getFirestore } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-firestore.js";
+    import { getFunctions, httpsCallable } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-functions.js";
+    import { app, ensureAuth } from "/relay.js";
+    import { playerColor } from "/player-colors.js";
+    import { startSession, STORE_LOCATION, gameUrl } from "/session.js";
+    import { masterControllerId } from "/room.js";
+    import { renderQR } from "/qr.js";
+    import { mountChrome, toast } from "/chrome.js";
+
+    mountChrome({ app });
+
+    const firestore = getFirestore(app);
+    const functions = getFunctions(app);
+    const $ = (id) => document.getElementById(id);
+
+    const catalog = new Map();   // gameId -> catalog entry
+    let session = null;
+    let roomCode = null;
+
+    function showError(message) {
+      const box = $("error");
+      box.textContent = message;
+      box.classList.add("show");
+    }
+
+    /* ---------------------------------------------------------------- catalog */
+
+    async function loadCatalog() {
+      let snap;
+      try {
+        snap = await getDocs(collection(firestore, "games"));
+      } catch (err) {
+        $("games").innerHTML = "";
+        showError("Could not load the game catalog: " + err.message);
+        return;
+      }
+
+      catalog.clear();
+      snap.forEach((doc) => catalog.set(doc.id, doc.data()));
+      renderLandingGames();
+    }
+
+    function renderLandingGames() {
+      const host = $("games");
+      host.innerHTML = "";
+
+      if (catalog.size === 0) {
+        const empty = document.createElement("div");
+        empty.className = "panel";
+        empty.style.cssText = "grid-column:1/-1;text-align:center;padding:44px 20px";
+        empty.innerHTML = `
+          <h3>No games yet</h3>
+          <p class="muted" style="margin:8px 0 18px">Add one from the admin page to get started.</p>
+          <a class="btn btn-ghost" href="/signup.html">Open admin</a>`;
+        host.appendChild(empty);
+        return;
+      }
+
+      let i = 6;
+      for (const [id, game] of catalog) {
+        const card = document.createElement("article");
+        card.className = "game-card reveal";
+        card.style.setProperty("--i", String(i++));
+
+        const art = document.createElement("div");
+        art.className = "game-art";
+        const letter = () => {
+          const span = document.createElement("span");
+          span.className = "game-letter";
+          span.textContent = (game.name || id).charAt(0).toUpperCase();
+          return span;
+        };
+        if (game.thumbnailUrl) {
+          const img = document.createElement("img");
+          img.src = game.thumbnailUrl;
+          img.alt = "";
+          img.loading = "lazy";
+          // A dead thumbnail URL shouldn't leave an empty frame.
+          img.addEventListener("error", () => { img.remove(); art.appendChild(letter()); });
+          art.appendChild(img);
+        } else {
+          art.appendChild(letter());
+        }
+
+        const body = document.createElement("div");
+        body.className = "game-body";
+        const h3 = document.createElement("h3");
+        h3.textContent = game.name || id;
+        const p = document.createElement("p");
+        p.textContent = game.description || "";
+        const meta = document.createElement("div");
+        meta.className = "game-meta";
+        meta.textContent = `${game.minPlayers ?? 1}–${game.maxPlayers ?? 8} players`;
+        body.append(h3, p, meta);
+
+        card.append(art, body);
+        host.appendChild(card);
+      }
+    }
+
+    /* ---------------------------------------------------------------- session */
+
+    /**
+     * Opens a room. The screen takes slot 0 and then follows the room's `home` URL — it never
+     * decides what to play. The master controller does that from their phone.
+     */
+    async function startRoom() {
+      $("startRoom").disabled = true;
+      $("startRoom").classList.add("loading");
+      $("error").classList.remove("show");
+
+      try {
+        const user = await ensureAuth();
+        const { data } = await httpsCallable(functions, "createRoom")({});
+        roomCode = data.roomCode;
+
+        $("landing").classList.add("hidden");
+        $("session").classList.add("active");
+        // From here the page is a console, not a website: no nav, no footer, for the rest of
+        // the session.
+        document.body.classList.add("in-room");
+        $("roomCode").textContent = roomCode;
+
+        const joinUrl = `${location.origin}/play.html?room=${roomCode}`;
+        $("joinUrl").textContent = joinUrl.replace(/^https?:\/\//, "");
+        $("qr").innerHTML = "";
+        $("qr").appendChild(renderQR(joinUrl, 84));
+
+        session = await startSession({
+          roomCode,
+          uid: user.uid,
+          isScreen: true,
+          stage: $("stage"),
+          // The store is rendered by this page; anything else is a game loaded in the frame.
+          resolveUrl: (home) => (gameUrl(home) === STORE_LOCATION ? null : screenUrlFor(home)),
+          onState: renderState,
+        });
+      } catch (err) {
+        console.error(err);
+        showError(err.message || "Could not open the room.");
+        toast("Could not open the room", { kind: "error", note: err.message });
+        $("startRoom").disabled = false;
+        $("startRoom").classList.remove("loading");
+      }
+    }
+
+    /** Maps a room `home` URL to the file this screen should load. */
+    function screenUrlFor(home) {
+      const id = gameUrl(home).replace(/^\/games\//, "").replace(/\/$/, "");
+      const game = catalog.get(id);
+      if (game && game.screenUrl) return game.screenUrl;
+      return `/games/${id}/screen.html`;
+    }
+
+    function renderState(state) {
+      const atStore = gameUrl(state.home) === STORE_LOCATION;
+
+      // #store lives inside #stage and is owned by this page, so guard against it being
+      // absent rather than assuming - a null here used to take the whole render down.
+      const store = $("store");
+      if (store) store.classList.toggle("active", atStore);
+
+      // In a game nothing of ours should be on screen - the code bar goes too, and the game
+      // gets the whole viewport. (`in-room` is set once when the room opens and stays.)
+      document.body.classList.toggle("in-game", !atStore);
+
+      renderRoster(state);
+      if (atStore) renderStore(state);
+    }
+
+
+    function renderRoster(state) {
+      const roster = $("roster");
+      roster.innerHTML = "";
+
+      const master = masterControllerId(state.devices, state.home);
+      let any = false;
+
+      for (let slot = 1; slot < state.devices.length; slot++) {
+        const device = state.devices[slot];
+        if (!device) continue;
+        any = true;
+
+        const name = device.nickname || `Player ${slot}`;
+        const dot = document.createElement("div");
+        dot.className = "player-dot" + (device.connected ? "" : " off");
+        dot.style.background = playerColor(slot);
+        dot.title = name + (slot === master ? " (master controller)" : "");
+        dot.textContent = name.trim().charAt(0).toUpperCase() || "?";
+
+        if (slot === master) {
+          const crown = document.createElement("span");
+          crown.className = "crown";
+          crown.textContent = "♛";
+          dot.appendChild(crown);
+        }
+        roster.appendChild(dot);
+      }
+
+      if (!any) {
+        const waiting = document.createElement("span");
+        waiting.className = "roster-empty";
+        waiting.textContent = "waiting for players…";
+        roster.appendChild(waiting);
+      }
+    }
+
+    /* ---------------------------------------------------------------- store */
+
+    let storeKey = null;
+
+    function renderStore(state) {
+      const master = masterControllerId(state.devices, state.home);
+      const masterDevice = master !== undefined ? state.devices[master] : null;
+
+      if (master === undefined) {
+        $("storeEyebrow").textContent = "Store";
+        $("storeTitle").textContent = "Waiting for players";
+        $("storeSub").textContent = `Scan the code, or enter it at ${location.host}/play.html`;
+      } else {
+        $("storeEyebrow").textContent = "Choosing a game";
+        $("storeTitle").textContent = `${masterDevice?.nickname || `Player ${master}`} is picking`;
+        $("storeSub").textContent = "They're browsing on their phone.";
+      }
+
+      const grid = $("storeGrid");
+      const key = [...catalog.keys()].join(",");
+
+      if (key !== storeKey) {
+        storeKey = key;
+        grid.innerHTML = "";
+
+        if (catalog.size === 0) {
+          const empty = document.createElement("div");
+          empty.className = "store-empty";
+          empty.textContent = "No games in the catalog yet.";
+          grid.appendChild(empty);
+          return;
+        }
+
+        for (const [id, game] of catalog) {
+          const tile = document.createElement("div");
+          tile.className = "tile";
+          tile.dataset.gameId = id;
+
+          const letter = () => {
+            const span = document.createElement("span");
+            span.className = "letter";
+            span.textContent = (game.name || id).charAt(0).toUpperCase();
+            return span;
+          };
+
+          if (game.thumbnailUrl) {
+            const img = document.createElement("img");
+            img.src = game.thumbnailUrl;
+            img.alt = "";
+            img.addEventListener("error", () => { img.remove(); tile.prepend(letter()); });
+            tile.appendChild(img);
+          } else {
+            tile.appendChild(letter());
+          }
+
+          const plate = document.createElement("div");
+          plate.className = "plate";
+          const t = document.createElement("div");
+          t.className = "t";
+          t.textContent = game.name || id;
+          const d = document.createElement("div");
+          d.className = "d";
+          d.textContent = `${game.minPlayers ?? 1}–${game.maxPlayers ?? 8} players`;
+          plate.append(t, d);
+          tile.appendChild(plate);
+
+          grid.appendChild(tile);
+        }
+      }
+
+      // The master's highlight travels in their custom device state, so the store needs no
+      // room-level field of its own.
+      const browsing = masterDevice?.custom?.browsing || null;
+      const focusId = browsing || [...catalog.keys()][0] || null;
+      const showFocus = master !== undefined && !!focusId;
+
+      for (const tile of grid.querySelectorAll(".tile")) {
+        const isFocus = showFocus && tile.dataset.gameId === focusId;
+        tile.classList.toggle("focused", isFocus);
+        tile.classList.toggle("dim", showFocus && !isFocus);
+      }
+    }
+
+    $("startRoom").addEventListener("click", startRoom);
+    loadCatalog();
+  </script>
+</BaseLayout>

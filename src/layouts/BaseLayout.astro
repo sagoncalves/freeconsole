@@ -1,0 +1,67 @@
+---
+/**
+ * BaseLayout — every page on the platform shares this shell.
+ *
+ * Each original HTML file had its own <head> and called mountChrome() from chrome.js
+ * (inline) to inject the nav, footer, and CRT atmosphere in JS. That is preserved here:
+ * chrome.js still owns the chrome because it reflects Firebase auth state at runtime.
+ *
+ * This layout only standardises what every page always agreed on — charset, viewport,
+ * theme-colour, console.css, the <html>/<body> scaffolding — and exposes slots for the
+ * per-page <title>, description, inline <style>, and main body. Each page still calls
+ * mountChrome() itself from its inline <script type="module">, with the options it wants
+ * (e.g. signup passes { app, footer: false }).
+ */
+interface Props {
+  title: string;
+  description?: string;
+  /** theme-color meta value, defaults to the cabinet near-black. */
+  themeColor?: string;
+  /** viewport meta; the play page needs a mobile-shaped one. */
+  viewport?: string;
+  /** mobile-web-app-capable / apple-mobile-web-app-capable meta, on for the join page. */
+  appCapable?: boolean;
+  /** Extra class on <body> applied at first paint, e.g. bodyClass="in-room" to hide nav. */
+  bodyClass?: string;
+}
+
+const {
+  title,
+  description,
+  themeColor = "#05060d",
+  viewport = "width=device-width, initial-scale=1",
+  appCapable = false,
+  bodyClass,
+} = Astro.props;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content={viewport} />
+    <meta name="theme-color" content={themeColor} />
+    {appCapable && (
+      <Fragment>
+        <meta name="mobile-web-app-capable" content="yes" />
+        <meta name="apple-mobile-web-app-capable" content="yes" />
+      </Fragment>
+    )}
+    <title>{title}</title>
+    {description && <meta name="description" content={description} />}
+    {/*
+      console.css is the platform's design system. Loaded from public/ as an absolute
+      URL — same as the original HTML files — so the served stylesheet lives at one path
+      for every page, every game iframe's <link>, and (importantly) for chrome.js' own
+      consumer styles. Kept out of Astro's import graph on purpose: Vite would otherwise
+      hash and bundle it, breaking any external reference to /console.css.
+    */}
+    <link rel="stylesheet" href="/console.css" />
+    {/* Per-page inline styles: Astro scopes <style> by default but we want the original
+        global rules verbatim, so pages opt into is:global inside their own <style> block. */}
+    <slot name="head" />
+  </head>
+  <body class={bodyClass}>
+    <slot />
+  </body>
+</html>
