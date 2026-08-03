@@ -6,9 +6,9 @@ const title = "Build a game — FreeConsole SDK";
 // Each docs code block contains literal {, }, < and > characters, which Astro's JSX-like
 // parser tries to evaluate. Holding them here as plain template strings and injecting via
 // set:html keeps them as inert text exactly as the original docs.html served them.
-const codeScreen = `<span class="cm"><!-- Loaded on the TV. There is exactly one screen per room. --></span>
-<script src=<span class="st">"/sdk.js"</span>></script>
-<script>
+const codeScreen = `<span class="cm">&lt;!-- Loaded on the TV. There is exactly one screen per room. --&gt;</span>
+&lt;script src=<span class="st">"/sdk.js"</span>&gt;&lt;/script&gt;
+&lt;script&gt;
   <span class="kw">const</span> freeconsole = <span class="kw">new</span> <span class="fn">FreeConsole</span>();
   <span class="kw">const</span> scores = {};
 
@@ -26,22 +26,22 @@ const codeScreen = `<span class="cm"><!-- Loaded on the TV. There is exactly one
 
   <span class="kw">function</span> <span class="fn">render</span>() {
     document.body.innerHTML = freeconsole.<span class="fn">getControllerDeviceIds</span>()
-      .<span class="fn">map</span>((id) => freeconsole.<span class="fn">getNickname</span>(id) + <span class="st">": "</span> + (scores[id] || 0))
-      .<span class="fn">join</span>(<span class="st">"<br>"</span>);
+      .<span class="fn">map</span>((id) =&gt; freeconsole.<span class="fn">getNickname</span>(id) + <span class="st">": "</span> + (scores[id] || 0))
+      .<span class="fn">join</span>(<span class="st">"&lt;br&gt;"</span>);
   }
-</script>`;
+&lt;/script&gt;`;
 
-const codeController = `<span class="cm"><!-- Loaded on every phone that joins. --></span>
-<script src=<span class="st">"/sdk.js"</span>></script>
-<button id=<span class="st">"tap"</span>>TAP</button>
-<script>
+const codeController = `<span class="cm">&lt;!-- Loaded on every phone that joins. --&gt;</span>
+&lt;script src=<span class="st">"/sdk.js"</span>&gt;&lt;/script&gt;
+&lt;button id=<span class="st">"tap"</span>&gt;TAP&lt;/button&gt;
+&lt;script&gt;
   <span class="kw">const</span> freeconsole = <span class="kw">new</span> <span class="fn">FreeConsole</span>();
 
-  document.<span class="fn">getElementById</span>(<span class="st">"tap"</span>).<span class="fn">addEventListener</span>(<span class="st">"pointerdown"</span>, () => {
+  document.<span class="fn">getElementById</span>(<span class="st">"tap"</span>).<span class="fn">addEventListener</span>(<span class="st">"pointerdown"</span>, () =&gt; {
     <span class="cm">// FreeConsole.SCREEN is 0 — always the screen.</span>
     freeconsole.<span class="fn">message</span>(FreeConsole.SCREEN, { action: <span class="st">"tap"</span> });
   });
-</script>`;
+&lt;/script&gt;`;
 
 const codeDiagram = `  phone                    shell                    TV
    ┌──────────────┐         ┌──────────┐         ┌──────────────┐

@@ -184,23 +184,41 @@ export function buildSolids() {
  * apart that a respawn is never in the attacker's lap.
  */
 export function buildSpawnPoints() {
+  const solids = buildSolids();
+
+  /** Room for a standing body here, with solid floor directly beneath? */
+  function usable(x) {
+    const bodyLeft = x - 13;
+    const bodyTop = GROUND_Y - 68;
+    for (const s of solids) {
+      if (s.y >= GROUND_Y) continue;   // ground itself is the floor, not an obstruction
+      if (bodyLeft < s.x + s.w && bodyLeft + 26 > s.x && bodyTop < s.y + s.h && bodyTop + 68 > s.y) {
+        return false;
+      }
+    }
+    // Must actually have floor under the feet - never spawn over a pit.
+    return solids.some((s) => s.y >= GROUND_Y && x >= s.x && x < s.x + s.w);
+  }
+
   const points = [];
   for (let i = MIN_SCREEN; i <= MAX_SCREEN; i++) {
     const left = screenLeft(i);
-    // Two per screen. The default is the quarter marks, but screens whose furniture covers
-    // those spots get their own pair - a spawn point has to have room for a standing body
-    // above it, or the player arrives wedged and cannot walk out.
-    if (i === 3 || i === -3) {
-      // Pit screens: stay on the solid lips either side of the gap.
-      points.push({ x: left + 60, y: GROUND_Y });
-      points.push({ x: left + SCREEN_W - 60, y: GROUND_Y });
-    } else if (i === 2 || i === -2) {
-      // Chokepoint screens: clear of the slab and its approach ledges (local x 120..840).
-      points.push({ x: left + 60, y: GROUND_Y });
-      points.push({ x: left + SCREEN_W - 60, y: GROUND_Y });
-    } else {
-      points.push({ x: left + SCREEN_W * 0.25, y: GROUND_Y });
-      points.push({ x: left + SCREEN_W * 0.75, y: GROUND_Y });
+
+    // Two spawns per screen, searched outward from the quarter marks rather than hardcoded.
+    //
+    // Fixed coordinates are what kept breaking here: every time a layout was retuned the
+    // ledges moved under the spawn points and players started arriving wedged inside them.
+    // Deriving the position from the geometry means a spawn cannot go stale when furniture
+    // moves - the worst case is that it slides a little along the floor.
+    for (const target of [SCREEN_W * 0.25, SCREEN_W * 0.75]) {
+      let chosen = null;
+      for (let offset = 0; offset <= SCREEN_W * 0.4 && chosen === null; offset += 10) {
+        for (const candidate of [target - offset, target + offset]) {
+          if (candidate < 40 || candidate > SCREEN_W - 40) continue;
+          if (usable(left + candidate)) { chosen = candidate; break; }
+        }
+      }
+      if (chosen !== null) points.push({ x: left + chosen, y: GROUND_Y });
     }
   }
   return points;
