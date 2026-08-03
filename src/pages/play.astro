@@ -12,7 +12,7 @@ const themeColor = "#05060d";
 
 <BaseLayout title={title} viewport={viewport} themeColor={themeColor} appCapable>
   <Fragment slot="head">
-    <style is:global>{`
+    <style is:global>
       html, body { height: 100%; }
       body { overscroll-behavior: none; touch-action: manipulation; }
       .nav { display: none; }
@@ -224,7 +224,7 @@ const themeColor = "#05060d";
         border: 2px solid rgba(53,240,224,.2); border-top-color: var(--glow);
         animation: spin .8s linear infinite; margin: 0 auto 16px;
       }
-    `}</style>
+    </style>
   </Fragment>
 
   <div class="shell join-wrap" id="joinView">

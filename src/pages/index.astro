@@ -8,7 +8,7 @@ const description =
 
 <BaseLayout title={title} description={description}>
   <Fragment slot="head">
-    <style is:global>{`
+    <style is:global>
       /* ---------------------------------------------------------------- hero */
       .hero { padding: clamp(46px, 9vw, 96px) 0 clamp(34px, 6vw, 64px); }
       .hero-grid {
@@ -309,7 +309,7 @@ const description =
         animation: shimmer 1.5s infinite;
       }
       @keyframes shimmer { to { background-position: -120% 0; } }
-    `}</style>
+    </style>
   </Fragment>
 
   <main id="main" class="shell">

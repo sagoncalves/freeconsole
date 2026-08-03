@@ -7,7 +7,7 @@ const themeColor = "#05060d";
 
 <BaseLayout title={title} themeColor={themeColor}>
   <Fragment slot="head">
-    <style is:global>{`
+    <style is:global>
       /* ---------------------------------------------------------------- auth */
       #authView { max-width: 440px; margin: clamp(30px, 8vh, 78px) auto; padding: 0 22px; }
       #authView.hidden, #adminView.hidden { display: none; }
@@ -285,7 +285,7 @@ const themeColor = "#05060d";
         color: var(--text-faint);
         background: rgba(5,6,13,.6);
       }
-    `}</style>
+    </style>
   </Fragment>
 
   <main id="main" class="shell">

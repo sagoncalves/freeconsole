@@ -6,11 +6,11 @@ const title = "FreeConsole — diagnostics";
 
 <BaseLayout title={title} themeColor="#05060d">
   <Fragment slot="head">
-    <style is:global>{`
+    <style is:global>
       /* diag is a stripped-down dark page of its own — none of the cabinet styling.
          Override every relevant rule that console.css sets on body so the diagnostics UI
          has its own typography and layout. */
-      body { background: #05060d; color: #eaf2ff; font: 14px/1.6 ui-monospace, monospace; }
+      body { margin: 0; padding: 24px; background: #05060d; color: #eaf2ff; font: 14px/1.6 ui-monospace, monospace; }
       h1 { font-size: 17px; margin: 0 0 4px; font-family: ui-monospace, monospace; font-weight: 700; }
       .sub { color: #8492b8; margin-bottom: 18px; font-size: 13px; }
       .row { padding: 8px 0; border-bottom: 1px solid rgba(120,160,220,.14); }
@@ -18,7 +18,7 @@ const title = "FreeConsole — diagnostics";
       button { background: #35f0e0; color: #05060d; border: 0; border-radius: 8px;
                padding: 11px 18px; font: 700 14px ui-monospace,monospace; cursor: pointer; margin-top: 16px; }
       pre { white-space: pre-wrap; word-break: break-all; color: #8492b8; font-size: 12px; margin: 4px 0 0; }
-    `}</style>
+    </style>
   </Fragment>
 
   <h1>FreeConsole diagnostics</h1>
