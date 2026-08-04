@@ -187,6 +187,11 @@ machine.
   `./scripts/allow-public-invoke.sh`, which `pnpm deploy:functions` now runs automatically.
   It only lets requests *reach* the functions; each one still checks `request.auth` or the
   `admin` claim itself. Re-run it after adding a new callable.
+- `vercel.json` pins `Content-Type: application/manifest+json` on `/manifest.webmanifest`.
+  Some CDNs serve `.webmanifest` as `octet-stream`, which makes the browser ignore the
+  manifest and silently refuse to install the PWA. It stays revalidating so an icon or name
+  change ships without waiting out a cache. Note that `vercel.json` is schema-validated and
+  rejects unknown keys, so this can't be explained in a `"//"` comment beside the rule.
 - `functions/package.json` carries two dependencies nothing imports. Don't prune either:
   - `@firebase/app` — `firebase-admin`'s RTDB path pulls in `@firebase/database-compat`,
     which declares it as a *peer* dependency. npm auto-installs peers, pnpm doesn't, and
