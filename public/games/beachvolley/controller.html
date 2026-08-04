@@ -118,6 +118,38 @@
   .cta:active { transform: scale(.97); }
   .cta.ghost { background: rgba(255,255,255,.08); color: var(--text); box-shadow: none; }
 
+  /* Graphics settings. Only the master controller gets the gear, because the setting
+     belongs to the shared screen rather than to a player. Built on the same .sheet as the
+     character picker so it inherits the landscape rotation the stage applies. */
+  #gear {
+    width: 26px; height: 26px; flex-shrink: 0; margin-left: 8px;
+    border-radius: 8px; border: 1px solid var(--line);
+    background: rgba(255,255,255,.06); color: var(--text-dim);
+    font-size: 13px; line-height: 1; padding: 0;
+    display: none; place-items: center;
+  }
+  #gear.show { display: grid; }
+  #gear:active { background: rgba(255,255,255,.14); transform: scale(.93); }
+
+  /* The list is horizontal here, unlike the other games: this controller is landscape, so
+     stacked rows would run off the bottom on a short phone. */
+  .set-list { display: flex; gap: 8px; width: 100%; max-width: 560px; }
+  .set-opt {
+    flex: 1; border: 1px solid var(--line); border-radius: 14px;
+    background: rgba(255,255,255,.05); color: var(--text);
+    padding: 10px 8px; text-align: center;
+    display: flex; flex-direction: column; align-items: center; gap: 3px;
+    transition: border-color .15s, background .15s, transform .1s;
+  }
+  .set-opt.on {
+    border-color: var(--line-bright); background: rgba(53,240,224,.14);
+    transform: translateY(-2px);
+  }
+  .set-opt:active { transform: scale(.96); }
+  .set-name { font-size: 13px; font-weight: 700; }
+  .set-note { font-size: 10px; color: var(--text-dim); line-height: 1.25; }
+  #setResolved { margin: 0; font-size: 11px; color: var(--text-faint); }
+
   /* The stage is always laid out landscape. Held upright, it is rotated a quarter turn
      rather than reflowed, so the controls sit in the same place relative to the player's
      hands in both orientations - and nobody is told to turn their phone.
@@ -155,6 +187,7 @@
     <div class="dot" id="dot"></div>
     <div class="name" id="myName">…</div>
     <div class="score" id="score"><b>0</b> – <b>0</b></div>
+    <button id="gear" aria-label="Graphics settings">⚙</button>
   </div>
 
   <div id="pad">
@@ -169,6 +202,16 @@
     <p class="sub" id="sheetSub">Everyone plays the same — this is just you.</p>
     <div class="skins" id="skins"></div>
     <button class="cta" id="sheetGo">I'm ready</button>
+  </div>
+
+  <!-- Graphics settings, rendered from the tier list the screen sends so the phone never
+       holds its own copy of what the tiers are. -->
+  <div class="sheet" id="settings">
+    <h2>Graphics</h2>
+    <p class="sub">Lower this if the TV looks choppy.</p>
+    <div class="set-list" id="setList"></div>
+    <p id="setResolved"></p>
+    <button class="cta ghost" id="setClose">Done</button>
   </div>
 </div>
 
@@ -321,12 +364,25 @@ freeconsole.onReady = function () {
 
   renderSkins();
   publishSkin();
+  renderSettings();
   // No setOrientation() call: the pad works in either orientation on its own, so asking the
   // shell to lock or prompt for landscape would only take that choice away from the player.
 };
 
 freeconsole.onMessage = function (device_id, data) {
   if (device_id !== FreeConsole.SCREEN || !data) return;
+
+  // Checked before the phase filter below, which returns early on anything else.
+  if (data.type === "quality") {
+    quality = {
+      choice: data.choice,
+      tier: data.tier,
+      tiers: Array.isArray(data.tiers) ? data.tiers : [],
+    };
+    renderSettings();
+    return;
+  }
+
   if (data.a !== "phase") return;
 
   if (Array.isArray(data.score)) {
@@ -364,8 +420,15 @@ freeconsole.onMessage = function (device_id, data) {
     hideSheet();
   }
 
+  lastPhase = data;
   updateHold(data);
 };
+
+/**
+ * The last phase broadcast, kept so anything that changes what covers the pad (closing the
+ * settings sheet, for one) can re-run updateHold with the state still in force.
+ */
+let lastPhase = null;
 
 /**
  * Show the pad only once play is actually live. During the lobby and the countdown the
@@ -395,6 +458,92 @@ function updateHold(data) {
 // Keep the emoji in the bar in step with the picker.
 const dotObserver = () => { document.getElementById("dot").textContent = skinById(chosen).emoji; };
 document.getElementById("skins").addEventListener("pointerup", dotObserver);
+
+/* -------------------------------------------------------- graphics settings */
+
+/**
+ * What the screen last told us about its own rendering.
+ *
+ * The phone holds no opinion about what the tiers are — it renders whatever list the
+ * screen sends. One definition of the tiers (quality.js, on the screen), and a phone on a
+ * stale cached page cannot offer a setting the screen no longer understands.
+ */
+let quality = { choice: null, tier: null, tiers: [] };
+
+const gearEl = document.getElementById("gear");
+const settingsEl = document.getElementById("settings");
+const setListEl = document.getElementById("setList");
+const setResolvedEl = document.getElementById("setResolved");
+
+/**
+ * Whether this phone is the room's admin.
+ *
+ * Derived from the SDK rather than stored, so it follows the master controller: if that
+ * phone leaves, the next one simply IS the master and its gear appears with no handover.
+ */
+function isMaster() {
+  const me = safeCall(() => freeconsole.getDeviceId(), myDeviceId);
+  const master = safeCall(() => freeconsole.getMasterControllerDeviceId(), undefined);
+  return master !== undefined && me === master;
+}
+
+function renderSettings() {
+  // The gear is only meaningful for the admin, and only once the screen has said what the
+  // options are — showing it earlier would open an empty sheet.
+  const show = isMaster() && quality.tiers.length > 0;
+  gearEl.classList.toggle("show", show);
+  if (!show) {
+    settingsEl.classList.remove("show");
+    return;
+  }
+
+  setListEl.replaceChildren();
+  for (const tier of quality.tiers) {
+    const btn = document.createElement("button");
+    btn.className = "set-opt" + (tier.value === quality.choice ? " on" : "");
+    btn.innerHTML = '<span class="set-name"></span><span class="set-note"></span>';
+    btn.querySelector(".set-name").textContent = tier.label;
+    btn.querySelector(".set-note").textContent = tier.note;
+    btn.addEventListener("click", () => {
+      // Optimistic: light the chosen option now rather than waiting for the round trip, so
+      // a tap always feels answered. The screen's reply is authoritative and corrects this
+      // if the choice was refused.
+      quality.choice = tier.value;
+      renderSettings();
+      safeCall(() => freeconsole.message(FreeConsole.SCREEN, { a: "set-quality", choice: tier.value }));
+      safeCall(() => freeconsole.vibrate(8));
+    });
+    setListEl.appendChild(btn);
+  }
+
+  // "Auto" alone does not say what the device settled on, and that is exactly what the
+  // admin needs to know before deciding to override it.
+  setResolvedEl.textContent =
+    quality.choice === "auto" && quality.tier ? "Auto selected: " + quality.tier : "";
+}
+
+gearEl.addEventListener("click", () => {
+  settingsEl.classList.add("show");
+  // Ask on open rather than trusting what we hold: this phone may have connected after the
+  // screen's boot broadcast, or the tier may have changed since.
+  safeCall(() => freeconsole.message(FreeConsole.SCREEN, { a: "get-quality" }));
+});
+
+document.getElementById("setClose").addEventListener("click", () => {
+  settingsEl.classList.remove("show");
+  // The pad's prompt text depends on whether a sheet is covering it.
+  updateHold(lastPhase);
+});
+
+// Master is derived from who is connected, so it changes without this phone doing
+// anything: the admin leaves, and the next controller inherits the gear.
+freeconsole.onConnect = function () { renderSettings(); };
+freeconsole.onDisconnect = function () {
+  renderSettings();
+  if (isMaster() && !quality.tiers.length) {
+    safeCall(() => freeconsole.message(FreeConsole.SCREEN, { a: "get-quality" }));
+  }
+};
 
 renderSkins();
 updateHold(null);   // pad stays covered until the screen says play is live

@@ -48,7 +48,7 @@ function buildSky() {
 
 /* ------------------------------------------------------------------- sand */
 
-function buildSand() {
+function buildSand(shadows = true) {
   const g = new THREE.Group();
 
   // Wide, but not especially deep: the shoreline needs to be close enough that the sea is a
@@ -71,7 +71,7 @@ function buildSand() {
   geo.computeVertexNormals();
 
   const sand = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ color: SAND_NEAR }));
-  sand.receiveShadow = true;
+  sand.receiveShadow = shadows;
   sand.position.z = -35;   // court sits on the near part; the beach runs back to the water
   g.add(sand);
 
@@ -80,7 +80,7 @@ function buildSand() {
   courtGeo.rotateX(-Math.PI / 2);
   const court = new THREE.Mesh(courtGeo, new THREE.MeshLambertMaterial({ color: SAND_FAR }));
   court.position.y = 0.012;
-  court.receiveShadow = true;
+  court.receiveShadow = shadows;
   g.add(court);
 
   // Boundary tape.
@@ -105,12 +105,16 @@ function buildSand() {
  * vertices - it is the only thing in the scene that moves on its own, and it does most of
  * the work of making the place feel calm rather than static.
  */
-function buildSea() {
+function buildSea(segments = [60, 24]) {
   // Wide and deep enough to reach the horizon from the play camera. The first version was
   // 300x120 at z=-78, which the sand plane (160 wide, centred at z=-6) completely enclosed -
   // the sea rendered as a lagoon sitting ON the beach instead of behind it. It has to start
   // beyond the far edge of the sand and run past the fog distance.
-  const geo = new THREE.PlaneGeometry(1200, 600, 60, 24);
+  //
+  // The subdivision is tier-driven because it sets the cost of updateSea(): every vertex is
+  // rewritten each tick and, worse, computeVertexNormals() re-derives every face normal
+  // from them. Halving the grid quarters both.
+  const geo = new THREE.PlaneGeometry(1200, 600, segments[0], segments[1]);
   geo.rotateX(-Math.PI / 2);
   const mat = new THREE.MeshLambertMaterial({ color: SEA_NEAR });
   const sea = new THREE.Mesh(geo, mat);
@@ -123,7 +127,16 @@ function buildSea() {
   return sea;
 }
 
-export function updateSea(sea, t) {
+/**
+ * Rolls the sea's vertices.
+ *
+ * `withNormals` is the expensive half by a wide margin: computeVertexNormals() walks every
+ * face, recomputes its normal, and re-accumulates it onto the vertices — far more work
+ * than the sine loop above it. Skipping it leaves the waves moving with static lighting,
+ * which at this distance (well past the fog's near plane, behind the whole court) is not a
+ * difference anyone sees. The cheap tier stops calling this altogether.
+ */
+export function updateSea(sea, t, withNormals = true) {
   const pos = sea.geometry.attributes.position;
   const base = sea.userData.base;
   for (let i = 0; i < pos.count; i++) {
@@ -131,12 +144,12 @@ export function updateSea(sea, t) {
     pos.setY(i, Math.sin(x * 0.08 + t * 0.9) * 0.28 + Math.sin(z * 0.13 - t * 0.6) * 0.18);
   }
   pos.needsUpdate = true;
-  sea.geometry.computeVertexNormals();
+  if (withNormals) sea.geometry.computeVertexNormals();
 }
 
 /* -------------------------------------------------------------------- net */
 
-function buildNet() {
+function buildNet(shadows = true) {
   const g = new THREE.Group();
   const postMat = new THREE.MeshLambertMaterial({ color: 0x6b4a2f });
 
@@ -144,7 +157,7 @@ function buildNet() {
     const post = new THREE.Mesh(
       new THREE.CylinderGeometry(0.09, 0.11, COURT.netHeight + 0.35, 10), postMat);
     post.position.set(0, (COURT.netHeight + 0.35) / 2, z);
-    post.castShadow = true;
+    post.castShadow = shadows;
     g.add(post);
   }
 
@@ -179,7 +192,7 @@ function buildNet() {
 /* ------------------------------------------------------------------- props */
 
 /** Palms, umbrellas and a few beach balls, scattered well clear of the court. */
-function buildProps() {
+function buildProps({ palms: palmCount = 14, fronds = 6, shadows = true } = {}) {
   const g = new THREE.Group();
   const rand = mulberry32(20260802);
 
@@ -192,14 +205,16 @@ function buildProps() {
     const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.12 * scale, 0.2 * scale, h, 7), trunkMat);
     trunk.position.y = h / 2;
     trunk.rotation.z = (rand() - 0.5) * 0.24;
-    trunk.castShadow = true;
+    trunk.castShadow = shadows;
     p.add(trunk);
-    for (let i = 0; i < 6; i++) {
+    for (let i = 0; i < fronds; i++) {
       const leaf = new THREE.Mesh(new THREE.ConeGeometry(0.42 * scale, 2.3 * scale, 5), leafMat);
-      const a = (i / 6) * Math.PI * 2 + rand();
+      // Spread over the actual frond count, so a lighter palm is still a full crown rather
+      // than a gap-toothed one.
+      const a = (i / fronds) * Math.PI * 2 + rand();
       leaf.position.set(Math.cos(a) * 0.85 * scale, h, Math.sin(a) * 0.85 * scale);
       leaf.rotation.set(Math.PI / 2.4, 0, -a + Math.PI / 2);
-      leaf.castShadow = true;
+      leaf.castShadow = shadows;
       p.add(leaf);
     }
     p.position.set(x, 0, z);
@@ -211,12 +226,16 @@ function buildProps() {
   // keeps the sidelines clear and the camera's view of the court unobstructed.
   // The near pair sits behind the baseline (z <= -6) rather than beside it: at z=+5 they
   // filled the edges of the frame and one stood in front of the left sideline.
-  for (const [x, z, s] of [
+  // Listed roughly nearest-first, and taken in order, so a reduced count drops the far
+  // palms — the ones deepest in the fog and smallest on screen. The near pairs that
+  // actually frame the court survive every tier.
+  const PALMS = [
     [-13.5, -6, 1.05], [13.8, -5.5, 1.0],
     [-15.5, -13, 1.15], [15.8, -12, 1.1], [-12.5, -20, 0.95], [12.8, -19, 1.0],
     [-22, -9, 1.2], [23, -10, 1.05], [-20, -26, 1.1], [21, -28, 1.15],
     [-31, -36, 1.15], [33, -40, 1.05], [-24, -54, 0.95], [26, -58, 1.1],
-  ]) g.add(palm(x, z, s));
+  ];
+  for (const [x, z, s] of PALMS.slice(0, palmCount)) g.add(palm(x, z, s));
 
   // Umbrellas either side, angled slightly so the pair does not look stamped.
   function umbrella(x, z, color) {
@@ -230,7 +249,7 @@ function buildProps() {
       new THREE.ConeGeometry(1.5, 0.75, 12),
       new THREE.MeshLambertMaterial({ color, side: THREE.DoubleSide }));
     top.position.y = 2.35;
-    top.castShadow = true;
+    top.castShadow = shadows;
     u.add(top);
     u.position.set(x, 0, z);
     u.rotation.z = (rand() - 0.5) * 0.12;
@@ -252,7 +271,7 @@ function buildProps() {
  *
  * Returns a group with named parts so the screen can animate arms and legs.
  */
-export function buildPlayerMesh(skin) {
+export function buildPlayerMesh(skin, shadows = true) {
   const g = new THREE.Group();
 
   const skinMat = new THREE.MeshLambertMaterial({ color: skin.skin });
@@ -267,7 +286,7 @@ export function buildPlayerMesh(skin) {
   for (const side of [-1, 1]) {
     const leg = new THREE.Mesh(new THREE.CapsuleGeometry(0.115, H * 0.34, 4, 8), skinMat);
     leg.position.set(side * 0.15, H * 0.24, 0);
-    leg.castShadow = true;
+    leg.castShadow = shadows;
     leg.userData.side = side;
     legs.add(leg);
   }
@@ -276,12 +295,12 @@ export function buildPlayerMesh(skin) {
   const shorts = new THREE.Mesh(
     new THREE.BoxGeometry(0.52, 0.3, 0.36), trunkMat);
   shorts.position.y = H * 0.45;
-  shorts.castShadow = true;
+  shorts.castShadow = shadows;
   g.add(shorts);
 
   const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.235, H * 0.26, 4, 10), suitMat);
   torso.position.y = H * 0.63;
-  torso.castShadow = true;
+  torso.castShadow = shadows;
   g.add(torso);
 
   // Arms, kept as named references - the swing animation is the main feedback that a hit
@@ -291,13 +310,13 @@ export function buildPlayerMesh(skin) {
   const armR = armL.clone();
   armL.position.set(-0.33, H * 0.66, 0);
   armR.position.set(0.33, H * 0.66, 0);
-  armL.castShadow = armR.castShadow = true;
+  armL.castShadow = armR.castShadow = shadows;
   arms.add(armL, armR);
   g.add(arms);
 
   const head = new THREE.Mesh(new THREE.SphereGeometry(0.2, 14, 12), skinMat);
   head.position.y = H * 0.88;
-  head.castShadow = true;
+  head.castShadow = shadows;
   g.add(head);
 
   const hair = new THREE.Mesh(new THREE.SphereGeometry(0.215, 14, 12,
@@ -310,14 +329,14 @@ export function buildPlayerMesh(skin) {
 }
 
 /** A beach ball: coloured panels so its spin is visible. */
-export function buildBall() {
+export function buildBall(shadows = true) {
   const g = new THREE.Group();
   const panels = [0xffffff, 0xff2e88, 0x35f0e0, 0xffc247];
   for (let i = 0; i < 4; i++) {
     const seg = new THREE.Mesh(
       new THREE.SphereGeometry(BALL.radius, 14, 12, (i / 4) * Math.PI * 2, Math.PI / 2),
       new THREE.MeshLambertMaterial({ color: panels[i] }));
-    seg.castShadow = true;
+    seg.castShadow = shadows;
     g.add(seg);
   }
   return g;
@@ -334,29 +353,46 @@ export function buildShadowBlob() {
 
 /* ------------------------------------------------------------------ lights */
 
-export function buildWorld(scene) {
+/**
+ * Builds the whole beach.
+ *
+ * `q` is the active quality tier (see quality.js). Everything it controls is baked in at
+ * build time — the sea's subdivision, how many palms stand, whether anything casts a
+ * shadow — so a tier change rebuilds the world rather than re-flagging it.
+ */
+export function buildWorld(scene, q = {}) {
+  const {
+    shadows = true,
+    shadowMapSize = 1024,
+    seaSegments = [60, 24],
+    palms = 14,
+    fronds = 6,
+  } = q;
+
   // Starts past the props and ends short of the sea, so distance hazes out without
   // swallowing the water - the horizon is most of what makes the place feel like a beach.
   scene.fog = new THREE.Fog(0xffc9a0, 55, 300);
 
   const sky = buildSky();
-  const sand = buildSand();
-  const sea = buildSea();
-  const net = buildNet();
-  const props = buildProps();
+  const sand = buildSand(shadows);
+  const sea = buildSea(seaSegments);
+  const net = buildNet(shadows);
+  const props = buildProps({ palms, fronds, shadows });
   scene.add(sky, sand, sea, net, props);
 
   // Warm low sun from behind the camera's left, plus a cool sky bounce. Two lights is
   // enough for this palette and keeps the shadow map single-pass.
   const sun = new THREE.DirectionalLight(SUN, 2.1);
   sun.position.set(-13, 17, 11);
-  sun.castShadow = true;
-  sun.shadow.mapSize.set(1024, 1024);
+  sun.castShadow = shadows;
+  sun.shadow.mapSize.set(shadowMapSize, shadowMapSize);
   const s = sun.shadow.camera;
   s.left = -18; s.right = 18; s.top = 16; s.bottom = -10; s.near = 1; s.far = 60;
   scene.add(sun);
 
-  scene.add(new THREE.HemisphereLight(0xbfe4ff, 0xe8c894, 1.15));
+  // With shadows off the court loses its grounding, so lift the sky bounce a little —
+  // otherwise the whole scene reads flatter rather than just shadowless.
+  scene.add(new THREE.HemisphereLight(0xbfe4ff, 0xe8c894, shadows ? 1.15 : 1.45));
 
   return { sky, sand, sea, net, props, sun };
 }

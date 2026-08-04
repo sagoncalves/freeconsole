@@ -179,8 +179,11 @@ import {
 } from "/games/beachvolley/sim.js?v=1";
 import {
   buildWorld, buildPlayerMesh, buildBall, buildShadowBlob, updateSea,
-} from "/games/beachvolley/scene.js?v=1";
+} from "/games/beachvolley/scene.js?v=2";
 import { skinById, defaultSkinFor, SKINS } from "/games/beachvolley/skins.js?v=1";
+import {
+  TIERS, QUALITY_CHOICES, DEFAULT_QUALITY, resolveTier, makeFpsWatchdog,
+} from "/games/beachvolley/quality.js?v=1";
 
 const freeconsole = new FreeConsole();
 
@@ -213,17 +216,61 @@ const skinChoice = new Map();
 /** Three.js group per device id. Keyed by id, never by array position. */
 const avatars = new Map();
 
+/* ---------------------------------------------------------------- quality */
+
+/**
+ * The admin's choice ("auto" or a tier name) and the tier it resolves to.
+ *
+ * Persisted per-browser so a TV set to Low once comes back Low. The CHOICE is stored, not
+ * the resolved tier — "low" and "auto that happened to pick low" are different intentions,
+ * and only the first should survive the device changing.
+ */
+const QUALITY_KEY = "beachvolley.quality";
+
+function loadQualityChoice() {
+  try {
+    const stored = localStorage.getItem(QUALITY_KEY);
+    if (stored && QUALITY_CHOICES.includes(stored)) return stored;
+  } catch (err) { /* private mode, or storage disabled */ }
+  return DEFAULT_QUALITY;
+}
+
+function saveQualityChoice(choice) {
+  try { localStorage.setItem(QUALITY_KEY, choice); } catch (err) { /* not fatal */ }
+}
+
+let qualityChoice = loadQualityChoice();
+let { name: tierName, config: Q } = resolveTier(qualityChoice);
+
 /* ------------------------------------------------------------------ three */
 
-const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+// Antialiasing is fixed at context creation and cannot be toggled on a live renderer, so
+// a switch across that boundary waits for the next page load (see applyQuality).
+const renderer = new THREE.WebGLRenderer({
+  antialias: Q.antialias,
+  powerPreference: "high-performance",
+});
+renderer.setPixelRatio(Math.min(devicePixelRatio, Q.maxPixelRatio));
 renderer.setSize(innerWidth, innerHeight);
-renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.shadowMap.enabled = Q.shadows;
+// PCFSoft is the expensive filter. Where shadows survive below High, take the cheap one:
+// a harder edge costs far less than losing the shadow entirely would look.
+renderer.shadowMap.type = tierName === "high" ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
 document.body.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-const world = buildWorld(scene);
+let world = buildWorld(scene, Q);
+
+/**
+ * Give the sea its shape once at build time.
+ *
+ * A plane straight out of PlaneGeometry is dead flat, so a tier that never animates the
+ * water would render it as a mirror. One pass (with normals, since it is the only one)
+ * leaves a still but rippled surface — which is what "calm sea" should look like.
+ */
+function settleSea() {
+  updateSea(world.sea, seaT, true);
+}
 
 // Framing: the court is ~17m wide and the players are 1.75m tall, so the camera has to sit
 // close enough that a person is a readable figure rather than a speck. At z=20 they were a
@@ -235,7 +282,8 @@ const CAM_LOOK = new THREE.Vector3(0, 2.2, 0);
 camera.position.copy(CAM_BASE);
 camera.lookAt(CAM_LOOK);
 
-const ballMesh = buildBall();
+// Not const: a quality change rebuilds it, because whether it casts a shadow is baked in.
+let ballMesh = buildBall(Q.shadows);
 scene.add(ballMesh);
 const ballShadow = buildShadowBlob();
 scene.add(ballShadow);
@@ -257,7 +305,7 @@ function syncAvatar(deviceId) {
   if (old) { scene.remove(old); disposeTree(old); }
 
   const skin = skinById(p.skinId);
-  const mesh = buildPlayerMesh(skin);
+  const mesh = buildPlayerMesh(skin, Q.shadows);
   scene.add(mesh);
   avatars.set(deviceId, mesh);
 }
@@ -380,6 +428,26 @@ freeconsole.onMessage = function (device_id, data) {
   if (!data) return;
 
   switch (data.a) {
+    // A phone asking what the graphics settings currently are, so it can draw the panel.
+    case "get-quality":
+      broadcastQuality();
+      break;
+    // Graphics quality, set from the master controller.
+    //
+    // Restricted to the master because this is a room-wide setting on a shared screen, not
+    // a per-player preference — otherwise any of the four could drop the display to Low
+    // mid-match for everyone. Master is derived (lowest-numbered controller), so it
+    // survives that phone leaving with no handover.
+    case "set-quality": {
+      const master = safeCall(() => freeconsole.getMasterControllerDeviceId());
+      if (Number(device_id) !== master) break;
+      if (!QUALITY_CHOICES.includes(data.choice)) break;
+      // An explicit choice retires the watchdog: the admin has spoken, and a later
+      // automatic step-down would silently contradict them.
+      watchdog?.stop();
+      applyQuality(data.choice);
+      break;
+    }
     case "move":
       // { a:"move", k:"left"|"right", d:true|false } - sent on press and release only.
       setInput(match, device_id, data.k, data.d);
@@ -546,9 +614,21 @@ function consumeEvents() {
 
 let last = performance.now();
 let seaT = 0;
+let lastDraw = 0;
+let lastSeaAt = 0;
 
 function frame(t) {
   requestAnimationFrame(frame);
+
+  // Frame cap. Safe to do here without a fixed-timestep accumulator, unlike Rope Raid:
+  // this sim is fully dt-driven with a clamp, so a longer frame simply integrates a longer
+  // step and the match keeps wall-clock pace at any rate.
+  if (Q.targetFps) {
+    if (t - lastDraw < 1000 / Q.targetFps - 1) return;
+    lastDraw = t;
+  }
+
+  watchdog?.tick(t);
 
   // Clamp dt so a backgrounded tab does not teleport the ball through the floor on return.
   let dt = (t - last) / 1000;
@@ -559,8 +639,19 @@ function frame(t) {
   consumeEvents();
   drawCountdown();
 
-  seaT += dt;
-  updateSea(world.sea, seaT);
+  // The sea is the most expensive thing per frame in this game: every vertex rewritten,
+  // then computeVertexNormals() re-deriving every face normal, then the whole position
+  // buffer re-uploaded. seaHz throttles that to a fixed rate independent of frame rate
+  // (waves are slow; 20Hz is indistinguishable from 60), and -1 stops it dead — the water
+  // sits still, which at this distance and through the fog reads as calm.
+  if (Q.seaHz >= 0) {
+    seaT += dt;
+    const due = Q.seaHz === 0 || t - lastSeaAt >= 1000 / Q.seaHz;
+    if (due) {
+      lastSeaAt = t;
+      updateSea(world.sea, seaT, Q.seaNormals);
+    }
+  }
 
   drawPlayers(dt);
   drawBall(dt);
@@ -665,6 +756,128 @@ function driftCamera(dt) {
   camera.position.y += (targetY - camera.position.y) * Math.min(1, dt * 1.6);
   camera.lookAt(camera.position.x, CAM_LOOK.y, CAM_LOOK.z);
 }
+
+/* ------------------------------------------------------ switching quality */
+
+/**
+ * Switch tier at runtime.
+ *
+ * Almost everything here is baked in at build time — the sea's subdivision, how many palms
+ * stand, whether anything casts a shadow — so this rebuilds the world and the avatars
+ * rather than re-flagging them. That is safe mid-match: the scene carries no game state,
+ * which lives entirely in `match` (sim.js) and is never touched here. A rebuild between
+ * rallies is invisible; during one it costs a single hitched frame.
+ *
+ * Antialiasing is the exception, fixed at WebGL context creation. Rather than reload and
+ * interrupt a match, it is left until the page next loads; the stored choice makes that
+ * consistent.
+ *
+ * @param {string} choice   "auto" or a tier name
+ * @param {object} [opts]   `auto: true` when the watchdog chose it, not a person
+ */
+function applyQuality(choice, { auto = false } = {}) {
+  const resolved = resolveTier(choice);
+  const changed = resolved.name !== tierName;
+
+  qualityChoice = choice;
+  tierName = resolved.name;
+  Q = resolved.config;
+  // A watchdog step-down must not be written back as though the admin asked for it: the
+  // choice stays "auto", so a better device later gets a fresh guess.
+  if (!auto) saveQualityChoice(choice);
+
+  if (!changed) {
+    broadcastQuality();
+    return;
+  }
+
+  renderer.setPixelRatio(Math.min(devicePixelRatio, Q.maxPixelRatio));
+  renderer.shadowMap.enabled = Q.shadows;
+  renderer.shadowMap.type = tierName === "high" ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
+  // Shadow materials are compiled per-configuration; without this the scene keeps
+  // rendering with the old shadow setup.
+  renderer.shadowMap.needsUpdate = true;
+
+  // Tear the old world down properly. buildWorld() adds its pieces straight to the scene,
+  // so each is removed and disposed by hand — leaving them attached would both leak the
+  // geometry and keep drawing the old palms behind the new ones.
+  for (const key of ["sky", "sand", "sea", "net", "props"]) {
+    const obj = world[key];
+    if (!obj) continue;
+    scene.remove(obj);
+    disposeTree(obj);
+  }
+  scene.remove(world.sun);
+  world.sun.shadow.map?.dispose();
+  // The hemisphere light is added inside buildWorld() and not returned, so it has to be
+  // found by type or a second one is added on every switch, brightening the scene each time.
+  for (const child of [...scene.children]) {
+    if (child.isHemisphereLight) scene.remove(child);
+  }
+
+  world = buildWorld(scene, Q);
+  settleSea();
+
+  // The ball and every avatar bake their own castShadow flags, so they are rebuilt too.
+  scene.remove(ballMesh);
+  disposeTree(ballMesh);
+  ballMesh = buildBall(Q.shadows);
+  scene.add(ballMesh);
+  for (const deviceId of [...avatars.keys()]) syncAvatar(deviceId);
+
+  broadcastQuality();
+}
+
+/** Tell the controllers what the screen is running, so the master can show it selected. */
+function broadcastQuality() {
+  safeCall(() => freeconsole.broadcast({
+    type: "quality",
+    choice: qualityChoice,
+    tier: tierName,
+    tiers: QUALITY_CHOICES.map((name) => ({
+      value: name,
+      label: name === "auto" ? "Auto" : TIERS[name].label,
+      note: name === "auto" ? "Match the device" : TIERS[name].note,
+    })),
+  }));
+}
+
+/**
+ * Live view of what the renderer is actually doing, exposed outside test mode — the only
+ * way to confirm from a TV that a tier switch took effect and what a frame really costs.
+ */
+window.__gfxProbe = () => ({
+  choice: qualityChoice,
+  tier: tierName,
+  drawCalls: renderer.info.render.calls,
+  triangles: renderer.info.render.triangles,
+  geometries: renderer.info.memory.geometries,
+  textures: renderer.info.memory.textures,
+  pixelRatio: renderer.getPixelRatio(),
+  shadows: renderer.shadowMap.enabled,
+  seaHz: Q.seaHz,
+  palms: Q.palms,
+  fpsCap: Q.targetFps || 0,
+});
+
+/**
+ * Steps the tier down once when the frame rate is persistently bad.
+ * Only armed on "auto" — an explicit choice is an instruction, not a suggestion.
+ */
+const watchdog = qualityChoice === "auto" && tierName !== "low"
+  ? makeFpsWatchdog({
+      onDrop: (fps) => {
+        const next = tierName === "high" ? "medium" : "low";
+        console.info(`[beachvolley] ${Math.round(fps)}fps sustained; dropping ${tierName} -> ${next}`);
+        applyQuality(next, { auto: true });
+      },
+    })
+  : null;
+
+// Shape the water once before the first frame, so a tier that never animates it still
+// shows a rippled sea rather than a flat mirror.
+settleSea();
+broadcastQuality();
 
 requestAnimationFrame(frame);
 

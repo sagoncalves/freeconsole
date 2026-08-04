@@ -1,0 +1,383 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<title>Minefield Escape — Controller</title>
+<link rel="stylesheet" href="/console.css" />
+<style>
+  * { -webkit-tap-highlight-color: transparent; user-select: none; -webkit-user-select: none; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    display: flex; flex-direction: column;
+    touch-action: none; overscroll-behavior: none;
+    padding: max(8px, env(safe-area-inset-top)) 10px max(10px, env(safe-area-inset-bottom));
+    gap: 10px; background: #03040a;
+  }
+
+  /* Condition strip. Legs are the only stat, and it is the one that decides whether you can
+     still outrun what is behind you. */
+  .status { text-align: center; min-height: 40px; }
+  #condition {
+    font-family: var(--font-display); font-weight: 700;
+    font-size: clamp(15px, 5vw, 22px); letter-spacing: .02em;
+    transition: color .3s;
+  }
+  #condition.ok { color: var(--glow); }
+  #condition.hurt { color: var(--amber); }
+  #condition.crawl { color: var(--hot); }
+  #condition.gone { color: var(--text-faint); }
+  #sub {
+    font-family: var(--font-mono); font-size: 10px; letter-spacing: .14em;
+    text-transform: uppercase; color: var(--text-faint); margin-top: 3px;
+  }
+
+  /* Gate slots, mirrored from the screen so a player never has to look up to know how many
+     ways out are left. */
+  #gate { display: flex; justify-content: center; gap: 5px; min-height: 10px; }
+  .slot {
+    width: 20px; height: 6px; border-radius: 3px;
+    border: 1px solid var(--line); background: rgba(26,32,56,.6);
+    transition: background .25s, box-shadow .25s, border-color .25s;
+  }
+  .slot.used { background: var(--hot); border-color: var(--hot); box-shadow: 0 0 10px var(--hot); }
+  .slot.free { background: var(--lime); border-color: var(--lime); box-shadow: 0 0 10px var(--lime); }
+
+  /* The pad. One big cross: this game is entirely about committing to a direction, so the
+     targets are as large as the glass allows and there is nothing else to hit by mistake. */
+  #pad {
+    flex: 1; min-height: 0;
+    display: grid; gap: 8px;
+    grid-template-columns: 1fr 1fr 1fr;
+    grid-template-rows: 1fr 1fr 1fr;
+    grid-template-areas:
+      ".    up    ."
+      "left mid   right"
+      ".    down  .";
+  }
+  #pad.locked { opacity: .3; pointer-events: none; }
+
+  .dir {
+    border-radius: 18px; border: 1px solid var(--line);
+    background: rgba(26,32,56,.5);
+    display: grid; place-items: center;
+    font-size: clamp(20px, 8vw, 34px); color: var(--text-dim);
+    transition: background .06s, transform .06s, box-shadow .06s, color .06s;
+  }
+  .dir.up { grid-area: up; }
+  .dir.down { grid-area: down; }
+  .dir.left { grid-area: left; }
+  .dir.right { grid-area: right; }
+  .dir.down { border-style: dashed; }
+
+  /* Up is toward the gate. It is coloured, because it is the direction the whole game is
+     asking you to take and the one it is most frightening to take. */
+  .dir.up { border-color: rgba(157,255,79,.35); color: var(--lime); }
+
+  .dir.down-active {
+    background: rgba(53,240,224,.22);
+    box-shadow: inset 0 0 26px rgba(53,240,224,.28);
+    color: var(--text); transform: scale(.975);
+  }
+  .dir.up.down-active {
+    background: rgba(157,255,79,.22);
+    box-shadow: inset 0 0 26px rgba(157,255,79,.3);
+  }
+
+  /* The centre cell is the pulse clock — the same countdown the screen shows, so you can
+     decide whether to step now or wait for the light without looking away from your thumb. */
+  #mid {
+    grid-area: mid; display: grid; place-items: center;
+    border-radius: 50%; position: relative;
+  }
+  #pulsering {
+    width: 76%; aspect-ratio: 1; border-radius: 50%;
+    border: 2px solid rgba(53,240,224,.14);
+    display: grid; place-items: center;
+    font-family: var(--font-mono); font-size: 9px; letter-spacing: .12em;
+    text-transform: uppercase; color: var(--text-faint);
+    transition: border-color .12s, box-shadow .12s, color .12s;
+  }
+  #pulsering.hot {
+    border-color: var(--glow); color: var(--glow);
+    box-shadow: 0 0 22px rgba(53,240,224,.4), inset 0 0 22px rgba(53,240,224,.16);
+  }
+
+  #banner {
+    position: fixed; inset: 0; z-index: 20;
+    display: none; flex-direction: column; align-items: center; justify-content: center;
+    gap: 12px; background: rgba(3,4,10,.95); text-align: center; padding: 26px;
+  }
+  #banner.show { display: flex; }
+  #banner .big {
+    font-size: clamp(26px, 9vw, 46px); font-weight: 700; line-height: 1.05;
+    color: var(--glow); text-shadow: var(--bloom-glow);
+  }
+  #banner .big.bad { color: var(--hot); text-shadow: var(--bloom-hot); }
+  #banner .sub { color: var(--text-dim); font-size: 14px; max-width: 30ch; line-height: 1.55; }
+</style>
+</head>
+<body>
+
+<div class="status">
+  <div id="condition" class="ok">Connecting…</div>
+  <div id="sub">stay off the light</div>
+</div>
+<div id="gate"></div>
+
+<div id="pad" class="locked">
+  <div class="dir up" data-hold="up">▲</div>
+  <div class="dir left" data-hold="left">◀</div>
+  <div id="mid"><div id="pulsering">pulse</div></div>
+  <div class="dir right" data-hold="right">▶</div>
+  <div class="dir down" data-hold="down">▼</div>
+</div>
+
+<div id="banner">
+  <div class="big" id="bannerBig">—</div>
+  <div class="sub" id="bannerSub"></div>
+</div>
+
+<script src="/sdk.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  var freeconsole = new FreeConsole();
+  freeconsole.setOrientation("portrait");
+
+  var pad = document.getElementById("pad");
+  var conditionEl = document.getElementById("condition");
+  var subEl = document.getElementById("sub");
+  var gateEl = document.getElementById("gate");
+  var banner = document.getElementById("banner");
+  var pulsering = document.getElementById("pulsering");
+
+  var over = false;
+  var myState = "alive";
+
+  /** Held directions are sent on change only — never per frame. */
+  var held = { up: false, down: false, left: false, right: false };
+
+  function sendHold(key, value) {
+    if (held[key] === value) return;
+    held[key] = value;
+    freeconsole.message(FreeConsole.SCREEN, { t: "hold", k: key, v: value });
+  }
+
+  function releaseAll() {
+    for (var k in held) if (held[k]) sendHold(k, false);
+    var downs = document.querySelectorAll(".dir.down-active");
+    for (var i = 0; i < downs.length; i++) downs[i].classList.remove("down-active");
+  }
+
+  /**
+   * Pointer routing.
+   *
+   * Directions are driven from document-level pointer events rather than per-element
+   * listeners, so a thumb that slides from one arrow to another switches direction without
+   * lifting — which is what walking a diagonal around a mine you just saw requires. Tracking
+   * by pointerId keeps a second thumb independent.
+   */
+  var active = Object.create(null);   // pointerId -> element
+
+  function keyAt(x, y) {
+    var el = document.elementFromPoint(x, y);
+    while (el && el !== document.body) {
+      if (el.dataset && el.dataset.hold) return el;
+      el = el.parentElement;
+    }
+    return null;
+  }
+
+  function engage(pointerId, el) {
+    var prev = active[pointerId];
+    if (prev === el) return;
+
+    if (prev && prev.dataset.hold) {
+      // Only release the direction if no other pointer is still on it.
+      var stillHeld = false;
+      for (var id in active) {
+        if (Number(id) !== pointerId && active[id] === prev) stillHeld = true;
+      }
+      if (!stillHeld) sendHold(prev.dataset.hold, false);
+      prev.classList.remove("down-active");
+    }
+
+    active[pointerId] = el;
+    if (!el) return;
+
+    el.classList.add("down-active");
+    sendHold(el.dataset.hold, true);
+  }
+
+  document.addEventListener("pointerdown", function (e) {
+    if (over) { again(); return; }
+    e.preventDefault();
+    engage(e.pointerId, keyAt(e.clientX, e.clientY));
+  }, { passive: false });
+
+  document.addEventListener("pointermove", function (e) {
+    if (!(e.pointerId in active)) return;
+    e.preventDefault();
+    engage(e.pointerId, keyAt(e.clientX, e.clientY));
+  }, { passive: false });
+
+  function release(e) {
+    engage(e.pointerId, null);
+    delete active[e.pointerId];
+  }
+  document.addEventListener("pointerup", release);
+  document.addEventListener("pointercancel", release);
+
+  // A backgrounded phone must not leave its walker marching into a mine.
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) {
+      releaseAll();
+      for (var id in active) delete active[id];
+      freeconsole.message(FreeConsole.SCREEN, { t: "release" });
+    }
+  });
+
+  function again() {
+    over = false;
+    banner.classList.remove("show");
+    freeconsole.message(FreeConsole.SCREEN, { t: "again" });
+  }
+
+  /* ---------------------------------------------------------------- pulse clock */
+
+  /**
+   * The pulse clock runs locally between broadcasts. The screen tells us the period once;
+   * streaming a countdown at 60fps would be exactly the per-frame traffic the platform asks
+   * games not to send, and a local timer is smoother anyway.
+   */
+  var period = 2;
+  var nextPulseAt = 0;
+
+  function tickPulse() {
+    requestAnimationFrame(tickPulse);
+    if (myState !== "alive" || over) { pulsering.classList.remove("hot"); return; }
+    var t = freeconsole.getServerTime();
+    if (!nextPulseAt) { nextPulseAt = t + period * 1000; return; }
+    while (t > nextPulseAt) nextPulseAt += period * 1000;
+
+    var left = (nextPulseAt - t) / 1000;
+    pulsering.classList.toggle("hot", left < 0.35);
+    pulsering.textContent = left < 0.35 ? "now" : left.toFixed(1);
+  }
+  requestAnimationFrame(tickPulse);
+
+  /* ------------------------------------------------------------------ display */
+
+  function setCondition(legs, state) {
+    conditionEl.className = "";
+    if (state === "escaped") {
+      conditionEl.classList.add("ok");
+      conditionEl.textContent = "Through the gate";
+      subEl.textContent = "you made it out";
+      return;
+    }
+    if (state === "dead") {
+      conditionEl.classList.add("gone");
+      conditionEl.textContent = "Left in the field";
+      subEl.textContent = "—";
+      return;
+    }
+    if (legs >= 2) {
+      conditionEl.classList.add("ok");
+      conditionEl.textContent = "Walking";
+      subEl.textContent = "two legs";
+    } else if (legs === 1) {
+      conditionEl.classList.add("hurt");
+      conditionEl.textContent = "Limping";
+      subEl.textContent = "one leg — you are slow now";
+      freeconsole.vibrate(60);
+    } else {
+      conditionEl.classList.add("crawl");
+      conditionEl.textContent = "Crawling";
+      subEl.textContent = "no legs — keep going";
+      freeconsole.vibrate(120);
+    }
+  }
+
+  function renderGate(left, capacity, open) {
+    if (gateEl.childElementCount !== capacity) {
+      gateEl.innerHTML = "";
+      for (var i = 0; i < capacity; i++) {
+        var s = document.createElement("div");
+        s.className = "slot";
+        gateEl.appendChild(s);
+      }
+    }
+    var slots = gateEl.children;
+    for (var j = 0; j < slots.length; j++) {
+      slots[j].className = "slot " + (!open || j >= left ? "used" : "free");
+    }
+  }
+
+  /* ------------------------------------------------------------------- shell */
+
+  freeconsole.onReady = function () {
+    conditionEl.textContent = "Waiting for the field…";
+    subEl.textContent = "stand by";
+  };
+
+  var lastLegs = 2;
+
+  freeconsole.onMessage = function (deviceId, data) {
+    // Only the screen is authoritative.
+    if (deviceId !== FreeConsole.SCREEN || !data) return;
+    var me = freeconsole.getDeviceId();
+
+    if (typeof data.sonarPeriod === "number" && data.sonarPeriod !== period) {
+      period = data.sonarPeriod;
+      nextPulseAt = 0;
+    }
+    if (typeof data.exitLeft === "number" && typeof data.exitCapacity === "number") {
+      renderGate(data.exitLeft, data.exitCapacity, data.exitOpen);
+    }
+
+    var state = data.states && data.states[me];
+    var legs = data.legs && data.legs[me];
+    if (state !== undefined) myState = state;
+
+    if (data.phase === "running") {
+      over = false;
+      banner.classList.remove("show");
+      var canMove = state === "alive";
+      pad.classList.toggle("locked", !canMove);
+      if (typeof legs === "number") {
+        if (legs !== lastLegs || state !== "alive") setCondition(legs, state);
+        lastLegs = legs;
+      }
+    } else if (data.phase === "briefing") {
+      lastLegs = 2;
+      nextPulseAt = 0;
+      over = false;
+      myState = "alive";
+      banner.classList.remove("show");
+      pad.classList.add("locked");
+      releaseAll();
+      conditionEl.className = "ok";
+      conditionEl.textContent = data.levelName || "Level " + (data.level || 1);
+      subEl.textContent = "get ready";
+    } else if (data.phase === "over") {
+      over = true;
+      pad.classList.add("locked");
+      releaseAll();
+
+      var out = state === "escaped";
+      document.getElementById("bannerBig").className = "big" + (out ? "" : " bad");
+      document.getElementById("bannerBig").textContent = out ? "You got out" : "You did not";
+      document.getElementById("bannerSub").textContent = out
+        ? "The gate closed behind you. Tap for the next field."
+        : "The field keeps you. Tap to go again.";
+      banner.classList.add("show");
+      freeconsole.vibrate(out ? 40 : 15);
+    }
+  };
+})();
+</script>
+</body>
+</html>
