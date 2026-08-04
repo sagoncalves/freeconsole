@@ -231,10 +231,10 @@
     if (e.target && e.target.classList && e.target.classList.contains("q")) return;
     e.preventDefault();
 
-    // Take explicit capture so move/up are delivered to us even if the element under the
-    // finger changes, is removed, or the pad turns to pointer-events:none mid-touch — the
-    // usual way an up goes missing and leaves the arrow lit.
-    try { document.documentElement.setPointerCapture(e.pointerId); } catch (err) { /* not fatal */ }
+    // Deliberately NO setPointerCapture. On iOS it retargets pointerup to the capturing
+    // element, so a release handler bound to document may never fire and the arrow sticks
+    // on forever. See the same note in roperaid/controller.html. Releases are covered by
+    // the handlers below instead, which do not depend on where the finger came up.
     engage(e.pointerId, keyAt(e.clientX, e.clientY));
   }, { passive: false });
 

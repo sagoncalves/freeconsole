@@ -500,7 +500,13 @@ export function setGateOpen(ctx, open) {
  * the value where a player reads clearly down the aisle without swallowing the frame when
  * they are the one being followed.
  */
-const AVATAR_HEIGHT = 1.35;
+let AVATAR_HEIGHT = 1.35;
+
+/** Override the avatar height. Used by the size-comparison harness (?sizes=1). */
+export function setAvatarHeight(h) {
+  if (h > 0) AVATAR_HEIGHT = h;
+}
+export function getAvatarHeight() { return AVATAR_HEIGHT; }
 
 const BONES = {
   LeftUpLeg: 1, RightUpLeg: 1,

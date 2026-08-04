@@ -120,6 +120,7 @@ import {
   createScene, updateCamera, updateFloor, setGateOpen, resize,
   buildMineField, updateMineField,
   createPlayerMesh, posePlayer, createKillerMesh, loadAvatar, setAvatar, createBloodSplat,
+  setAvatarHeight,
   createPingRing, updatePingRing, createBlast, stepBlast, createPrintMesh,
 } from "/games/minefield3d/scene.js?v=1";
 import {
@@ -137,6 +138,11 @@ const freeconsole = new FreeConsole();
 const params = new URLSearchParams(location.search);
 const TEST = params.has("test");
 const BOTS = Math.max(0, Math.min(7, parseInt(params.get("bots") || "0", 10) || 0));
+
+// ?sizes=1 lines up ten ninjas at the spawn line, each a different height, with its number
+// and height labelled. It exists to settle by eye what the avatar scale should be — the
+// right answer depends on the camera, and no amount of measuring substitutes for looking.
+const SIZES = params.has("sizes");
 
 function safeCall(fn, fallback) {
   try { return fn(); } catch (err) { return fallback; }
@@ -771,6 +777,83 @@ if (TEST) {
       }
     }, 90);
   }
+}
+
+/* ------------------------------------------------------- avatar size harness */
+
+/**
+ * ?test=1&sizes=1 — ten ninjas across the spawn line, each at a different height.
+ *
+ * Getting avatar scale right by measurement kept failing: a size that reads well down the
+ * aisle is enormous when the camera is right behind that player, and vice versa. This puts
+ * every candidate on screen at once, at the position the camera actually starts from, so it
+ * can be settled by looking. Each is labelled with its index and its height in tiles.
+ */
+if (TEST && SIZES) {
+  const HEIGHTS = [0.35, 0.5, 0.65, 0.8, 0.95, 1.1, 1.35, 1.6, 2.0, 2.5];
+
+  loadAvatar().then((gltf) => {
+    if (!gltf) { console.warn("[sizes] avatar failed to load"); return; }
+    setAvatar(gltf);
+
+    // Clear the real players so nothing else is on screen.
+    for (const id of [...round.players.keys()]) { sim.removePlayer(round, id); dropBody(id); }
+    renderRoster();
+
+    // Freeze the round: no crusher, no mines, nothing moving.
+    round.phase = "briefing";
+    round.killerZ = round.rows + 40;
+    round.mines.fill(0);
+    killer.group.visible = false;
+    showOverlay(null);
+
+    const z = round.rows - 3.5;
+    const lane = round.cols / (HEIGHTS.length + 1);
+
+    HEIGHTS.forEach((h, i) => {
+      setAvatarHeight(h);
+      const hex = colorHexOf(i + 1);
+      const mesh = createPlayerMesh(hex, Q);
+      mesh.group.position.set(lane * (i + 1), 0, z);
+      // Face the camera so the silhouette is judged the way it will be seen.
+      mesh.group.rotation.y = 0;
+      ctx.world.add(mesh.group);
+
+      // A floating label: index above, height below.
+      const cv = document.createElement("canvas");
+      cv.width = 256; cv.height = 128;
+      const g = cv.getContext("2d");
+      g.fillStyle = "#eaf2ff";
+      g.font = "bold 74px monospace";
+      g.textAlign = "center";
+      g.fillText(String(i + 1), 128, 62);
+      g.font = "38px monospace";
+      g.fillStyle = "#8492b8";
+      g.fillText(h.toFixed(2), 128, 110);
+      const tex = new THREE.CanvasTexture(cv);
+      const label = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true }));
+      label.scale.set(1.4, 0.7, 1);
+      label.position.set(lane * (i + 1), h + 0.75, z);
+      ctx.world.add(label);
+    });
+
+    // Put the height back so nothing else in the page is affected.
+    setAvatarHeight(1.35);
+
+    // Park the camera where the round actually begins, looking down the line.
+    let held = 0;
+    const hold = () => {
+      requestAnimationFrame(hold);
+      // updateCamera runs every frame in the main loop, so the override has to be re-applied
+      // after it — otherwise the follow-cam drags the shot off the line-up immediately.
+      ctx.camera.position.set(round.cols / 2, 6.5, z + 11);
+      ctx.camera.lookAt(round.cols / 2, 0.8, z);
+      held++;
+    };
+    hold();
+
+    console.log("[sizes] heights:", HEIGHTS.join(", "));
+  });
 }
 </script>
 </body>
