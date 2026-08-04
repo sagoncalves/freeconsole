@@ -251,7 +251,7 @@ const description =
         color: var(--text-faint);
       }
       .code-bar .join-at { font-size: clamp(10px, 1vw, 13px); color: var(--text-dim); }
-      #qr { background: #fff; padding: 5px; border-radius: 7px; line-height: 0; flex-shrink: 0; }
+      #qr { background: #fff; padding: 2px; border-radius: 7px; line-height: 0; flex-shrink: 0; }
 
       /* Players: a coloured disc per person, left to right in join order. Reads at a glance
          from across a room, and the colours match the ones games use for each device. */
@@ -636,7 +636,7 @@ const description =
         const joinUrl = `${location.origin}/play.html?room=${roomCode}`;
         $("joinUrl").textContent = joinUrl.replace(/^https?:\/\//, "");
         $("qr").innerHTML = "";
-        $("qr").appendChild(renderQR(joinUrl, 45));
+        $("qr").appendChild(renderQR(joinUrl, 48));
 
         session = await startSession({
           roomCode,
