@@ -526,6 +526,43 @@ const BONES = {
  * SkeletonUtils addon for exactly this, but it is not in the vendored bundle, so the rebind
  * is done here.
  */
+/**
+ * The height a skinned hierarchy actually rasterises to, in its own local space.
+ *
+ * Walks the real vertices through their bone transforms. This is the number to scale
+ * against; every bounding-box shortcut reports the bind pose and is wrong by whatever the
+ * rig's own scale happens to be — here a factor of 95.
+ *
+ * Sampling a subset is enough: the extremes of a humanoid (head, feet) are hit long before
+ * a few hundred vertices are consumed, and this runs once per model, not per frame.
+ */
+function measureSkinnedHeight(root) {
+  const v = new THREE.Vector3();
+  let minY = Infinity;
+  let maxY = -Infinity;
+
+  root.updateWorldMatrix(true, true);
+  root.traverse((o) => {
+    if (!o.isSkinnedMesh) return;
+    const pos = o.geometry.attributes.position;
+    const step = Math.max(1, Math.floor(pos.count / 400));
+    for (let i = 0; i < pos.count; i += step) {
+      v.fromBufferAttribute(pos, i);
+      if (o.applyBoneTransform) o.applyBoneTransform(i, v);
+      else if (o.boneTransform) o.boneTransform(i, v);   // older three
+      // Apply the mesh's own world matrix, which is what carries the export's unit scale
+      // (0.01 here, the model being authored in centimetres). Normalising back into the
+      // root's local space would divide that straight back out and hand back the raw,
+      // unscaled figure — the very number that is wrong.
+      v.applyMatrix4(o.matrixWorld);
+      if (v.y < minY) minY = v.y;
+      if (v.y > maxY) maxY = v.y;
+    }
+  });
+
+  return isFinite(minY) ? maxY - minY : 0;
+}
+
 function cloneSkinned(source) {
   const root = source.clone(true);
 
@@ -575,7 +612,23 @@ export function loadAvatar(url = "/games/minefield3d/ninja.glb?v=1") {
 
 /** The loaded avatar, or null while it is still in flight / if it failed. */
 let avatarGltf = null;
-export function setAvatar(gltf) { avatarGltf = gltf; }
+
+/**
+ * The source model's true rendered height, measured once when it loads.
+ *
+ * Measured on the pristine gltf.scene before anything has been scaled or parented, so it is
+ * a constant property of the asset. Re-measuring per clone would fold in whatever scale that
+ * clone's holder already had and compound the error every time a body is rebuilt.
+ */
+let avatarSourceHeight = 0;
+
+export function setAvatar(gltf) {
+  avatarGltf = gltf;
+  if (gltf) {
+    gltf.scene.updateWorldMatrix(true, true);
+    avatarSourceHeight = measureSkinnedHeight(gltf.scene);
+  }
+}
 
 /**
  * One player's body: the ninja model tinted to their colour, plus their personal lamp.
@@ -624,12 +677,14 @@ export function createPlayerMesh(colorHex, Q) {
     // code something it can freely rotate and lift.
     const holder = new THREE.Group();
     holder.add(root);
-    // Measure what the model actually renders as, rather than trusting either the raw
-    // geometry bounds (1.63, pre-Armature) or the node scale (0.01, centimetres) alone —
-    // compounding those two guesses is what produced first a 68x giant and then a 1.6cm
-    // speck. Measuring the assembled result gets it right regardless of export units.
-    const measured = new THREE.Box3().setFromObject(root);
-    const height = Math.max(0.0001, measured.max.y - measured.min.y);
+    // Measure what the model actually RENDERS as.
+    //
+    // Box3.setFromObject cannot be used here: on a SkinnedMesh it reports the bind-pose
+    // bounds and ignores the bone transforms, so it happily returns "1.35 units" for a body
+    // that rasterises 128 units tall — a 95x error that reads on screen as flat slabs of
+    // colour clipped by the near plane, and which no amount of tuning the target height can
+    // fix. The skinned vertex positions are the only source of truth.
+    const height = Math.max(0.0001, avatarSourceHeight);
     holder.scale.setScalar(AVATAR_HEIGHT / height);
     holder.rotation.y = Math.PI;     // it faces +z; players walk toward -z
 

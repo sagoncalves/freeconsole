@@ -246,10 +246,29 @@
     engage(e.pointerId, e.buttons === 0 ? null : keyAt(e.clientX, e.clientY));
   }, { passive: false });
 
+  /**
+   * Release is keyed on the pointer id and nothing else — not the target, not the position.
+   * Where the finger comes up is irrelevant: off the button, off the pad, past the edge of
+   * the screen, over the banner. That is what makes "lift outside the button" safe.
+   *
+   * These are bound on window with capture:true so they still arrive if something inside
+   * the page stops propagation, and so a lift over an element outside body's subtree (the
+   * fixed banner, the scrollbar gutter) is still seen.
+   */
   function release(e) { engage(e.pointerId, null); }
-  document.addEventListener("pointerup", release);
-  document.addEventListener("pointercancel", release);
-  document.addEventListener("lostpointercapture", release);
+  window.addEventListener("pointerup", release, true);
+  window.addEventListener("pointercancel", release, true);
+
+  // iOS can end a touch without a usable pointerup when the finger leaves the element it
+  // started on. touchend/touchcancel always fire, so use them as an independent net.
+  // Touch identifiers and pointer ids are different number spaces, so a single ended touch
+  // cannot be mapped back to one entry — but when the last finger leaves the glass nothing
+  // can still legitimately be held, and that case alone is safe to act on.
+  function touchRelease(e) {
+    if (e.touches.length === 0) releaseAll();
+  }
+  window.addEventListener("touchend", touchRelease, true);
+  window.addEventListener("touchcancel", touchRelease, true);
 
   // Belt and braces for the events that genuinely never arrive: an OS gesture that steals
   // the touch, a call coming in, the tab going away mid-press.
