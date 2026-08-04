@@ -523,15 +523,15 @@ const BONES = {
 function cloneSkinned(source) {
   const root = source.clone(true);
 
-  // Map original bone -> cloned bone by walking both trees in the same order.
-  const boneMap = new Map();
-  const srcNodes = [];
-  const dstNodes = [];
-  source.traverse((o) => srcNodes.push(o));
-  root.traverse((o) => dstNodes.push(o));
-  for (let i = 0; i < srcNodes.length; i++) {
-    if (srcNodes[i].isBone) boneMap.set(srcNodes[i], dstNodes[i]);
-  }
+  // Map original bone -> cloned bone BY NAME.
+  //
+  // Pairing them by traverse index looks equivalent and is not: the clone's children can be
+  // visited in a different order, so an index map silently pairs a bone with the wrong one.
+  // The symptom is brutal and hard to read — the mesh sits at the player's feet while its
+  // skeleton is somewhere else entirely (hips at z=98 in a 30-deep aisle), so bodies render
+  // stacked on each other or vanish off the map. Bone names in this rig are unique.
+  const boneByName = new Map();
+  root.traverse((o) => { if (o.isBone) boneByName.set(o.name, o); });
 
   // Rebuild every skinned mesh's skeleton from the cloned bones, keeping the original
   // inverse bind matrices — those are bind-pose data and must not be recomputed.
@@ -540,8 +540,8 @@ function cloneSkinned(source) {
   let k = 0;
   root.traverse((o) => {
     if (!o.isSkinnedMesh) return;
-    const original = srcSkinned[k++];
-    const bones = original.skeleton.bones.map((b) => boneMap.get(b) || b);
+    const original = srcSkinned[k++] || srcSkinned[0];
+    const bones = original.skeleton.bones.map((b) => boneByName.get(b.name) || b);
     o.skeleton = new THREE.Skeleton(bones, original.skeleton.boneInverses);
     o.bind(o.skeleton, o.bindMatrix);
   });

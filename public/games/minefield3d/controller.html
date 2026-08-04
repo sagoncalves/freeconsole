@@ -178,18 +178,18 @@
     freeconsole.message(FreeConsole.SCREEN, { t: "hold", k: key, v: value });
   }
 
-  function releaseAll() {
-    for (var k in held) if (held[k]) sendHold(k, false);
-    var downs = document.querySelectorAll(".dir.down-active");
-    for (var i = 0; i < downs.length; i++) downs[i].classList.remove("down-active");
-  }
-
   /**
    * Pointer routing. Directions come from document-level events rather than per-element
    * listeners, so a thumb sliding from one arrow to another switches direction without
    * lifting — which is what walking a diagonal around a mine you just lit requires.
+   *
+   * A held arrow is never state in its own right: `held` and the `down-active` classes are
+   * both *derived*, every time, from which pointers are currently down on which element.
+   * That is the whole defence against a stuck button — there is no path that can turn a
+   * hold on without a live pointer to justify it, so the worst a dropped `pointerup` can do
+   * is survive until the next reconcile, and every exit route reconciles.
    */
-  var active = Object.create(null);
+  var active = new Map();
 
   function keyAt(x, y) {
     var el = document.elementFromPoint(x, y);
@@ -200,50 +200,84 @@
     return null;
   }
 
-  function engage(pointerId, el) {
-    var prev = active[pointerId];
-    if (prev === el) return;
+  /** Recompute holds + highlights from `active`. The single writer for both. */
+  function reconcile() {
+    var want = { up: false, down: false, left: false, right: false };
+    active.forEach(function (el) {
+      if (el && el.dataset && el.dataset.hold in want) want[el.dataset.hold] = true;
+    });
+    for (var k in want) sendHold(k, want[k]);
 
-    if (prev && prev.dataset.hold) {
-      var stillHeld = false;
-      for (var id in active) if (Number(id) !== pointerId && active[id] === prev) stillHeld = true;
-      if (!stillHeld) sendHold(prev.dataset.hold, false);
-      prev.classList.remove("down-active");
+    var dirs = document.querySelectorAll(".dir[data-hold]");
+    for (var i = 0; i < dirs.length; i++) {
+      dirs[i].classList.toggle("down-active", !!want[dirs[i].dataset.hold]);
     }
+  }
 
-    active[pointerId] = el;
-    if (!el) return;
-    el.classList.add("down-active");
-    sendHold(el.dataset.hold, true);
+  function releaseAll() {
+    active.clear();
+    reconcile();
+  }
+
+  function engage(pointerId, el) {
+    if (active.get(pointerId) === el) return;
+    if (el) active.set(pointerId, el);
+    else active.delete(pointerId);
+    reconcile();
   }
 
   document.addEventListener("pointerdown", function (e) {
     if (over) { again(); return; }
     if (e.target && e.target.classList && e.target.classList.contains("q")) return;
     e.preventDefault();
+
+    // Take explicit capture so move/up are delivered to us even if the element under the
+    // finger changes, is removed, or the pad turns to pointer-events:none mid-touch — the
+    // usual way an up goes missing and leaves the arrow lit.
+    try { document.documentElement.setPointerCapture(e.pointerId); } catch (err) { /* not fatal */ }
     engage(e.pointerId, keyAt(e.clientX, e.clientY));
   }, { passive: false });
 
   document.addEventListener("pointermove", function (e) {
-    if (!(e.pointerId in active)) return;
+    if (!active.has(e.pointerId)) return;
     e.preventDefault();
-    engage(e.pointerId, keyAt(e.clientX, e.clientY));
+    // A pointer that is no longer pressed (buttons === 0) had its up swallowed somewhere.
+    // Treat the next move as the release rather than waiting for an up that will not come.
+    engage(e.pointerId, e.buttons === 0 ? null : keyAt(e.clientX, e.clientY));
   }, { passive: false });
 
-  function release(e) {
-    engage(e.pointerId, null);
-    delete active[e.pointerId];
-  }
+  function release(e) { engage(e.pointerId, null); }
   document.addEventListener("pointerup", release);
   document.addEventListener("pointercancel", release);
+  document.addEventListener("lostpointercapture", release);
+
+  // Belt and braces for the events that genuinely never arrive: an OS gesture that steals
+  // the touch, a call coming in, the tab going away mid-press.
+  window.addEventListener("blur", releaseAll);
+  window.addEventListener("pagehide", releaseAll);
+  document.addEventListener("contextmenu", function (e) { e.preventDefault(); });
 
   document.addEventListener("visibilitychange", function () {
     if (document.hidden) {
       releaseAll();
-      for (var id in active) delete active[id];
       freeconsole.message(FreeConsole.SCREEN, { t: "release" });
     }
   });
+
+  /**
+   * Last resort, and deliberately not a timer. There is no API that answers "is pointer N
+   * still down", so a periodic sweep can only guess — and a wrong guess drops a finger that
+   * is genuinely held, which is worse than the stuck arrow it would be trying to clear.
+   * Instead: any fresh touch that finds no other pointer down proves the old ids are dead.
+   */
+  document.addEventListener("pointerdown", function (e) {
+    if (e.isPrimary && active.size) {
+      var dead = [];
+      active.forEach(function (el, id) { if (id !== e.pointerId) dead.push(id); });
+      for (var i = 0; i < dead.length; i++) active.delete(dead[i]);
+      if (dead.length) reconcile();
+    }
+  }, true);
 
   function again() {
     over = false;
