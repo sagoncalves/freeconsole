@@ -321,32 +321,40 @@ export function tileRevealFor(round, p, x, z) {
   return (1 - held / round.level.sonarHold) * edge;
 }
 
-/** The killer walks up the aisle at a constant rate and never stops. */
+/**
+ * The crusher: a full-width press that grinds up the aisle and never stops.
+ *
+ * It does not chase anybody. It spans the entire width of the aisle and kills whatever is at
+ * its depth, so there is no dodging sideways and no benefit to being the least interesting
+ * target in the room. The only defence is distance, which is exactly why losing legs is the
+ * thing to be afraid of — a machine you cannot juke turns a limp into a countdown.
+ *
+ * Because it is a line rather than a pursuer, it is also completely predictable: players can
+ * always know precisely how much time they have. The dread comes from the arithmetic, not
+ * from wondering who it has picked.
+ */
 function stepKiller(round, dt) {
   const { level } = round;
   if (round.t < level.killerDelay) return;
 
   round.killerZ -= level.killerSpeed * dt;
 
-  let target = null;
+  // The press sits across the middle of the aisle for rendering purposes only; nothing reads
+  // killerX to decide a death.
+  round.killerX = level.cols / 2;
+
+  // It never grinds past the last living player. Without this it leaves the aisle entirely
+  // and anyone hanging back at the spawn line is safe forever — the round could never end.
+  let hindmost = -Infinity;
+  for (const p of round.players.values()) {
+    if (p.state === ALIVE && p.z > hindmost) hindmost = p.z;
+  }
+  if (isFinite(hindmost)) round.killerZ = Math.max(round.killerZ, hindmost - 0.35);
+
+  // Anything at or behind the face of the press is crushed, whatever its x.
   for (const p of round.players.values()) {
     if (p.state !== ALIVE) continue;
-    if (!target || p.z > target.z) target = p;
-  }
-  if (target) {
-    const dx = target.x - round.killerX;
-    round.killerX += Math.sign(dx) * Math.min(Math.abs(dx), level.killerSpeed * 0.8 * dt);
-
-    // It never gets ahead of the last living player. Without this it walks out of the aisle
-    // and anyone hanging back is safe forever — the round could then never end.
-    round.killerZ = Math.max(round.killerZ, target.z - 0.35);
-  }
-
-  for (const p of round.players.values()) {
-    if (p.state !== ALIVE) continue;
-    if (Math.hypot(p.x - round.killerX, p.z - round.killerZ) < KILLER_CATCH_R) {
-      kill(round, p, "killer");
-    }
+    if (p.z >= round.killerZ - KILLER_CATCH_R) kill(round, p, "crusher");
   }
 }
 

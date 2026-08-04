@@ -104,7 +104,7 @@ export function createScene(canvas, level, Q) {
  * view, and a fixed camera would either lose the players at the far end or render the whole
  * thing too small to read.
  */
-export function updateCamera(ctx, lead, tail, dt) {
+export function updateCamera(ctx, lead, tail, dt, crusherZ) {
   const { camera, level } = ctx;
 
   // Frame the whole pack, not just whoever is winning. Following the leader alone puts every
@@ -114,8 +114,16 @@ export function updateCamera(ctx, lead, tail, dt) {
 
   // Stand behind the straggler, far enough back that the leader is still comfortably in
   // frame, and rise with the spread so a strung-out group stays inside the view.
-  const wantZ = tail + 8.5;
+  let wantZ = tail + 8.5;
   const wantY = 10.5 + spread * 0.42;
+
+  // Never sit behind the crusher. It spans the aisle, so a camera further back than its face
+  // is looking at the flat unlit back of a slab that fills the frame — the players vanish
+  // and the one thing chasing them becomes invisible. Staying in front keeps its lit face,
+  // and the shrinking gap to it, permanently readable.
+  if (typeof crusherZ === "number" && isFinite(crusherZ)) {
+    wantZ = Math.min(wantZ, crusherZ - 1.6);
+  }
 
   // Ease toward it. A camera that snaps to a player who just got thrown by a blast is
   // nauseating; a slow follow also sells the aisle as a long space you are moving through.
@@ -247,11 +255,31 @@ function buildWalls(level) {
     group.add(wall);
   }
 
-  // A back wall behind the spawn line, so the aisle is a corridor rather than an open plain
-  // — and so the killer visibly comes *out of* something.
-  const back = new THREE.Mesh(new THREE.BoxGeometry(level.cols + t * 2, h, t), mat);
+  // The back wall behind the spawn line, so the aisle is a corridor rather than an open
+  // plain — and so the killer visibly comes *out of* something.
+  //
+  // It has to be see-through. The camera sits behind the straggler, which at the start of a
+  // round is behind this wall, so a solid back panel is the first thing the players ever see
+  // and it hides the entire round from them. Rendering it as glass keeps the space closed
+  // without ever blocking the shot.
+  const backMat = new THREE.MeshBasicMaterial({
+    color: 0x1a2740, transparent: true, opacity: 0.16,
+    depthWrite: false, side: THREE.DoubleSide,
+  });
+  const back = new THREE.Mesh(new THREE.BoxGeometry(level.cols + t * 2, h, t), backMat);
   back.position.set(level.cols / 2, h / 2, level.rows + t / 2);
   group.add(back);
+
+  // A thin lip along the top edge, so the boundary still reads as a wall rather than as a
+  // smudge. Kept genuinely hairline: seen from a camera that sits behind and above it, this
+  // edge crosses the middle of the shot, and any real thickness becomes a beam lying across
+  // the players.
+  const lipMat = new THREE.MeshBasicMaterial({
+    color: 0x2a4266, transparent: true, opacity: 0.5, depthWrite: false,
+  });
+  const lip = new THREE.Mesh(new THREE.BoxGeometry(level.cols + t * 2, 0.02, t * 0.5), lipMat);
+  lip.position.set(level.cols / 2, h, level.rows + t / 2);
+  group.add(lip);
 
   return group;
 }
@@ -430,40 +458,65 @@ export function posePlayer(mesh, p, states) {
 /* ------------------------------------------------------------------- killer */
 
 /**
- * The killer. Never fully resolved — a tall dark shape with two points of light where eyes
- * would be. Rendering it plainly would make it a monster model; keeping it barely legible
- * keeps it a threat.
+ * The crusher: a wall-to-wall press grinding up the aisle.
+ *
+ * It is deliberately not a creature. There is no face to read and nothing to make eye
+ * contact with, because it is not choosing anybody — it spans the full width and takes
+ * whatever is in front of it. A machine communicates "you cannot dodge this, you can only
+ * outrun it", which is exactly the rule the sim enforces.
  */
-export function createKillerMesh(Q) {
+export function createKillerMesh(Q, level) {
   const group = new THREE.Group();
 
-  const bodyMat = new THREE.MeshBasicMaterial({ color: 0x05060d });
-  const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.34, 1.5, 4, 12), bodyMat);
-  body.position.y = 1.1;
+  const w = level.cols + 0.8;
+  const h = 2.6;
+
+  // The slab itself: heavy, matte, and completely featureless.
+  const bodyMat = new THREE.MeshStandardMaterial({
+    color: 0x0d1018, roughness: 0.85, metalness: 0.45,
+  });
+  const body = new THREE.Mesh(new THREE.BoxGeometry(w, h, 1.1), bodyMat);
+  body.position.y = h / 2;
+  if (Q.shadows) body.castShadow = true;
   group.add(body);
 
-  const eyeMat = new THREE.MeshBasicMaterial({ color: 0xff2e88 });
-  for (const dx of [-0.13, 0.13]) {
-    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.055, 8, 8), eyeMat);
-    eye.position.set(dx, 1.72, -0.28);
-    group.add(eye);
+  // The leading face, lit hot so the exact line of death is never ambiguous. Players must be
+  // able to judge the gap to it precisely, because that measurement is the whole game once
+  // somebody is limping.
+  const faceMat = new THREE.MeshBasicMaterial({ color: 0xff2e88 });
+  const face = new THREE.Mesh(new THREE.BoxGeometry(w, h * 0.92, 0.12), faceMat);
+  face.position.set(0, h / 2, -0.58);
+  group.add(face);
+
+  // Teeth along the bottom edge of the face — the one piece of detail it gets, and the thing
+  // that makes it read as a crusher rather than as a moving wall.
+  const toothMat = new THREE.MeshStandardMaterial({
+    color: 0x2a3550, roughness: 0.6, metalness: 0.7,
+  });
+  const teeth = Math.max(4, Math.round(level.cols));
+  for (let i = 0; i < teeth; i++) {
+    const tooth = new THREE.Mesh(new THREE.ConeGeometry(0.16, 0.5, 4), toothMat);
+    tooth.rotation.x = -Math.PI / 2;
+    tooth.position.set(-w / 2 + (w / teeth) * (i + 0.5), 0.3, -0.75);
+    group.add(tooth);
   }
 
-  // A dim red bloom it drags with it, so it is visible before it is identifiable.
-  const halo = new THREE.PointLight(0xff2e88, 2.2, 7, 2);
-  halo.position.y = 1.4;
-  group.add(halo);
-
+  // A band of light thrown on the floor ahead of the face, so the press announces its reach
+  // before it arrives.
   const auraMat = new THREE.MeshBasicMaterial({
-    color: 0xff2e88, transparent: true, opacity: 0.13,
+    color: 0xff2e88, transparent: true, opacity: 0.16,
     blending: THREE.AdditiveBlending, depthWrite: false,
   });
-  const aura = new THREE.Mesh(new THREE.CircleGeometry(2.4, 24), auraMat);
+  const aura = new THREE.Mesh(new THREE.PlaneGeometry(w, 5), auraMat);
   aura.rotation.x = -Math.PI / 2;
-  aura.position.y = 0.04;
+  aura.position.set(0, 0.04, -3.1);
   group.add(aura);
 
-  return { group, body, halo, aura };
+  const halo = new THREE.PointLight(0xff2e88, 3.2, 9, 2);
+  halo.position.set(0, 1.4, -1.2);
+  group.add(halo);
+
+  return { group, body, face, halo, aura };
 }
 
 /* ------------------------------------------------------------------- sonar */

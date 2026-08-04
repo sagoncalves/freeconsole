@@ -284,6 +284,50 @@ console.log("\nthe killer");
   const p2 = r2.players.get(1);
   run(r2, 40);
   ok("standing still gets you caught", p2.state === sim.DEAD, "(" + p2.state + ")");
+
+  /* The crusher is a full-width press, not a pursuer. These are the properties that make it
+     one, and each is a thing a stalking-monster implementation would get wrong. */
+
+  // It kills across the entire width at once — hugging a wall is not an escape.
+  const r3 = begin(0, 8, 3);
+  r3.mines.fill(0);
+  const edgeL = r3.players.get(1);
+  const edgeR = r3.players.get(2);
+  const mid = r3.players.get(3);
+  edgeL.x = 0.4;
+  edgeR.x = r3.cols - 0.4;
+  mid.x = r3.cols / 2;
+  for (const p of [edgeL, edgeR, mid]) p.z = r3.rows - 1;
+  r3.killerZ = r3.rows - 1;
+  r3.level = { ...r3.level, killerDelay: 0 };
+  run(r3, 0.1);
+  ok("the press kills across the full width",
+     [edgeL, edgeR, mid].every((p) => p.state === sim.DEAD),
+     "(" + [edgeL, edgeR, mid].map((p) => p.state).join(", ") + ")");
+
+  // It does not track anybody sideways: killerX stays centred no matter where players stand.
+  const r4 = begin(0, 8, 1);
+  r4.mines.fill(0);
+  const lone = r4.players.get(1);
+  lone.x = 0.4;                       // hard against one wall
+  lone.z = 4;                         // far ahead, so it is not caught immediately
+  r4.level = { ...r4.level, killerDelay: 0 };
+  run(r4, 2);
+  ok("the press never chases sideways",
+     Math.abs(r4.killerX - r4.cols / 2) < 1e-6,
+     "(killerX " + r4.killerX.toFixed(3) + ", player x " + lone.x.toFixed(2) + ")");
+
+  // Deaths it causes are attributed to the crusher, not to a stalker.
+  const r5 = begin(0, 8, 1);
+  r5.mines.fill(0);
+  const victim = r5.players.get(1);
+  r5.killerZ = victim.z;
+  r5.level = { ...r5.level, killerDelay: 0 };
+  run(r5, 0.1);
+  const death = r5.events.find((e) => e.type === "death");
+  ok("deaths are attributed to the crusher",
+     victim.state === sim.DEAD && death && death.cause === "crusher",
+     "(" + (death ? death.cause : "no death event") + ")");
 }
 
 /* ---- 8. the gate ---- */

@@ -190,7 +190,9 @@ const rings = new Map();      // id -> { mesh, mat }
 const printMeshes = [];       // { mesh, mat, print }
 const blasts = [];
 
-const killer = createKillerMesh(Q);
+// The crusher spans the aisle, so its geometry depends on the level's width and it is
+// rebuilt whenever the scene is.
+let killer = createKillerMesh(Q, round.level);
 ctx.world.add(killer.group);
 killer.group.visible = false;
 
@@ -208,7 +210,12 @@ function rebuildScene() {
   printMeshes.length = 0;
   blasts.length = 0;
 
+  // Rebuilt rather than re-parented: its width is the aisle's width, so carrying the old one
+  // across a level change would leave a crusher sized for the previous aisle.
+  killer = createKillerMesh(Q, round.level);
+  killer.group.visible = false;
   ctx.world.add(killer.group);
+
   for (const id of round.players.keys()) ensureBody(id);
   setGateOpen(ctx, round.exitOpen);
   document.getElementById("quality").textContent = tierName;
@@ -557,9 +564,10 @@ function frame(ts) {
     if (ring) updatePingRing(ring, p.ping, round.level);
   }
 
-  // The killer, only once it is actually in the aisle.
-  killer.group.visible = round.killerZ <= round.rows;
-  killer.group.position.set(round.killerX, 0, round.killerZ);
+  // The crusher, once it is actually in the aisle. It is always centred on the aisle's width
+  // — it spans the whole thing, so there is no lateral position to track.
+  killer.group.visible = round.killerZ <= round.rows + 1;
+  killer.group.position.set(round.cols / 2, 0, round.killerZ);
 
   syncPrints(dt);
 
@@ -583,7 +591,7 @@ function frame(ts) {
     if (p.z > tail) tail = p.z;
   }
   if (!isFinite(lead)) { lead = round.rows - 2; tail = round.rows - 2; }
-  updateCamera(ctx, lead, tail, dt);
+  updateCamera(ctx, lead, tail, dt, round.killerZ);
 
   if (shake > 0) {
     shake = Math.max(0, shake - dt * 2.6);
