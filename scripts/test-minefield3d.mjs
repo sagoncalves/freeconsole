@@ -442,6 +442,57 @@ console.log("\nlevels");
   });
 }
 
+/* ---- 11b. reconnecting ---- */
+console.log("\nreconnection");
+{
+  // A phone that reloads mid-round fires onConnect for an id that is already seated. That
+  // must keep the seat exactly as it was — position, legs, state — or the player is teleported
+  // back to the spawn line whole, mid-crossing.
+  const r = begin(0, 7, 2);
+  r.mines.fill(0);
+  r.level = { ...r.level, killerDelay: 999 };
+  const p = r.players.get(1);
+  p.x = 3.5;
+  sim.setInput(r, 1, "up", true);
+  run(r, 2);
+  p.legs = 1;
+  const before = { x: p.x, z: p.z, legs: p.legs, state: p.state };
+
+  const again = sim.addPlayer(r, 1);
+  ok("reconnecting returns the same seat", again === p);
+  ok("reconnecting preserves position",
+     again.x === before.x && again.z === before.z,
+     "(" + before.x.toFixed(2) + "," + before.z.toFixed(2) + " -> " + again.x.toFixed(2) + "," + again.z.toFixed(2) + ")");
+  ok("reconnecting preserves condition",
+     again.legs === before.legs && again.state === before.state,
+     "(legs " + again.legs + ", " + again.state + ")");
+
+  // And the roster must not grow.
+  ok("reconnecting does not duplicate the player", r.players.size === 2, "(" + r.players.size + ")");
+
+  // A genuinely new phone arriving mid-round is a spectator: not alive (so it cannot be
+  // killed or hold the round open) and not escaped (so it is not counted as a survivor).
+  const fresh = sim.addPlayer(r, 9);
+  fresh.state = sim.WAITING;
+  ok("WAITING is its own state",
+     sim.WAITING !== sim.ALIVE && sim.WAITING !== sim.DEAD && sim.WAITING !== sim.ESCAPED);
+
+  let alive = 0;
+  for (const q of r.players.values()) if (q.state === sim.ALIVE) alive++;
+  ok("a spectator is not alive", alive === 2, "(" + alive + ")");
+
+  // The round must still be able to end with a spectator seated.
+  for (const q of r.players.values()) if (q.state === sim.ALIVE) q.state = sim.DEAD;
+  run(r, 0.1);
+  ok("a spectator does not hold the round open", r.phase === "over", "(" + r.phase + ")");
+  ok("a spectator is not counted as a survivor", !r.escapedOrder.includes(9));
+
+  // The next round seats them normally.
+  sim.startRound(r);
+  ok("the next round revives everyone",
+     [...r.players.values()].every((q) => q.state === sim.ALIVE && q.legs === 2));
+}
+
 /* ---- 12b. the renderer's gate must agree with the sim's ---- */
 console.log("\ngate geometry");
 {

@@ -48,6 +48,9 @@
   .chip.crawl .legs { color: var(--hot); }
   .chip.dead { opacity: .3; filter: grayscale(1); }
   .chip.out { border-color: var(--lime); box-shadow: 0 0 12px rgba(157,255,79,.25); }
+  /* Seated but sitting this round out — joined or reloaded after it started. */
+  .chip.waiting { opacity: .5; }
+  .chip.waiting .legs { color: var(--text-faint); }
 
   #stage { flex: 1; position: relative; min-height: 0; }
   canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
@@ -115,6 +118,7 @@ import * as sim from "/games/minefield3d/sim.js?v=1";
 import { LEVELS, getLevel } from "/games/minefield3d/levels.js?v=1";
 import {
   createScene, updateCamera, updateFloor, setGateOpen, resize,
+  buildMineField, updateMineField,
   createPlayerMesh, posePlayer, createKillerMesh,
   createPingRing, updatePingRing, createBlast, stepBlast, createPrintMesh,
 } from "/games/minefield3d/scene.js?v=1";
@@ -196,6 +200,11 @@ let killer = createKillerMesh(Q, round.level);
 ctx.world.add(killer.group);
 killer.group.visible = false;
 
+// Every mine as one instanced draw call. Rebuilt with the scene, since its capacity is the
+// aisle's tile count.
+let mineField = buildMineField(round, sim, Q);
+ctx.world.add(mineField.mesh);
+
 /** Rebuild every scene object that depends on the quality tier. */
 function rebuildScene() {
   // Drop the old renderer's GPU resources before making another one, or switching tiers a
@@ -215,6 +224,9 @@ function rebuildScene() {
   killer = createKillerMesh(Q, round.level);
   killer.group.visible = false;
   ctx.world.add(killer.group);
+
+  mineField = buildMineField(round, sim, Q);
+  ctx.world.add(mineField.mesh);
 
   for (const id of round.players.keys()) ensureBody(id);
   setGateOpen(ctx, round.exitOpen);
@@ -267,13 +279,33 @@ function dropBody(id) {
 /* ------------------------------------------------------------------- roster */
 
 function joinPlayer(deviceId) {
-  if (round.players.has(deviceId)) { sim.clearInput(round, deviceId); return; }
-  sim.addPlayer(round, deviceId);
+  // Already seated — a reconnect after a phone reload, or a duplicate onConnect. Keep the
+  // seat and everything in it (position, legs, state); only drop whatever the dead session
+  // left held, since a stale key is what makes a player refuse to move on the way back.
+  //
+  // The one thing that must happen is a *forced* re-broadcast: the returning controller has
+  // no state at all, and the change-keyed broadcast would otherwise stay silent until some
+  // unrelated thing happened, leaving that phone showing "Connecting…" for the rest of the
+  // round. This is the reload bug.
+  if (round.players.has(deviceId)) {
+    sim.clearInput(round, deviceId);
+    ensureBody(deviceId);
+    renderRoster();
+    broadcastState(true);
+    return;
+  }
+
+  const p = sim.addPlayer(round, deviceId);
+
+  // Joining mid-round must not drop somebody into the middle of a live minefield at the
+  // default spawn. They sit the round out and are seated properly by the next startRound.
+  if (round.phase === "running") p.state = sim.WAITING;
+
   ensureBody(deviceId);
   renderRoster();
   renderSlots();
   if (round.phase === "briefing") maybeStart();
-  broadcastState();
+  broadcastState(true);
 }
 
 function leavePlayer(deviceId) {
@@ -406,12 +438,14 @@ function renderRoster() {
     chip.className = "chip";
     if (p.state === sim.DEAD) chip.classList.add("dead");
     if (p.state === sim.ESCAPED) chip.classList.add("out");
-    if (p.legs === 1) chip.classList.add("hurt");
-    if (p.legs === 0) chip.classList.add("crawl");
+    if (p.state === sim.WAITING) chip.classList.add("waiting");
+    if (p.state === sim.ALIVE && p.legs === 1) chip.classList.add("hurt");
+    if (p.state === sim.ALIVE && p.legs === 0) chip.classList.add("crawl");
     chip.style.color = colorOf(id);
 
     const label = p.state === sim.ESCAPED ? "OUT"
       : p.state === sim.DEAD ? "✕"
+      : p.state === sim.WAITING ? "next"
       : p.legs === 2 ? "▮▮" : p.legs === 1 ? "▮" : "crawl";
 
     chip.innerHTML = "<span>" + escapeHtml(nameOf(id)) + '</span><span class="legs">' + label + "</span>";
@@ -451,7 +485,10 @@ function showWaiting() {
 
 function showResults() {
   const escaped = round.escapedOrder;
-  const lost = [...round.players.values()].filter((p) => p.state !== sim.ESCAPED);
+  // Spectators — phones that joined or reloaded mid-round — are in neither column. They did
+  // not get out and they were never in danger, so listing them either way is a lie.
+  const lost = [...round.players.values()]
+    .filter((p) => p.state !== sim.ESCAPED && p.state !== sim.WAITING);
 
   let rows = "";
   escaped.forEach((id, i) => {
@@ -557,7 +594,7 @@ function frame(ts) {
   // Bodies and their personal rings.
   for (const [id, p] of round.players) {
     const mesh = bodies.get(id) || ensureBody(id);
-    mesh.group.visible = p.state !== sim.ESCAPED;
+    mesh.group.visible = p.state !== sim.ESCAPED && p.state !== sim.WAITING;
     posePlayer(mesh, p, sim);
 
     const ring = rings.get(id);
@@ -579,6 +616,7 @@ function frame(ts) {
   }
 
   updateFloor(ctx, round, sim, ts);
+  updateMineField(mineField, round, sim, Q, ts);
 
   // The camera frames the whole surviving pack — from whoever is closest to the gate back to
   // whoever is furthest behind. A camera that tracks only the leader loses every slower

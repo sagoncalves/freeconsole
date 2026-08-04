@@ -39,7 +39,10 @@ export const LEVELS = [
     // fraction of it, which is what makes standing near someone else meaningful.
     cols: 11,
     rows: 30,
-    mineDensity: 0.15,
+    // Roughly 0.8 mines per row. Denser than this and every single row contains a hazard,
+    // which stops the field being something you read and turns it into a toll you pay —
+    // measured at 0.15, only 13% of survivors still had both legs at the gate.
+    mineDensity: 0.09,
 
     // The personal ping. Radius is the whole game: it must cover enough ground to plan a
     // couple of steps, and little enough that the far end of the aisle is always unknown.
@@ -66,7 +69,7 @@ export const LEVELS = [
     tagline: "The batteries are going. You can see about half as far.",
     cols: 11,
     rows: 30,
-    mineDensity: 0.17,
+    mineDensity: 0.11,
     sonarPeriod: 2.2,
     sonarRadius: 3.0,
     sonarHold: 0.7,
@@ -82,7 +85,7 @@ export const LEVELS = [
     tagline: "One ping every four seconds. Count them.",
     cols: 11,
     rows: 32,
-    mineDensity: 0.16,
+    mineDensity: 0.105,
     sonarPeriod: 4,            // the long gap between pings is the level
     sonarRadius: 4.0,
     sonarHold: 0.7,
@@ -98,7 +101,7 @@ export const LEVELS = [
     tagline: "It only opens once. Decide who that is on the way.",
     cols: 9,
     rows: 32,
-    mineDensity: 0.18,
+    mineDensity: 0.12,
     sonarPeriod: 3,
     sonarRadius: 3.2,
     sonarHold: 0.6,

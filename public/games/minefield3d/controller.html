@@ -293,6 +293,14 @@
       subEl.textContent = "your light went out";
       return;
     }
+    if (state === "waiting") {
+      // Joined or reloaded mid-round. Say so plainly — the pad is locked and without this
+      // the phone looks broken rather than early.
+      conditionEl.classList.add("gone");
+      conditionEl.textContent = "Next round";
+      subEl.textContent = "you joined mid-crossing";
+      return;
+    }
     if (legs >= 2) {
       conditionEl.classList.add("ok");
       conditionEl.textContent = "Walking";

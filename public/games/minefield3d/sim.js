@@ -39,6 +39,14 @@ export const ALIVE = "alive";
 export const DEAD = "dead";
 export const ESCAPED = "escaped";
 
+/**
+ * Seated but not in this round — a phone that joined or reloaded while a round was already
+ * running. Distinct from ESCAPED on purpose: a spectator must not appear in the survivor
+ * roll, and distinct from DEAD so the round does not treat them as a casualty. They are
+ * seated normally by the next startRound.
+ */
+export const WAITING = "waiting";
+
 /* ----------------------------------------------------------------------- rng */
 
 /** Mulberry32 — a seeded field can be reproduced exactly when something goes wrong. */

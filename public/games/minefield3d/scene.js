@@ -201,7 +201,10 @@ export function updateFloor(ctx, round, sim, now) {
     for (let x = 0; x < cols; x++) lit[z * cols + x] = sim.tileReveal(round, x, z);
   }
 
-  const g = COL.ground, gl = COL.groundLit, m = COL.mine, cr = COL.crater;
+  // Mines are deliberately NOT tinted into the floor. Painting them onto tile vertices made
+  // each one render as the blocky quad it sits on — a diffuse geometric smear rather than an
+  // object. They are drawn as real discs instead; see buildMineField.
+  const g = COL.ground, gl = COL.groundLit, cr = COL.crater;
 
   for (let i = 0; i < count; i++) {
     const tx = vertexTile[i * 2];
@@ -214,11 +217,6 @@ export function updateFloor(ctx, round, sim, now) {
       // Unlit ground. Not pure black — a faint grid still has to be legible so players can
       // judge distance, or the aisle stops reading as a space at all.
       r = g.r; gg = g.g; b = g.b;
-    } else if (sim.mineAt(round, tx, tz)) {
-      // A mine caught in someone's light.
-      r = g.r + (m.r - g.r) * l;
-      gg = g.g + (m.g - g.g) * l;
-      b = g.b + (m.b - g.b) * l;
     } else if (sim.craterAt(round, tx, tz)) {
       r = g.r + (cr.r - g.r) * l;
       gg = g.g + (cr.g - g.g) * l;
@@ -235,6 +233,97 @@ export function updateFloor(ctx, round, sim, now) {
   }
 
   floor.geo.attributes.color.needsUpdate = true;
+}
+
+/* -------------------------------------------------------------------- mines */
+
+/**
+ * Every mine in the aisle as a single InstancedMesh.
+ *
+ * Mines used to be painted into the floor's vertex colours, which meant a mine was rendered
+ * as the square tile it happened to occupy — the blocky, washed-out shape that made them read
+ * as terrain rather than as objects. Here each one is a real disc with a hard rim, lit from
+ * black to full colour by whatever sonar currently touches it.
+ *
+ * One instanced draw call covers the whole field, so this costs no more than the old approach
+ * even with a hundred mines on screen.
+ */
+export function buildMineField(round, sim, Q) {
+  // A ring rather than a filled circle: the bright rim is what makes a mine read as a machined
+  // object at a glance, and the hole in the middle keeps it from becoming a glowing blob.
+  const geo = new THREE.RingGeometry(0.17, 0.29, 20);
+  geo.rotateX(-Math.PI / 2);
+
+  // Plain white base: the per-instance colour multiplies into it. Setting `vertexColors`
+  // here instead would look right but render black — the ring geometry carries no colour
+  // attribute, so the shader would multiply by an undefined varying.
+  const mat = new THREE.MeshBasicMaterial({
+    color: 0xffffff, transparent: true, depthWrite: false,
+    side: THREE.DoubleSide,
+  });
+
+  // Capacity is every tile that could ever hold a mine; the count shrinks as they detonate.
+  const max = round.cols * round.rows;
+  const mesh = new THREE.InstancedMesh(geo, mat, max);
+  mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  mesh.count = 0;
+  mesh.frustumCulled = false;
+
+  const colors = new Float32Array(max * 3);
+  mesh.instanceColor = new THREE.InstancedBufferAttribute(colors, 3);
+  mesh.instanceColor.setUsage(THREE.DynamicDrawUsage);
+
+  return { mesh, colors, dummy: new THREE.Object3D(), tiles: new Int32Array(max * 2), lastUpdate: 0 };
+}
+
+/**
+ * Re-place and re-light every live mine.
+ *
+ * Runs on the same budget as the floor: the reveal is a smooth fade, not an animation, and a
+ * TV cannot afford to rebuild instance matrices at 60fps.
+ */
+export function updateMineField(field, round, sim, Q, now) {
+  const minInterval = 1000 / Math.max(1, Q.floorHz);
+  if (now - field.lastUpdate < minInterval) return;
+  field.lastUpdate = now;
+
+  const { mesh, colors, dummy } = field;
+  const mine = COL.mine;
+  let n = 0;
+
+  for (let z = 0; z < round.rows; z++) {
+    for (let x = 0; x < round.cols; x++) {
+      if (!sim.mineAt(round, x, z)) continue;
+
+      const lit = sim.tileReveal(round, x, z);
+      // Unlit mines are not drawn at all. A mine nobody's light is touching must be perfectly
+      // invisible — that is the entire game.
+      if (lit <= 0.02) continue;
+
+      dummy.position.set(x + 0.5, 0.045, z + 0.5);
+      // Bloom slightly as the light hits, so a mine appearing reads as a discovery rather
+      // than as a fade-in.
+      const s = 0.85 + lit * 0.35;
+      dummy.scale.set(s, 1, s);
+      dummy.rotation.set(0, 0, 0);
+      dummy.updateMatrix();
+      mesh.setMatrixAt(n, dummy.matrix);
+
+      // Gamma-ish curve so a mine at the edge of someone's reach is a faint hint while one
+      // squarely inside it is unmistakable.
+      const k = Math.pow(lit, 0.65);
+      colors[n * 3] = mine.r * k;
+      colors[n * 3 + 1] = mine.g * k;
+      colors[n * 3 + 2] = mine.b * k;
+      n++;
+    }
+  }
+
+  mesh.count = n;
+  if (n > 0) {
+    mesh.instanceMatrix.needsUpdate = true;
+    mesh.instanceColor.needsUpdate = true;
+  }
 }
 
 /* -------------------------------------------------------------------- walls */
