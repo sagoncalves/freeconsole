@@ -117,12 +117,14 @@ export function updateCamera(ctx, lead, tail, dt, crusherZ) {
   let wantZ = tail + 8.5;
   const wantY = 10.5 + spread * 0.42;
 
-  // Never sit behind the crusher. It spans the aisle, so a camera further back than its face
-  // is looking at the flat unlit back of a slab that fills the frame — the players vanish
-  // and the one thing chasing them becomes invisible. Staying in front keeps its lit face,
-  // and the shrinking gap to it, permanently readable.
+  // Never sit behind the crusher — a camera further back than its face sees only the flat
+  // unlit back of a slab that fills the frame. But the clamp must not drag the camera onto
+  // the players either: pulled all the way to the crusher it ends up standing on whoever is
+  // hindmost, who then fills the screen while everyone else is a speck. Keep a floor of a
+  // few units behind the straggler, so the shot degrades to "tight" rather than "inside
+  // someone's head".
   if (typeof crusherZ === "number" && isFinite(crusherZ)) {
-    wantZ = Math.min(wantZ, crusherZ - 1.6);
+    wantZ = Math.min(wantZ, Math.max(crusherZ - 1.6, tail + 4.5));
   }
 
   // Ease toward it. A camera that snaps to a player who just got thrown by a blast is
@@ -489,13 +491,16 @@ export function setGateOpen(ctx, open) {
 /**
  * How tall a player stands, in world units (tiles).
  *
- * Deliberately about twice life size relative to the aisle. At a realistic 1.05 the ninja
- * rendered ~12 pixels tall from the game's camera — too small for the model, the run cycle,
- * or a missing leg to be visible at all, which made the whole avatar pure cost. Oversizing
- * reads as toy / board-game proportions and keeps the full length of the aisle in frame,
- * which matters more here than anatomical scale: the run to the gate is the tension.
+ * Deliberately larger than life relative to the aisle. At a realistic ~1.0 the ninja rendered
+ * about 12 pixels tall from the game's camera — too small for the model, the run cycle or a
+ * missing leg to be visible at all, which made the whole avatar pure cost.
+ *
+ * It cannot go much past this, though: the camera rides just behind the hindmost player, so
+ * anyone near it is seen close up. At 2.0 a straggler filled a third of the screen. This is
+ * the value where a player reads clearly down the aisle without swallowing the frame when
+ * they are the one being followed.
  */
-const AVATAR_HEIGHT = 2.0;
+const AVATAR_HEIGHT = 1.35;
 
 const BONES = {
   LeftUpLeg: 1, RightUpLeg: 1,
