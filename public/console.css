@@ -13,6 +13,15 @@
 @import url("https://fonts.googleapis.com/css2?family=Monoton&family=Chakra+Petch:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap");
 
 :root {
+  /* Space a controller's top bar must leave on its right so it does not collide with the
+     shell's master-only "♛ Game list" pill (#exitGame in src/pages/play.astro), which is
+     position:fixed over the game iframe's top-right corner. The pill is ~118px wide plus
+     its own 12px offset; this rounds up so a longer label still clears. Only controllers
+     that put a control at the right end of their top bar need it — see chess3d and
+     roperaid. Change it here rather than per-game, so the reservation cannot drift out of
+     sync with the pill it is reserving for. */
+  --exit-gutter: 142px;
+
   /* Cabinet interior - not pure black, so glow has something to sit on. */
   --ink-900: #05060d;
   --ink-800: #0a0c18;

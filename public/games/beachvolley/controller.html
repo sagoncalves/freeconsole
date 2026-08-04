@@ -25,6 +25,15 @@
     display: flex; align-items: center; gap: 9px; flex-shrink: 0;
     padding: 10px 16px 7px;
   }
+  /* Held level, the stage is NOT rotated, so this bar's right end really is the screen's
+     top-right corner - where the shell pins its master-only "♛ Game list" pill. That is the
+     one orientation where the pill can cover the gear, so the inset is scoped to it. In
+     portrait the stage is turned a quarter turn (see #stage below) and the bar runs down a
+     screen EDGE instead, landing the gear nowhere near the pill; padding it there would
+     indent the bar for no reason. */
+  @media (orientation: landscape) {
+    .bar { padding-right: var(--exit-gutter, 142px); }
+  }
   .dot {
     width: 22px; height: 22px; border-radius: 7px; flex-shrink: 0;
     background: var(--me); box-shadow: 0 0 14px var(--me);

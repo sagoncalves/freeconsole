@@ -18,7 +18,13 @@
   }
 
   .head { padding: max(10px, env(safe-area-inset-top)) 16px 6px; flex-shrink: 0; }
-  .whoami { display: flex; align-items: center; gap: 9px; margin-bottom: 8px; }
+  /* Only this row is inset for the shell's fixed "♛ Game list" pill, not the whole .head:
+     the gear is the only thing up here that the pill can reach, and insetting the head
+     would needlessly shorten the status line and progress bar below it. */
+  .whoami {
+    display: flex; align-items: center; gap: 9px; margin-bottom: 8px;
+    padding-right: calc(var(--exit-gutter, 142px) - 16px);
+  }
   .dot {
     width: 26px; height: 26px; border-radius: 50%;
     background: var(--me); box-shadow: 0 0 16px var(--me);

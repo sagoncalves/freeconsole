@@ -18,7 +18,12 @@
 
   .bar {
     display: flex; align-items: center; gap: 10px;
-    padding: max(12px, env(safe-area-inset-top)) 16px 8px;
+    /* The right padding clears the shell's "♛ Game list" pill, which is position:fixed in
+       this same iframe's top-right corner (see #exitGame in src/pages/play.astro). Both it
+       and the gear are master-only, so on the one device that has a gear they landed on top
+       of each other. Reserving the pill's width here instead of moving the gear keeps the
+       gear where every other controller puts it — at the right end of the top bar. */
+    padding: max(12px, env(safe-area-inset-top)) var(--exit-gutter, 142px) 8px 16px;
   }
   .side-dot {
     width: 26px; height: 26px; border-radius: 8px; flex-shrink: 0;
@@ -31,7 +36,15 @@
     font-family: var(--font-mono); font-size: 10px; letter-spacing: .16em;
     text-transform: uppercase; color: var(--text-faint);
   }
-  #status { font-size: 15px; color: var(--text); }
+  /* One line, clipped. The bar is now narrower than it was (see the exit-pill gutter on
+     .bar), and the longest status - "Waiting for your opponent to reconnect…" - would
+     otherwise wrap to three lines on a narrow phone and eat into the board, which is the
+     flex child that gives up the space. Nothing is lost by clipping: whose turn it is is
+     also carried by the side label above and by the board's own dimming. */
+  #status {
+    font-size: 15px; color: var(--text);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
   #status.yours { color: var(--glow); text-shadow: 0 0 14px rgba(53,240,224,.45); }
 
   /* Captured pieces, small, above the board. */
