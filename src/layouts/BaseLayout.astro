@@ -57,8 +57,25 @@ const {
       <Fragment>
         <meta name="mobile-web-app-capable" content="yes" />
         <meta name="apple-mobile-web-app-capable" content="yes" />
+        {/* Only matters once installed: keeps the status bar dark instead of a white band. */}
+        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+        <meta name="apple-mobile-web-app-title" content="FreeConsole" />
       </Fragment>
     )}
+    {/*
+      Installability, deliberately without a service worker.
+
+      Every page needs a live Firebase connection to do anything — a room is a realtime
+      session — so there is no meaningful offline mode to cache for. A worker would only
+      add risk: the shared modules in public/ import each other by absolute URL, so one
+      stale cached copy resurrects the "does not provide an export named X" failure that
+      /diag.html exists to diagnose, and that the no-cache headers in vercel.json prevent.
+      The manifest alone still gets phones an installed app icon and a fullscreen
+      controller, which is the part players actually feel.
+    */}
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/icons/favicon-32.png" sizes="32x32" type="image/png" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
     <title>{title}</title>
     {description && <meta name="description" content={description} />}
     {/*

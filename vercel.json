@@ -12,6 +12,20 @@
       ]
     },
     {
+      "//": "Some CDNs serve .webmanifest as octet-stream, which makes the browser ignore it and silently refuse to install. Pin the type. Kept revalidating so an icon or name change ships without waiting out a cache.",
+      "source": "/manifest.webmanifest",
+      "headers": [
+        { "key": "Content-Type", "value": "application/manifest+json; charset=utf-8" },
+        { "key": "Cache-Control", "value": "no-cache, must-revalidate" }
+      ]
+    },
+    {
+      "source": "/icons/:path*",
+      "headers": [
+        { "key": "Cache-Control", "value": "public, max-age=604800" }
+      ]
+    },
+    {
       "source": "/vendor/:path*",
       "headers": [
         { "key": "Cache-Control", "value": "public, max-age=86400" },
