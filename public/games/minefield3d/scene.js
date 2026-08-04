@@ -464,11 +464,67 @@ export function setGateOpen(ctx, open) {
 
 /* ------------------------------------------------------------------ players */
 
+/* --------------------------------------------------------------- avatar model */
+
 /**
- * One player's body: a capsule whose shape carries the injury, plus their personal lamp.
+ * The shared ninja model, loaded once and cloned per player.
  *
- * Legs are the most important thing about a player and have to be readable from the camera's
- * distance, so injury changes the silhouette's height and tilt rather than adding detail.
+ * It ships **without a texture on purpose**. The source Meshy export was 7.01MB, of which
+ * 6.93MB was a single 2048×2048 PNG — 21MB of VRAM once uploaded, for a flat-shaded low-poly
+ * character with no detail that resolution could carry. Stripping the texture and the UVs
+ * leaves 98KB and lets every player be tinted with their own SDK colour, which this game
+ * needs anyway: on a dark aisle a player IS their colour, and a shared blue skin would make
+ * six ninjas indistinguishable.
+ *
+ * The geometry itself was never the problem — 1,059 triangles is cheaper than one of the
+ * capsules it replaces.
+ */
+/**
+ * The bones the game drives by hand, by their names in the export's rig.
+ *
+ * Only these are looked up; the rest of the 24-joint skeleton is left to the clip. The two
+ * UpLeg bones are the roots of each leg, so scaling one to nothing removes that whole limb —
+ * thigh, shin, foot and toe — in a single write.
+ */
+/** How tall a player stands in world units (tiles). */
+const AVATAR_HEIGHT = 1.05;
+
+const BONES = {
+  LeftUpLeg: 1, RightUpLeg: 1,
+  LeftArm: 1, RightArm: 1,
+  LeftForeArm: 1, RightForeArm: 1,
+  Spine: 1, Spine01: 1, Spine02: 1,
+  Head: 1, Hips: 1,
+};
+
+let avatarPromise = null;
+
+export function loadAvatar(url = "/games/minefield3d/ninja.glb?v=1") {
+  if (avatarPromise) return avatarPromise;
+  avatarPromise = new Promise((resolve) => {
+    if (!THREE.GLTFLoader) { resolve(null); return; }
+    new THREE.GLTFLoader().load(
+      url,
+      (gltf) => resolve(gltf),
+      undefined,
+      // A missing or broken model must never take the game down: every caller falls back to
+      // the capsule, which is fully playable.
+      () => resolve(null)
+    );
+  });
+  return avatarPromise;
+}
+
+/** The loaded avatar, or null while it is still in flight / if it failed. */
+let avatarGltf = null;
+export function setAvatar(gltf) { avatarGltf = gltf; }
+
+/**
+ * One player's body: the ninja model tinted to their colour, plus their personal lamp.
+ *
+ * Falls back to a capsule when the model has not arrived yet or failed to load. Legs are the
+ * most important thing about a player and have to be readable at camera distance, so injury
+ * changes the silhouette's height and tilt rather than adding detail.
  */
 export function createPlayerMesh(colorHex, Q) {
   const group = new THREE.Group();
@@ -478,10 +534,89 @@ export function createPlayerMesh(colorHex, Q) {
     roughness: 0.5, metalness: 0.1,
   });
 
-  const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.22, 0.6, 4, 10), mat);
-  body.position.y = 0.62;
-  if (Q.shadows) body.castShadow = true;
-  group.add(body);
+  let body;
+  let mixer = null;
+  let actions = null;
+  let bones = null;
+  let rest = null;
+  let fitScale = 1;
+
+  if (avatarGltf) {
+    // SkeletonUtils-style clone: a skinned mesh cannot be cloned with .clone() alone, because
+    // the copy would keep pointing at the original's bones and every player would animate in
+    // lockstep. three's own clone() handles this correctly for GLTF scenes as of r171.
+    const root = THREE.SkeletonUtils
+      ? THREE.SkeletonUtils.clone(avatarGltf.scene)
+      : avatarGltf.scene.clone(true);
+
+    root.traverse((o) => {
+      if (!o.isMesh) return;
+      // Tint per player. The model is white and untextured, so the colour is the whole look.
+      o.material = mat;
+      if (Q.shadows) o.castShadow = true;
+      o.frustumCulled = false;   // skinned bounds go stale as the rig moves
+    });
+
+    // The model is authored in centimetres: its Armature node already carries a 0.01 scale,
+    // so the fit has to MULTIPLY that rather than replace it. Setting an absolute scale here
+    // makes the ninja 68x life size and shoves it off camera — which looks, confusingly,
+    // like the model failed to load.
+    //
+    // Wrapping in a container keeps the model's own transform untouched and gives the pose
+    // code something it can freely rotate and lift.
+    const holder = new THREE.Group();
+    holder.add(root);
+    // Measure what the model actually renders as, rather than trusting either the raw
+    // geometry bounds (1.63, pre-Armature) or the node scale (0.01, centimetres) alone —
+    // compounding those two guesses is what produced first a 68x giant and then a 1.6cm
+    // speck. Measuring the assembled result gets it right regardless of export units.
+    const measured = new THREE.Box3().setFromObject(root);
+    const height = Math.max(0.0001, measured.max.y - measured.min.y);
+    holder.scale.setScalar(AVATAR_HEIGHT / height);
+    holder.rotation.y = Math.PI;     // it faces +z; players walk toward -z
+
+    body = holder;
+    fitScale = holder.scale.x;
+    group.add(holder);
+
+    if (avatarGltf.animations && avatarGltf.animations.length) {
+      mixer = new THREE.AnimationMixer(root);
+      actions = {};
+      for (const clip of avatarGltf.animations) {
+        actions[clip.name] = mixer.clipAction(clip);
+      }
+      // Running is the only clip with real motion — the "idle" the exporter emitted is a
+      // single frame, so it is used as a static pose rather than played.
+      if (actions.running) {
+        actions.running.play();
+        actions.running.paused = true;
+      }
+    }
+
+    // Grab the bones the game needs to drive directly. The rig is a standard biped, so the
+    // two leg roots under Hips are all that is needed to take a leg off, and the arms and
+    // spine are enough to hand-animate a crawl.
+    bones = {};
+    root.traverse((o) => {
+      if (!o.isBone) return;
+      if (BONES[o.name] !== undefined) bones[o.name] = o;
+    });
+    // Remember each bone's rest pose, so procedural animation is always applied as an offset
+    // from the bind pose rather than accumulating drift frame over frame.
+    rest = {};
+    for (const [name, bone] of Object.entries(bones)) {
+      rest[name] = {
+        rot: bone.rotation.clone(),
+        scale: bone.scale.clone(),
+        pos: bone.position.clone(),
+      };
+    }
+  } else {
+    body = new THREE.Mesh(new THREE.CapsuleGeometry(0.22, 0.6, 4, 10), mat);
+    body.position.y = 0.62;
+    if (Q.shadows) body.castShadow = true;
+    group.add(body);
+  }
 
   // The lamp each player carries. This is the object the entire game is about, so it is
   // visible as a thing on the body, not just as an effect on the floor.
@@ -504,12 +639,26 @@ export function createPlayerMesh(colorHex, Q) {
     group.add(glow);
   }
 
-  return { group, body, mat, lamp, glow };
+  return {
+    group, body, mat, lamp, glow, mixer, actions, bones, rest,
+    isModel: !!avatarGltf,
+    baseScale: fitScale,
+    // Which leg a one-legged player loses. Fixed per body so it never flips mid-round; set
+    // from the device id by the caller.
+    dropSide: 0,
+    phase: 0,
+  };
 }
 
-/** Pose a player's mesh for their current condition. */
-export function posePlayer(mesh, p, states) {
-  const { body, group, lamp } = mesh;
+/**
+ * Pose a player's mesh for their current condition, and drive the run cycle.
+ *
+ * The same function serves the model and the capsule fallback, so every offset is expressed
+ * relative to the body's own base scale rather than hardcoded to capsule dimensions.
+ */
+export function posePlayer(mesh, p, states, dt) {
+  const { body, group, lamp, baseScale } = mesh;
+  const s = baseScale;
 
   group.position.set(p.x, 0, p.z);
   group.rotation.y = p.heading;
@@ -518,30 +667,172 @@ export function posePlayer(mesh, p, states) {
     // Flat on the ground, lamp out.
     body.rotation.z = Math.PI / 2;
     body.position.y = 0.22;
-    body.scale.setScalar(1);
+    body.scale.setScalar(s);
     lamp.intensity = 0;
     if (mesh.glow) mesh.glow.material.opacity = 0.05;
+    if (mesh.actions && mesh.actions.running) mesh.actions.running.paused = true;
     return;
   }
 
   lamp.intensity = 1.6;
   if (mesh.glow) mesh.glow.material.opacity = 0.14;
 
-  if (p.legs === 0) {
-    // Crawling: prone, low, and slow.
-    body.rotation.z = Math.PI / 2;
-    body.position.y = 0.26;
-    body.scale.setScalar(1);
-  } else if (p.legs === 1) {
-    // Limping: upright but listing, and shorter.
-    body.rotation.z = 0.42;
-    body.position.y = 0.5;
-    body.scale.set(1, 0.78, 1);
-  } else {
-    body.rotation.z = 0;
-    body.position.y = 0.62;
-    body.scale.setScalar(1);
+  const speed = Math.hypot(p.dx || 0, p.dz || 0);
+  const moving = speed > 0.05 && p.stun <= 0;
+
+  if (!mesh.isModel) {
+    // Capsule fallback: shape alone carries the injury.
+    if (p.legs === 0) { body.rotation.z = Math.PI / 2; body.position.y = 0.26; body.scale.setScalar(s); }
+    else if (p.legs === 1) { body.rotation.z = 0.42; body.position.y = 0.5; body.scale.set(s, s * 0.78, s); }
+    else { body.rotation.z = 0; body.position.y = 0.62; body.scale.setScalar(s); }
+    return;
   }
+
+  // --- the rigged model ---
+
+  // The run clip drives the whole skeleton, so it must be stepped BEFORE any bone is
+  // overridden by hand — otherwise the mixer writes the clip's pose back over the crawl on
+  // the following frame and the limbs jitter between the two.
+  if (mesh.mixer && mesh.actions && mesh.actions.running) {
+    const run = mesh.actions.running;
+    // A crawler is not running. Freezing the clip lets the procedural pose own the body.
+    const useClip = p.legs > 0 && moving;
+    run.paused = !useClip;
+    if (useClip) {
+      run.timeScale = Math.max(0.4, speed / 3.0);
+      mesh.mixer.update(dt || 0);
+    }
+  }
+
+  mesh.phase = (mesh.phase || 0) + (dt || 0) * (moving ? Math.max(2.2, speed * 3.4) : 0.9);
+
+  if (p.legs === 0) {
+    poseCrawl(mesh, p, moving, dt);
+  } else {
+    // Undo anything the crawl left behind. Without this a player who is revived between
+    // rounds keeps the prone rotation and the reaching arms.
+    if (mesh.wasCrawling) { restoreBones(mesh); mesh.wasCrawling = false; }
+    body.rotation.x = 0;
+    body.rotation.z = p.legs === 1 ? 0.3 : 0;
+    body.position.y = 0;
+    body.scale.setScalar(s);
+    applyLegs(mesh, p.legs);
+    if (p.legs === 1) poseLimp(mesh, moving);
+  }
+}
+
+/**
+ * Take legs off the rig.
+ *
+ * A blast removes a limb, so the model must lose it too — a limping ninja with two intact
+ * legs reads as a cosmetic wobble rather than as an injury. Scaling the UpLeg bone to
+ * effectively nothing collapses the entire chain below it (thigh, shin, foot, toe) into the
+ * hip, which removes the leg without touching the mesh's topology or its skinning weights.
+ *
+ * Which leg goes is derived from the player's device id, not randomly, so a given player
+ * loses the same side every time and does not appear to swap legs between frames.
+ */
+function applyLegs(mesh, legs) {
+  const { bones, rest } = mesh;
+  if (!bones || !rest) return;
+
+  const gone = 0.001;   // not 0: a zero scale makes the bone matrix non-invertible
+  const left = bones.LeftUpLeg;
+  const right = bones.RightUpLeg;
+  if (!left || !right) return;
+
+  if (legs >= 2) {
+    left.scale.copy(rest.LeftUpLeg.scale);
+    right.scale.copy(rest.RightUpLeg.scale);
+  } else if (legs === 1) {
+    // One leg: the side is fixed per player so it never flips.
+    const dropLeft = mesh.dropSide === 0;
+    (dropLeft ? left : right).scale.setScalar(gone);
+    (dropLeft ? right : left).scale.copy(dropLeft ? rest.RightUpLeg.scale : rest.LeftUpLeg.scale);
+  } else {
+    left.scale.setScalar(gone);
+    right.scale.setScalar(gone);
+  }
+}
+
+/** Put every hand-driven bone back to its bind pose, so the run clip owns the body again. */
+function restoreBones(mesh) {
+  const { bones, rest } = mesh;
+  if (!bones || !rest) return;
+  for (const [name, bone] of Object.entries(bones)) {
+    bone.rotation.copy(rest[name].rot);
+    bone.position.copy(rest[name].pos);
+  }
+}
+
+/** A hitch in the stride for a one-legged player: the torso dips on the missing side. */
+function poseLimp(mesh, moving) {
+  const { bones, rest } = mesh;
+  if (!bones || !rest || !bones.Spine) return;
+  const hitch = moving ? Math.sin(mesh.phase * 2) * 0.12 : 0;
+  bones.Spine.rotation.z = rest.Spine.rot.z + (mesh.dropSide === 0 ? -0.18 : 0.18) + hitch;
+}
+
+/**
+ * A hand-built crawl for a player with no legs left.
+ *
+ * There is no crawl clip in the export — the source only shipped running, jumping and rope
+ * animations — so this drives the bones directly. It is deliberately a *drag*: the arms do
+ * all the work, reaching forward alternately and hauling the body after them, while the
+ * spine rolls with each pull. That asymmetry is what sells it as crawling rather than as
+ * swimming, and it makes a legless player unmistakable from across the room.
+ */
+function poseCrawl(mesh, p, moving, dt) {
+  const { bones, rest, body, baseScale } = mesh;
+  mesh.wasCrawling = true;
+
+  // Lie the whole body down and drop it to floor height. Rotating the root rather than the
+  // hips keeps the skinning clean and costs one matrix.
+  body.rotation.z = 0;
+  body.rotation.x = -Math.PI / 2 + 0.12;
+  body.position.y = 0.16;
+  body.scale.setScalar(baseScale);
+
+  if (!bones || !rest) return;
+
+  applyLegs(mesh, 0);
+
+  // Only advance the stroke while actually moving, so a stationary crawler lies still.
+  const t = mesh.phase;
+  const amp = moving ? 1 : 0.15;
+
+  // Arms alternate: one reaches ahead while the other pulls through, a half-cycle apart.
+  const reachL = Math.sin(t);
+  const reachR = Math.sin(t + Math.PI);
+
+  if (bones.LeftArm) {
+    bones.LeftArm.rotation.x = rest.LeftArm.rot.x + (-0.9 + reachL * 0.75) * amp;
+    bones.LeftArm.rotation.z = rest.LeftArm.rot.z + 0.35 * amp;
+  }
+  if (bones.RightArm) {
+    bones.RightArm.rotation.x = rest.RightArm.rot.x + (-0.9 + reachR * 0.75) * amp;
+    bones.RightArm.rotation.z = rest.RightArm.rot.z - 0.35 * amp;
+  }
+  // Forearms bend hardest at the end of the pull, where the hand is under the shoulder.
+  if (bones.LeftForeArm) {
+    bones.LeftForeArm.rotation.x = rest.LeftForeArm.rot.x - (0.5 + Math.max(0, -reachL) * 0.7) * amp;
+  }
+  if (bones.RightForeArm) {
+    bones.RightForeArm.rotation.x = rest.RightForeArm.rot.x - (0.5 + Math.max(0, -reachR) * 0.7) * amp;
+  }
+
+  // The spine rolls toward whichever arm is currently pulling, and the torso inches forward
+  // in time with it — the small surge that makes the drag read as effortful.
+  if (bones.Spine) bones.Spine.rotation.y = rest.Spine.rot.y + reachL * 0.16 * amp;
+  if (bones.Spine01) bones.Spine01.rotation.y = rest.Spine01.rot.y + reachL * 0.1 * amp;
+  if (bones.Spine02) bones.Spine02.rotation.y = rest.Spine02.rot.y + reachL * 0.08 * amp;
+
+  // Head stays up and forward — a crawler is still looking where they are going, and it
+  // keeps the silhouette from reading as a corpse.
+  if (bones.Head) bones.Head.rotation.x = rest.Head.rot.x - 0.45;
+
+  // A slight bob as the body is hauled along.
+  body.position.y = 0.16 + (moving ? Math.abs(Math.sin(t)) * 0.03 : 0);
 }
 
 /* ------------------------------------------------------------------- killer */
@@ -711,6 +1002,47 @@ export function stepBlast(fx, dt) {
   }
 
   return true;
+}
+
+/**
+ * Blood on the floor where a mine took someone's legs.
+ *
+ * Unlike the blast itself this does not fade — the aisle accumulates the evidence of every
+ * step that went wrong, so a field late in a round is legibly a place where things have been
+ * happening. It doubles as information: a splatter marks a tile somebody already triggered,
+ * which is the safest ground there is.
+ *
+ * Built as a ragged fan of overlapping blobs rather than a texture, so it costs one small
+ * geometry and no image download.
+ */
+export function createBloodSplat(rng = Math.random) {
+  const group = new THREE.Group();
+
+  const mat = new THREE.MeshBasicMaterial({
+    color: 0x8e0f2a, transparent: true, opacity: 0.72, depthWrite: false,
+  });
+
+  // A central pool plus a scatter of droplets thrown outward, biased into a lopsided spray
+  // so no two look alike and none of them read as a printed circle.
+  const blobs = 7 + Math.floor(rng() * 5);
+  const dir = rng() * Math.PI * 2;
+  for (let i = 0; i < blobs; i++) {
+    const isCore = i < 2;
+    const r = isCore ? 0.16 + rng() * 0.12 : 0.03 + rng() * 0.07;
+    const spread = isCore ? rng() * 0.08 : 0.12 + rng() * 0.42;
+    // Cluster the spray around one direction, the way a real splatter throws.
+    const a = dir + (rng() - 0.5) * (isCore ? 6.28 : 2.4);
+
+    const blob = new THREE.Mesh(new THREE.CircleGeometry(r, 9), mat);
+    blob.rotation.x = -Math.PI / 2;
+    blob.rotation.z = rng() * Math.PI;
+    // Squash each blob slightly so they are irregular rather than perfect discs.
+    blob.scale.set(1, 1, 0.6 + rng() * 0.7);
+    blob.position.set(Math.cos(a) * spread, 0.012 + i * 0.0006, Math.sin(a) * spread);
+    group.add(blob);
+  }
+
+  return { group, mat };
 }
 
 /**
