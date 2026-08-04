@@ -636,7 +636,7 @@ const description =
         const joinUrl = `${location.origin}/play.html?room=${roomCode}`;
         $("joinUrl").textContent = joinUrl.replace(/^https?:\/\//, "");
         $("qr").innerHTML = "";
-        $("qr").appendChild(renderQR(joinUrl, 84));
+        $("qr").appendChild(renderQR(joinUrl, 45));
 
         session = await startSession({
           roomCode,
