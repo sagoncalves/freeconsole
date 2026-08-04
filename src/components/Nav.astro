@@ -13,8 +13,8 @@
  */
 const LINKS = [
   { href: "/", label: "Games", match: (p: string) => p === "/" || p === "/index.html" },
-  // play.html owns a live room session and a game iframe, and signup.html owns the admin
-  // auth flow; both bind their listeners at module-evaluation time. Client-side routing
+  // play.html owns a live room session and a game iframe; it binds its listeners at
+  // module-evaluation time. Client-side routing
   // would hand them a fresh DOM without re-running that setup, so links into them force a
   // real page load via data-astro-reload.
   { href: "/play.html", label: "Join a game", match: (p: string) => p === "/play.html", reload: true },

@@ -47,7 +47,8 @@ touches our Firebase session. Games cannot tell the difference — `sdk.js` is a
 | `public/session.js` | Shared shell logic: claim a slot, follow `home`, swap the game frame. |
 | `public/qr.js` | Renders the join QR (encoder vendored in `public/vendor/`). |
 | `public/games/tapwar/` | Test game: `screen.html` + `controller.html`. |
-| `public/signup.html` | Catalog editor, behind email/password login + an `admin` claim. |
+| `public/signup.html` | Email/password sign in and account creation. Hands off to the admin page. |
+| `public/admin.html` | Catalog editor, behind an `admin` claim. |
 | `functions/index.js` | `createRoom` + the stale-room sweep. |
 | `database.rules.json` | RTDB security rules. |
 | `firestore.rules` | Catalog is world-readable, writable only by an `admin`-claim account. |
@@ -106,7 +107,7 @@ Prefer `setCustomDeviceState()` over `broadcast()` for anything a late joiner ne
 state is replayed to devices that arrive afterwards, a broadcast is not.
 
 Rules: never import Firebase, never assume how you were loaded, keep the folder
-self-contained. Add the game to the catalog from `/signup.html`.
+self-contained. Add the game to the catalog from `/admin.html`.
 
 ## Running it
 
@@ -139,13 +140,13 @@ pnpm test          # rules (33) + room lifecycle (22) + admin auth (27)
 `pnpm seed` writes a baseline catalog straight to the live project. It's the one thing still
 needing Google Application Default Credentials — separate from your Firebase CLI login, so the
 CLI can look fine while these are broken, surfacing as `invalid_grant`. Fix with
-`gcloud auth application-default login`, or skip it and use `/signup.html` instead.
+`gcloud auth application-default login`, or skip it and use `/admin.html` instead.
 
 ## Editing the catalog
 
-Open **`/signup.html`** and sign in with email and password. That one page is both the account
-screen and the catalog editor: sign in and you get the catalog, with no admin claim you get told
-so.
+Open **`/admin.html`**. If you aren't signed in it sends you to `/signup.html`, which does
+email/password sign in and nothing else, then returns you to the editor. Signed in without the
+admin claim, the editor says so rather than showing a catalog every write would be rejected from.
 
 Admins are ordinary Firebase Auth accounts carrying an `admin: true` custom claim.
 `firestore.rules` checks that claim on every write to `/games`, so the page talks to Firestore

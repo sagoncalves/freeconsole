@@ -591,19 +591,31 @@ function drawGate() {
 
   if (round.exitOpen) {
     ctx.save();
-    ctx.fillStyle = "#9dff4f";
-    ctx.shadowColor = "#9dff4f";
-    ctx.shadowBlur = 26;
-    ctx.fillRect(x0, ty(0) - h, w, h);
 
     // A shaft of light spilling down into the field, so the way out is visible from the far
-    // end even between pulses.
-    const g = ctx.createLinearGradient(0, ty(0), 0, ty(3.2));
-    g.addColorStop(0, "rgba(157,255,79,.20)");
-    g.addColorStop(1, "rgba(157,255,79,0)");
-    ctx.shadowBlur = 0;
+    // end even between pulses. Drawn additively: over near-black ground a plain alpha fill
+    // reads as a muddy brown box rather than as light.
+    ctx.globalCompositeOperation = "lighter";
+    const g = ctx.createLinearGradient(0, ty(0), 0, ty(4));
+    g.addColorStop(0, "rgba(120,190,60,.34)");
+    g.addColorStop(0.5, "rgba(90,150,45,.12)");
+    g.addColorStop(1, "rgba(60,110,30,0)");
     ctx.fillStyle = g;
-    ctx.fillRect(x0, ty(0), w, 3.2 * scale);
+    ctx.fillRect(x0, ty(0), w, 4 * scale);
+    ctx.globalCompositeOperation = "source-over";
+
+    // The threshold itself, bright and hard-edged so it reads as a way out and not as glow.
+    ctx.fillStyle = "#c8ff8a";
+    ctx.shadowColor = "#9dff4f";
+    ctx.shadowBlur = 30;
+    ctx.fillRect(x0, ty(0) - h, w, h);
+    ctx.shadowBlur = 0;
+
+    // Posts on either side, so the mouth has width and you can aim at it.
+    ctx.fillStyle = "#9dff4f";
+    const post = Math.max(2, scale * 0.14);
+    ctx.fillRect(x0 - post, ty(0) - h, post, h + scale * 0.7);
+    ctx.fillRect(x0 + w, ty(0) - h, post, h + scale * 0.7);
     ctx.restore();
   } else {
     ctx.save();
@@ -654,7 +666,9 @@ function drawPrints() {
  * resolved keeps it a threat.
  */
 function drawKiller() {
-  if (round.killerY > round.rows + 1) return;
+  // Nothing to see until it actually steps onto the field. Drawing its glow while it is
+  // still behind the spawn line washes the bottom of the screen for the whole opening.
+  if (round.killerY > round.rows) return;
   const cx = tx(round.killerX);
   const cy = ty(round.killerY);
   const r = scale * 1.6;
@@ -809,14 +823,21 @@ function frame(ts) {
  * the screen itself gets more claustrophobic as it closes.
  */
 function updateDread() {
-  if (round.phase !== "running") { dread.style.boxShadow = "inset 0 0 18vw 6vw rgba(255,46,136,0)"; return; }
+  // Nothing while the killer is still off the field: the vignette means "it is close", and
+  // showing it during the opening seconds spends the effect before there is anything to fear.
+  if (round.phase !== "running" || round.killerY > round.rows) {
+    dread.style.boxShadow = "inset 0 0 18vw 6vw rgba(255,46,136,0)";
+    return;
+  }
   let nearest = Infinity;
   for (const p of round.players.values()) {
     if (p.state !== ALIVE) continue;
     nearest = Math.min(nearest, Math.abs(p.y - round.killerY));
   }
   if (!isFinite(nearest)) nearest = 99;
-  const close = Math.max(0, 1 - nearest / 7);
+  // Scaled to the field's depth rather than a fixed row count, so a shallow field does not
+  // sit permanently pinned at full dread.
+  const close = Math.max(0, 1 - nearest / (round.rows * 0.4));
   dread.style.boxShadow = "inset 0 0 " + (18 + close * 10).toFixed(1) + "vw " +
     (6 + close * 5).toFixed(1) + "vw rgba(255,46,136," + (close * 0.5).toFixed(3) + ")";
 }

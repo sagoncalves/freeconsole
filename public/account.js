@@ -49,10 +49,12 @@ function render(host, user, isAdmin, auth) {
   }
 
   if (isAdmin) {
+    // The catalog editor, not the auth screen: someone who sees this link is already signed
+    // in, so sending them to /signup.html read as being logged out.
     const adminLink = document.createElement("a");
     adminLink.className =
-      "nav-link" + (location.pathname === "/signup.html" ? " active" : "");
-    adminLink.href = "/signup.html";
+      "nav-link" + (location.pathname === "/admin.html" ? " active" : "");
+    adminLink.href = "/admin.html";
     adminLink.textContent = "Admin";
     host.appendChild(adminLink);
   }

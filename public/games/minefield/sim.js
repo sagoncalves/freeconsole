@@ -127,23 +127,40 @@ function generateField(round) {
 }
 
 /**
- * Walk a single-tile corridor from the gate to the spawn strip, clearing as it goes. It
- * wanders, so the guaranteed route is never a straight line a player could just memorise.
+ * Walk a single-tile corridor from the gate to the spawn strip, clearing as it goes.
+ *
+ * It is carved from the bottom upward, starting at a random column rather than under the
+ * gate, and wanders aggressively on the way. Both matter: a corridor that starts at the gate
+ * column ends up directly under the spawn point — players spawn centred and the gate is
+ * centred — which hands every player a straight, mine-free walk and makes the sonar
+ * pointless. The route must exist; it must not be the route anyone is already standing on.
  */
 function carveEscapeRoute(round, rng) {
   const { cols, rows } = round.level;
-  let x = round.exitFrom + Math.floor(rng() * (round.exitTo - round.exitFrom + 1));
+  let x = Math.floor(rng() * cols);
 
-  for (let y = 0; y < rows; y++) {
+  for (let y = rows - 1; y >= 0; y--) {
     round.mines[y * cols + x] = 0;
-    // Drift sideways sometimes, clearing the tile we pass through so the corridor stays
-    // connected diagonally as well as vertically.
-    if (rng() < 0.42) {
-      const dir = rng() < 0.5 ? -1 : 1;
-      const nx = Math.max(0, Math.min(cols - 1, x + dir));
-      round.mines[y * cols + nx] = 0;
-      x = nx;
+
+    // Wander hard, and keep wandering: several sideways moves per row, each clearing the
+    // tile it crosses so the corridor stays connected.
+    const drift = 1 + Math.floor(rng() * 3);
+    for (let d = 0; d < drift; d++) {
+      if (rng() < 0.55) {
+        const dir = rng() < 0.5 ? -1 : 1;
+        const nx = Math.max(0, Math.min(cols - 1, x + dir));
+        round.mines[y * cols + nx] = 0;
+        x = nx;
+      }
     }
+  }
+
+  // The corridor has to actually meet the gate, or the guarantee is void. Clear the last
+  // stretch across row 0 from wherever the walk finished to the nearest gate tile.
+  const gate = Math.max(round.exitFrom, Math.min(round.exitTo, x));
+  for (let gx = Math.min(x, gate); gx <= Math.max(x, gate); gx++) {
+    round.mines[gx] = 0;
+    round.mines[cols + gx] = 0;   // and the row below it, so the approach is walkable
   }
 }
 
@@ -152,13 +169,11 @@ function carveEscapeRoute(round, rng) {
 export function addPlayer(round, deviceId) {
   if (round.players.has(deviceId)) return round.players.get(deviceId);
 
-  // Spread spawns along the bottom edge, in device-id order, so two players never start
-  // stacked. Keyed by id, never by array position — ids have gaps.
-  const index = round.players.size;
-  const spread = round.level.cols / (Math.max(1, round.players.size + 1) + 1);
+  // A provisional spot on the bottom edge. startRound re-seats the whole line once the
+  // roster is known, so this only has to be somewhere sane and inside the field.
   const p = {
     id: deviceId,
-    x: Math.min(round.level.cols - 0.5, 0.5 + spread * (index + 1)),
+    x: 1.5 + (round.level.cols - 3) * 0.28,
     y: round.level.rows - 0.5,
     dx: 0,
     dy: 0,
@@ -221,9 +236,15 @@ export function startRound(round) {
 function resetPlayer(round, p) {
   const ids = [...round.players.keys()].sort((a, b) => a - b);
   const index = Math.max(0, ids.indexOf(p.id));
-  const spread = round.level.cols / (ids.length + 1);
 
-  p.x = Math.min(round.level.cols - 0.5, spread * (index + 1));
+  // Spread the line across most of the field rather than bunching it at the centre. A single
+  // player spawning dead-centre would start on the gate's own column, which is the shortest
+  // and least interesting crossing on the board.
+  const margin = 1.5;
+  const usable = round.level.cols - margin * 2;
+  p.x = ids.length === 1
+    ? margin + usable * 0.28
+    : margin + (usable * index) / (ids.length - 1);
   p.y = round.level.rows - 0.5;
   p.legs = 2;
   p.state = ALIVE;
@@ -299,7 +320,7 @@ export function tileReveal(round, x, y) {
   return 1 - held / round.level.sonarHold;
 }
 
-/** The killer walks down the field at a constant rate and never stops. */
+/** The killer walks up the field at a constant rate and never stops. */
 function stepKiller(round, dt) {
   const { level } = round;
   if (round.t < level.killerDelay) return;
@@ -316,6 +337,11 @@ function stepKiller(round, dt) {
   if (target) {
     const dx = target.x - round.killerX;
     round.killerX += Math.sign(dx) * Math.min(Math.abs(dx), level.killerSpeed * 0.75 * dt);
+
+    // It never gets ahead of the last living player. Without this it simply walks off the top
+    // of the field and anyone who hangs back at the spawn line is safe forever — the round
+    // can then never end. It is a line the field is being swept up to, not a racer.
+    round.killerY = Math.max(round.killerY, target.y - 0.35);
   }
 
   for (const p of round.players.values()) {
@@ -331,6 +357,8 @@ function stepPlayer(round, p, dt) {
 
   if (p.stun > 0) {
     p.stun -= dt;
+    p.dx = 0;
+    p.dy = 0;
     return;
   }
 
