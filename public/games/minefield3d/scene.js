@@ -486,8 +486,16 @@ export function setGateOpen(ctx, open) {
  * UpLeg bones are the roots of each leg, so scaling one to nothing removes that whole limb —
  * thigh, shin, foot and toe — in a single write.
  */
-/** How tall a player stands in world units (tiles). */
-const AVATAR_HEIGHT = 1.05;
+/**
+ * How tall a player stands, in world units (tiles).
+ *
+ * Deliberately about twice life size relative to the aisle. At a realistic 1.05 the ninja
+ * rendered ~12 pixels tall from the game's camera — too small for the model, the run cycle,
+ * or a missing leg to be visible at all, which made the whole avatar pure cost. Oversizing
+ * reads as toy / board-game proportions and keeps the full length of the aisle in frame,
+ * which matters more here than anatomical scale: the run to the gate is the tension.
+ */
+const AVATAR_HEIGHT = 2.0;
 
 const BONES = {
   LeftUpLeg: 1, RightUpLeg: 1,
@@ -496,6 +504,45 @@ const BONES = {
   Spine: 1, Spine01: 1, Spine02: 1,
   Head: 1, Hips: 1,
 };
+
+/**
+ * Deep-clone a skinned hierarchy, rebinding each SkinnedMesh to the *cloned* bones.
+ *
+ * `Object3D.clone(true)` copies the meshes and the bones but leaves every copied
+ * SkinnedMesh still bound to the ORIGINAL skeleton. The result is that all clones render at
+ * whatever pose the first one is in, parked at the original's position — the symptom being a
+ * single T-posed avatar at the world origin and nothing at any player. three.js ships a
+ * SkeletonUtils addon for exactly this, but it is not in the vendored bundle, so the rebind
+ * is done here.
+ */
+function cloneSkinned(source) {
+  const root = source.clone(true);
+
+  // Map original bone -> cloned bone by walking both trees in the same order.
+  const boneMap = new Map();
+  const srcNodes = [];
+  const dstNodes = [];
+  source.traverse((o) => srcNodes.push(o));
+  root.traverse((o) => dstNodes.push(o));
+  for (let i = 0; i < srcNodes.length; i++) {
+    if (srcNodes[i].isBone) boneMap.set(srcNodes[i], dstNodes[i]);
+  }
+
+  // Rebuild every skinned mesh's skeleton from the cloned bones, keeping the original
+  // inverse bind matrices — those are bind-pose data and must not be recomputed.
+  const srcSkinned = [];
+  source.traverse((o) => { if (o.isSkinnedMesh) srcSkinned.push(o); });
+  let k = 0;
+  root.traverse((o) => {
+    if (!o.isSkinnedMesh) return;
+    const original = srcSkinned[k++];
+    const bones = original.skeleton.bones.map((b) => boneMap.get(b) || b);
+    o.skeleton = new THREE.Skeleton(bones, original.skeleton.boneInverses);
+    o.bind(o.skeleton, o.bindMatrix);
+  });
+
+  return root;
+}
 
 let avatarPromise = null;
 
@@ -529,10 +576,15 @@ export function setAvatar(gltf) { avatarGltf = gltf; }
 export function createPlayerMesh(colorHex, Q) {
   const group = new THREE.Group();
 
-  const mat = new THREE.MeshStandardMaterial({
-    color: colorHex, emissive: colorHex, emissiveIntensity: 0.55,
-    roughness: 0.5, metalness: 0.1,
-  });
+  // Unlit on purpose. The aisle's ambient is nearly zero because the darkness IS the game,
+  // so anything that depends on scene lighting renders as a black smudge — a lit material
+  // with a strong emissive was still invisible in play. A basic material draws the body at
+  // full colour from every angle, which is what makes a player readable at distance and
+  // unmistakably *their* colour.
+  //
+  // The cost of losing shading is that the model reads as a flat silhouette. That is the
+  // right trade here: at this camera the silhouette is all the detail that survives anyway.
+  const mat = new THREE.MeshBasicMaterial({ color: colorHex });
 
   let body;
   let mixer = null;
@@ -542,12 +594,7 @@ export function createPlayerMesh(colorHex, Q) {
   let fitScale = 1;
 
   if (avatarGltf) {
-    // SkeletonUtils-style clone: a skinned mesh cannot be cloned with .clone() alone, because
-    // the copy would keep pointing at the original's bones and every player would animate in
-    // lockstep. three's own clone() handles this correctly for GLTF scenes as of r171.
-    const root = THREE.SkeletonUtils
-      ? THREE.SkeletonUtils.clone(avatarGltf.scene)
-      : avatarGltf.scene.clone(true);
+    const root = cloneSkinned(avatarGltf.scene);
 
     root.traverse((o) => {
       if (!o.isMesh) return;
@@ -621,7 +668,7 @@ export function createPlayerMesh(colorHex, Q) {
   // The lamp each player carries. This is the object the entire game is about, so it is
   // visible as a thing on the body, not just as an effect on the floor.
   const lamp = new THREE.PointLight(colorHex, 1.6, 5.5, 2);
-  lamp.position.set(0, 0.9, 0);
+  lamp.position.set(0, avatarGltf ? AVATAR_HEIGHT * 0.55 : 0.9, 0);
   group.add(lamp);
 
   let glow = null;
