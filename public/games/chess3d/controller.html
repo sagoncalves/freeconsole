@@ -179,6 +179,59 @@
   .cam-btn:disabled { opacity: .3; cursor: default; }
   /* The whole pad recedes when it is not your turn, matching the board's own dim. */
   #campad.off .cam-label { opacity: .45; }
+
+  /* Graphics settings, opened from the gear in the bar. Only the master controller has
+     one, because the setting belongs to the shared screen rather than to a player. */
+  #gear {
+    width: 34px; height: 34px; flex-shrink: 0; border-radius: 10px;
+    border: 1px solid var(--line); background: var(--ink-600);
+    color: var(--text-dim); font-size: 16px; line-height: 1; cursor: pointer;
+    display: none; place-items: center;
+  }
+  #gear.show { display: grid; }
+  #gear:active { background: var(--ink-500); transform: scale(.93); }
+
+  #settings {
+    position: fixed; inset: 0; z-index: 25;
+    display: none; align-items: flex-end; justify-content: center;
+    background: rgba(5,6,13,.88); backdrop-filter: blur(3px);
+  }
+  #settings.show { display: flex; }
+  .set-card {
+    width: 100%; max-width: 420px;
+    background: var(--ink-700); border: 1px solid var(--line-bright);
+    border-radius: 18px 18px 0 0;
+    padding: 18px 18px max(18px, env(safe-area-inset-bottom));
+    box-shadow: 0 -10px 40px rgba(0,0,0,.5);
+  }
+  .set-card h3 { margin: 0 0 2px; font-size: 16px; font-weight: 500; }
+  .set-sub { margin: 0 0 14px; font-size: 12.5px; color: var(--text-faint); }
+  .set-list { display: flex; flex-direction: column; gap: 8px; }
+  .set-opt {
+    display: flex; align-items: center; gap: 12px; width: 100%;
+    padding: 12px 14px; border-radius: 12px; cursor: pointer; text-align: left;
+    border: 1px solid var(--line); background: var(--ink-600); color: var(--text);
+  }
+  .set-opt:active { background: var(--ink-500); }
+  .set-opt.on { border-color: var(--line-bright); box-shadow: 0 0 20px rgba(53,240,224,.18); }
+  /* A dot rather than a checkmark, so the selected row reads at a glance on a small
+     screen without the label having to shift to make room for a glyph. */
+  .set-tick {
+    width: 16px; height: 16px; flex-shrink: 0; border-radius: 50%;
+    border: 2px solid var(--line-bright);
+  }
+  .set-opt.on .set-tick { background: var(--glow); box-shadow: 0 0 10px var(--glow); }
+  .set-txt { min-width: 0; line-height: 1.3; }
+  .set-name { font-size: 15px; }
+  .set-note { font-size: 12px; color: var(--text-faint); }
+  /* Shown under the list when "Auto" resolved to a tier, so the admin can tell what the
+     device actually picked without having to read it off the TV. */
+  #setResolved { margin: 12px 0 0; font-size: 12px; color: var(--text-faint); text-align: center; }
+  .set-close {
+    margin-top: 14px; width: 100%; padding: 12px; border-radius: 12px;
+    border: 1px solid var(--line); background: transparent;
+    color: var(--text-dim); font-size: 14px; cursor: pointer;
+  }
 </style>
 </head>
 <body>
@@ -189,6 +242,7 @@
     <div class="bar-side" id="sideLabel">Connecting</div>
     <div id="status">Joining the table…</div>
   </div>
+  <button id="gear" aria-label="Graphics settings">⚙</button>
 </div>
 
 <div id="taken"></div>
@@ -219,6 +273,18 @@
 <div id="veil">
   <h2 id="veilTitle">Watching</h2>
   <p id="veilNote">Two players are already at the table.</p>
+</div>
+
+<!-- Graphics settings. Rendered from the tier list the screen sends, so the phone never
+     holds its own copy of what the tiers are. -->
+<div id="settings">
+  <div class="set-card">
+    <h3>Graphics</h3>
+    <p class="set-sub">Lower this if the TV looks choppy.</p>
+    <div class="set-list" id="setList"></div>
+    <p id="setResolved"></p>
+    <button class="set-close" id="setClose">Done</button>
+  </div>
 </div>
 
 <script src="/sdk.js"></script>
@@ -545,6 +611,88 @@ function renderTaken(taken) {
   takenEl.textContent = (mine ? "You took " + mine : "") + (theirs ? "   ·   Lost " + theirs : "");
 }
 
+/* -------------------------------------------------------- graphics settings */
+
+/**
+ * What the screen last told us about its own rendering.
+ *
+ * The phone deliberately holds no opinion about what the tiers are or which is active —
+ * it renders whatever list the screen sends. That keeps one definition of the tiers
+ * (quality.js, on the screen) and means a phone on a stale cached page cannot offer a
+ * setting the screen no longer understands.
+ */
+let quality = { choice: null, tier: null, tiers: [] };
+
+const gearEl = document.getElementById("gear");
+const settingsEl = document.getElementById("settings");
+const setListEl = document.getElementById("setList");
+const setResolvedEl = document.getElementById("setResolved");
+
+/**
+ * Whether this phone is the room's admin.
+ *
+ * Derived from the SDK rather than stored, so it follows the master controller: if that
+ * phone leaves, the next one simply is the master and its gear appears with no handover.
+ */
+function isMaster() {
+  const me = freeconsole.getDeviceId();
+  const master = freeconsole.getMasterControllerDeviceId();
+  return master !== undefined && me === master;
+}
+
+function renderSettings() {
+  // The gear is only meaningful for the admin, and only once the screen has said what the
+  // options are — showing it earlier would open an empty sheet.
+  const show = isMaster() && quality.tiers.length > 0;
+  gearEl.classList.toggle("show", show);
+  if (!show) {
+    settingsEl.classList.remove("show");
+    return;
+  }
+
+  setListEl.replaceChildren();
+  for (const tier of quality.tiers) {
+    const btn = document.createElement("button");
+    btn.className = "set-opt" + (tier.value === quality.choice ? " on" : "");
+    btn.innerHTML =
+      '<span class="set-tick"></span>' +
+      '<span class="set-txt"><span class="set-name"></span><br>' +
+      '<span class="set-note"></span></span>';
+    btn.querySelector(".set-name").textContent = tier.label;
+    btn.querySelector(".set-note").textContent = tier.note;
+    btn.addEventListener("click", () => {
+      // Optimistic: light the chosen row now rather than waiting for the round trip, so a
+      // tap always feels answered. The screen's reply is authoritative and will correct
+      // this if the choice was refused.
+      quality.choice = tier.value;
+      renderSettings();
+      freeconsole.message(FreeConsole.SCREEN, { type: "set-quality", choice: tier.value });
+      freeconsole.vibrate(8);
+    });
+    setListEl.appendChild(btn);
+  }
+
+  // "Auto" alone does not say what the device actually settled on, and that is the thing
+  // the admin needs to know before deciding to override it.
+  setResolvedEl.textContent =
+    quality.choice === "auto" && quality.tier ? "Auto selected: " + quality.tier : "";
+}
+
+gearEl.addEventListener("click", () => {
+  settingsEl.classList.add("show");
+  // Ask on open rather than trusting what we hold: this phone may have connected after the
+  // screen's boot broadcast, or the tier may have changed since.
+  freeconsole.message(FreeConsole.SCREEN, { type: "get-quality" });
+});
+
+const closeSettings = () => settingsEl.classList.remove("show");
+document.getElementById("setClose").addEventListener("click", closeSettings);
+// Tapping the dimmed area closes too, but only the backdrop itself — clicks inside the
+// card bubble up to this same element and must not count.
+settingsEl.addEventListener("click", (ev) => {
+  if (ev.target === settingsEl) closeSettings();
+});
+
 /* ------------------------------------------------------------ from screen */
 
 freeconsole.onMessage = (deviceId, data) => {
@@ -571,6 +719,17 @@ freeconsole.onMessage = (deviceId, data) => {
     haveBoard = false;
     boardRequests = 0;
     requestBoard();
+    return;
+  }
+
+  // The screen reporting its graphics settings — on boot, on change, or on request.
+  if (data.type === "quality") {
+    quality = {
+      choice: data.choice,
+      tier: data.tier,
+      tiers: Array.isArray(data.tiers) ? data.tiers : [],
+    };
+    renderSettings();
     return;
   }
 
@@ -649,6 +808,7 @@ freeconsole.onReady = () => {
   renderStatus();
   render();
   renderCamPad();
+  renderSettings();
   // Ask the screen for the position rather than waiting to be told.
   //
   // A broadcast only reaches devices already in the room, and the screen sends one the
@@ -657,6 +817,22 @@ freeconsole.onReady = () => {
   // table…" and then fall back to the spectator message while a game it belonged to was
   // running. Pulling the state removes the dependency on timing entirely.
   requestBoard();
+};
+
+/**
+ * Master is derived from who is connected, so it can change without this phone doing
+ * anything: the admin's phone leaves, and the next controller inherits the gear. Both
+ * hooks re-render for that reason, and the settings sheet is asked for afresh because a
+ * phone that was never master may never have been sent the tier list.
+ */
+freeconsole.onConnect = () => {
+  renderSettings();
+};
+freeconsole.onDisconnect = () => {
+  renderSettings();
+  if (isMaster() && !quality.tiers.length) {
+    freeconsole.message(FreeConsole.SCREEN, { type: "get-quality" });
+  }
 };
 
 /**

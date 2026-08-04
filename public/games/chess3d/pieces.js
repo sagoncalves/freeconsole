@@ -81,46 +81,77 @@ export const PIECE_HEIGHT = { p: 0.85, r: 0.84, n: 1.03, b: 1.00, q: 1.06, k: 1.
  * Returned as a Group rather than a single merged mesh because the shatter effect needs
  * to break it into independently moving parts, and a group of real meshes gives it
  * natural seams to break along.
+ *
+ * `opts` comes from the active quality tier (see quality.js):
+ *   - `segments`    how many sides the lathe is revolved into
+ *   - `bandPieces`  false builds the body as one mesh instead of stacked bands
+ *   - `shadows`     false skips the shadow flags entirely
+ *   - `detail`      false drops the small ornaments — crown spikes, battlements, ears
+ *
+ * The banding is the expensive choice: it exists only so shatter() has fracture lines, but
+ * it costs a draw call per band on every frame of the game. Tiers that cannot afford that
+ * turn it off and lose the shatter, which is the right trade — a capture lasts two seconds
+ * and the frame rate lasts the whole match.
  */
-export function buildPiece(THREE, kind, material, scale = 1) {
-  const group = new THREE.Group();
-  const segments = 28;
+export function buildPiece(THREE, kind, material, scale = 1, opts = {}) {
+  const {
+    segments = 28,
+    bandPieces = true,
+    shadows = true,
+    detail = true,
+  } = opts;
 
-  // The body is lathed in horizontal bands rather than as one mesh.
-  //
-  // Visually a band is seamless — consecutive bands share their boundary profile point,
-  // so the silhouette is identical to a single lathe. The reason to split is the death
-  // animation: shatter() breaks a piece along its existing meshes, and a one-mesh pawn
-  // would "shatter" into a single lump. Banding gives every piece natural fracture lines
-  // to come apart along, like a turned piece splitting along its grain.
+  const group = new THREE.Group();
+
   const raw = PROFILES[kind](scale);
   const points = raw.map(([r, h]) => new THREE.Vector2(Math.max(r, 0.0001), h));
 
-  const BAND_HEIGHT = 0.16 * scale;
-  let bandStart = 0;
-  for (let i = 1; i < points.length; i++) {
-    const spanned = points[i].y - points[bandStart].y;
-    const isLast = i === points.length - 1;
-    if (spanned >= BAND_HEIGHT || isLast) {
-      // Bands overlap by one point so there is no gap in the surface.
-      const slice = points.slice(bandStart, i + 1);
-      if (slice.length >= 2) {
-        const geo = new THREE.LatheGeometry(slice, segments);
-        geo.computeVertexNormals();
-        const band = new THREE.Mesh(geo, material);
-        band.castShadow = true;
-        band.receiveShadow = true;
-        group.add(band);
+  const addMesh = (geo) => {
+    const mesh = new THREE.Mesh(geo, material);
+    mesh.castShadow = shadows;
+    mesh.receiveShadow = shadows;
+    group.add(mesh);
+    return mesh;
+  };
+
+  if (bandPieces) {
+    // The body is lathed in horizontal bands rather than as one mesh.
+    //
+    // Visually a band is seamless — consecutive bands share their boundary profile point,
+    // so the silhouette is identical to a single lathe. The reason to split is the death
+    // animation: shatter() breaks a piece along its existing meshes, and a one-mesh pawn
+    // would "shatter" into a single lump. Banding gives every piece natural fracture lines
+    // to come apart along, like a turned piece splitting along its grain.
+    const BAND_HEIGHT = 0.16 * scale;
+    let bandStart = 0;
+    for (let i = 1; i < points.length; i++) {
+      const spanned = points[i].y - points[bandStart].y;
+      const isLast = i === points.length - 1;
+      if (spanned >= BAND_HEIGHT || isLast) {
+        // Bands overlap by one point so there is no gap in the surface.
+        const slice = points.slice(bandStart, i + 1);
+        if (slice.length >= 2) {
+          const geo = new THREE.LatheGeometry(slice, segments);
+          geo.computeVertexNormals();
+          addMesh(geo);
+        }
+        bandStart = i;
       }
-      bandStart = i;
     }
+  } else {
+    // One lathe for the whole silhouette. Identical shape, a single draw call.
+    const geo = new THREE.LatheGeometry(points, segments);
+    geo.computeVertexNormals();
+    addMesh(geo);
   }
 
-  if (kind === "n") group.add(...knightHead(THREE, material, scale));
-  if (kind === "b") group.add(mitreSlit(THREE, material, scale));
-  if (kind === "k") group.add(...crossFinial(THREE, material, scale));
-  if (kind === "q") group.add(...crownSpikes(THREE, material, scale));
-  if (kind === "r") group.add(...battlements(THREE, material, scale));
+  if (kind === "n") group.add(...knightHead(THREE, material, scale, { shadows, detail }));
+  if (kind === "b") group.add(mitreSlit(THREE, material, scale, { shadows }));
+  if (kind === "k") group.add(...crossFinial(THREE, material, scale, { shadows }));
+  // The queen's spikes and the rook's battlements are 7 and 5 extra draw calls each, for
+  // ornaments a few pixels wide from a seated camera. They are the cheapest detail to lose.
+  if (kind === "q" && detail) group.add(...crownSpikes(THREE, material, scale, { shadows }));
+  if (kind === "r" && detail) group.add(...battlements(THREE, material, scale, { shadows }));
 
   group.userData.kind = kind;
   return group;
@@ -131,14 +162,14 @@ export function buildPiece(THREE, kind, material, scale = 1) {
  * not rotationally symmetric. Deliberately blocky — it reads clearly at a distance and
  * shatters into convincing chunks.
  */
-function knightHead(THREE, material, s) {
+function knightHead(THREE, material, s, { shadows = true, detail = true } = {}) {
   const parts = [];
   const add = (geo, x, y, z, rx = 0) => {
     const m = new THREE.Mesh(geo, material);
     m.position.set(x * s, y * s, z * s);
     if (rx) m.rotation.x = rx;
-    m.castShadow = true;
-    m.receiveShadow = true;
+    m.castShadow = shadows;
+    m.receiveShadow = shadows;
     parts.push(m);
     return m;
   };
@@ -172,7 +203,9 @@ function knightHead(THREE, material, s) {
 
   const slab = new THREE.ExtrudeGeometry(profile, {
     depth: 0.22 * s,
-    bevelEnabled: true,
+    // The bevel roughly doubles the slab's triangle count for a rounding that is invisible
+    // from a seated camera, so the cheap tier extrudes the profile flat.
+    bevelEnabled: detail,
     bevelThickness: 0.010 * s,
     bevelSize: 0.010 * s,
     bevelSegments: 1,
@@ -188,57 +221,62 @@ function knightHead(THREE, material, s) {
   slab.translate(0, 0.40 * s, -0.11 * s);
   slab.computeVertexNormals();
   const head = new THREE.Mesh(slab, material);
-  head.castShadow = true;
-  head.receiveShadow = true;
+  head.castShadow = shadows;
+  head.receiveShadow = shadows;
   parts.push(head);
 
   // Ears, one either side of the slab's thickness (which runs along Z), standing on the
   // poll — the profile dips between them, so they read as ears rather than as spikes.
-  for (const dz of [-0.058, 0.058]) {
-    add(new THREE.ConeGeometry(0.028 * s, 0.11 * s, 5), -0.055, 0.98, dz);
+  // They are two more draw calls on the most numerous minor piece, so the cheap tier
+  // leaves the poll flat; the mane and muzzle still say "knight" on their own.
+  if (detail) {
+    for (const dz of [-0.058, 0.058]) {
+      add(new THREE.ConeGeometry(0.028 * s, 0.11 * s, 5), -0.055, 0.98, dz);
+    }
   }
   return parts;
 }
 
 /** The bishop's diagonal slit, cut as a thin dark wedge across the mitre. */
-function mitreSlit(THREE, material, s) {
+function mitreSlit(THREE, material, s, { shadows = true } = {}) {
   const geo = new THREE.BoxGeometry(0.05 * s, 0.16 * s, 0.42 * s);
   const m = new THREE.Mesh(geo, material);
   m.position.set(0, 0.76 * s, 0);
   m.rotation.x = 0.5;
-  m.castShadow = true;
+  m.castShadow = shadows;
   return m;
 }
 
-function crossFinial(THREE, material, s) {
+function crossFinial(THREE, material, s, { shadows = true } = {}) {
   const up = new THREE.Mesh(new THREE.BoxGeometry(0.05 * s, 0.20 * s, 0.05 * s), material);
   up.position.set(0, 1.12 * s, 0);
   const across = new THREE.Mesh(new THREE.BoxGeometry(0.14 * s, 0.05 * s, 0.05 * s), material);
   across.position.set(0, 1.13 * s, 0);
-  up.castShadow = across.castShadow = true;
+  up.castShadow = across.castShadow = shadows;
+  // The cross is what tells a king from a queen at a glance, so it survives every tier.
   return [up, across];
 }
 
-function crownSpikes(THREE, material, s) {
+function crownSpikes(THREE, material, s, { shadows = true } = {}) {
   const parts = [];
   for (let i = 0; i < 7; i++) {
     const a = (i / 7) * Math.PI * 2;
     const spike = new THREE.Mesh(new THREE.ConeGeometry(0.035 * s, 0.10 * s, 5), material);
     spike.position.set(Math.cos(a) * 0.24 * s, 0.95 * s, Math.sin(a) * 0.24 * s);
-    spike.castShadow = true;
+    spike.castShadow = shadows;
     parts.push(spike);
   }
   return parts;
 }
 
-function battlements(THREE, material, s) {
+function battlements(THREE, material, s, { shadows = true } = {}) {
   const parts = [];
   for (let i = 0; i < 5; i++) {
     const a = (i / 5) * Math.PI * 2;
     const block = new THREE.Mesh(new THREE.BoxGeometry(0.10 * s, 0.10 * s, 0.08 * s), material);
     block.position.set(Math.cos(a) * 0.22 * s, 0.84 * s, Math.sin(a) * 0.22 * s);
     block.rotation.y = -a;
-    block.castShadow = true;
+    block.castShadow = shadows;
     parts.push(block);
   }
   return parts;

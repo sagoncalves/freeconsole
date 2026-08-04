@@ -186,9 +186,16 @@ export function planTile(seed = 9137) {
  *
  * Returns a handle whose update(cameraX, viewW) hides everything outside the camera's
  * span, so off-screen buildings cost nothing to draw.
+ *
+ * `rows` limits how many depth rows are built at all, front to back — the quality tier's
+ * main lever on this scene. Culling only hides what is off to the side; a back row that is
+ * on screen still costs its draw calls every frame, and rows 3 and 4 are the haziest and
+ * most distant, so they are the cheapest thing in the game to give up. Rows that are never
+ * built are never cloned either, which is the larger saving: each building clones its own
+ * materials and so batches with nothing.
  */
-export function buildCity(THREE, group, length, loadedModels, seed = 9137) {
-  const tile = planTile(seed);
+export function buildCity(THREE, group, length, loadedModels, seed = 9137, rows = GRID.rows) {
+  const tile = planTile(seed).filter((b) => b.row < rows);
   const items = [];
 
   // Start one tile before the course and run one past the end, so the city is already

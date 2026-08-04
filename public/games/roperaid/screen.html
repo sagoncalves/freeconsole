@@ -222,7 +222,10 @@ import RAPIER from "/vendor/rapier.js?v=4";
 import {
   ROPE_REACH, COURSE_LENGTH, DEFAULT_MOOD, MOOD_PRESETS, CITY_MODELS,
   buildCity, applyMoodTo, createLights, mulberry32,
-} from "/games/roperaid/course.js?v=14";
+} from "/games/roperaid/course.js?v=15";
+import {
+  TIERS, QUALITY_CHOICES, DEFAULT_QUALITY, resolveTier, applyTextureBudget, makeFpsWatchdog,
+} from "/games/roperaid/quality.js?v=1";
 
 const freeconsole = new FreeConsole();
 
@@ -318,6 +321,33 @@ const GAP_GROWTH = 1.2;         // added across the whole course, still under re
 const FIRST_ANCHOR_X = 10;
 
 
+/* -------------------------------------------------------------- quality */
+
+/**
+ * The admin's choice ("auto" or a tier name) and the tier it resolves to.
+ *
+ * Persisted per-browser so a TV set to Low once comes back Low, rather than making whoever
+ * set it up do it again every session. The CHOICE is stored, not the resolved tier —
+ * "low" and "auto that happened to pick low" are different intentions, and only the first
+ * should survive the device changing.
+ */
+const QUALITY_KEY = "roperaid.quality";
+
+function loadQualityChoice() {
+  try {
+    const stored = localStorage.getItem(QUALITY_KEY);
+    if (stored && QUALITY_CHOICES.includes(stored)) return stored;
+  } catch (err) { /* private mode, or storage disabled — fall through to the default */ }
+  return DEFAULT_QUALITY;
+}
+
+function saveQualityChoice(choice) {
+  try { localStorage.setItem(QUALITY_KEY, choice); } catch (err) { /* not fatal */ }
+}
+
+let qualityChoice = loadQualityChoice();
+let { name: tierName, config: Q } = resolveTier(qualityChoice);
+
 /* ---------------------------------------------------------------- three */
 
 const scene = new THREE.Scene();
@@ -347,8 +377,13 @@ function applyMood() {
 const camera = new THREE.PerspectiveCamera(38, 1, 0.1, 900);
 camera.position.z = 56;
 
-const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+// Antialiasing is fixed at context creation and cannot be toggled on a live renderer, so
+// a tier switch across that boundary leaves it until the next load (see applyQuality).
+const renderer = new THREE.WebGLRenderer({
+  antialias: Q.antialias,
+  powerPreference: "high-performance",
+});
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, Q.maxPixelRatio));
 // ACES tone mapping keeps bright emissive materials from blowing out to flat white, and
 // gives MOOD.exposure something meaningful to scale.
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -375,6 +410,13 @@ const qLean = new THREE.Quaternion();
 // and camera survive between races.
 const courseGroup = new THREE.Group();
 scene.add(courseGroup);
+
+// The city gets its own child group so a quality change can rebuild the backdrop at a
+// different depth without disturbing the anchors, trampolines and gate that share the
+// course — those are what the race is played on, and they must survive a settings change
+// mid-race untouched.
+const cityGroup = new THREE.Group();
+courseGroup.add(cityGroup);
 
 function resize() {
   const w = window.innerWidth, h = window.innerHeight;
@@ -460,6 +502,10 @@ const trampMat = new THREE.MeshStandardMaterial({
  */
 function buildCourse(seedOrMap) {
   courseGroup.clear();
+  // clear() detaches every child including the city's own group, so put it back — it is a
+  // permanent container, and addBackdrop() below fills it.
+  courseGroup.add(cityGroup);
+  clearCity();
   anchors = [];
   trampolines = [];
 
@@ -604,8 +650,40 @@ function addTrampoline(x, y, w, angle = 0) {
  */
 const loadedModels = new Map();
 
+/** Length of the city currently standing, so it can be rebuilt at a new depth. */
+let cityLength = COURSE_LENGTH;
+
 function addBackdrop(length) {
-  cityView = buildCity(THREE, courseGroup, length, loadedModels);
+  // The tier decides how many depth rows exist at all. Culling only hides what is off to
+  // the side; a distant row that is on screen still costs its draw calls every frame, and
+  // at this fog range row 3 is already 100% blended into the background — invisible, but
+  // fully paid for.
+  cityLength = length;
+  cityView = buildCity(THREE, cityGroup, length, loadedModels, 9137, Q.cityRows);
+}
+
+/**
+ * Empty the city, giving back what it holds on the GPU.
+ *
+ * buildCity() clones a model per building AND clones that model's materials, so a plain
+ * detach would strand 128 sets of materials on the GPU every rebuild. Geometry is shared
+ * with the source model (clone() reuses it), so only the materials are ours to dispose.
+ */
+function clearCity() {
+  cityGroup.traverse((child) => {
+    if (!child.isMesh || !child.material) return;
+    for (const m of Array.isArray(child.material) ? child.material : [child.material]) {
+      m.dispose?.();
+    }
+  });
+  cityGroup.clear();
+  cityView = null;
+}
+
+/** Rebuild the backdrop in place, at whatever depth the current tier asks for. */
+function rebuildBackdrop() {
+  clearCity();
+  addBackdrop(cityLength);
 }
 
 /**
@@ -619,7 +697,14 @@ async function loadCityModels() {
   await Promise.all(Object.keys(CITY_MODELS).map((file) => new Promise((resolve) => {
     loader.load(
       `/games/roperaid/models/${file}`,
-      (gltf) => { loadedModels.set(file, gltf.scene); resolve(); },
+      (gltf) => {
+        // Same texture budget as the avatar, and for the same reason: buildings are
+        // cloned 128 times but share one source texture each, so shrinking it here is
+        // paid once and felt by every copy.
+        applyTextureBudget(THREE, gltf.scene, Q);
+        loadedModels.set(file, gltf.scene);
+        resolve();
+      },
       undefined,
       (err) => { console.warn(`scenery model failed: ${file}`, err); resolve(); }
     );
@@ -638,7 +723,12 @@ function addFinishGate(x) {
 /* ---------------------------------------------------------------- players */
 
 // Enough segments to read as a curve without being wasteful.
-const ROPE_SEGMENTS = 10;
+//
+// Tier-driven, and read back from the mesh rather than from here when updating: a rope
+// built under one tier must keep being updated with the count it actually has, or the
+// update indexes children that were never created. The segments are currently laid in a
+// straight line, so on the cheap tier this is close to free to reduce.
+const ROPE_SEGMENTS = Q.ropeSegments;
 
 const bodyGeo = new THREE.CapsuleGeometry(PLAYER_R * 0.72, PLAYER_R * 1.1, 6, 16);
 
@@ -694,6 +784,14 @@ async function loadAvatar() {
       (gltf) => {
         avatarModel = gltf.scene;
         avatarClips = gltf.animations || [];
+        // Shrink the artwork to the tier's budget BEFORE any per-player clone is taken.
+        //
+        // This model ships a single 2048x2048 PNG on a 996-vertex mesh — roughly 21MB of
+        // VRAM once mipmapped, for a character a few hundred pixels tall on screen. It is
+        // the most expensive thing in the game on a TV, and the detail is invisible at this
+        // size. Clones share the texture object, so doing it here does it once for everyone.
+        const resized = applyTextureBudget(THREE, avatarModel, Q);
+        if (resized) console.info(`[roperaid] avatar textures resized to ${Q.maxTextureSize}px (${resized})`);
         // Normalise scale so the model is AVATAR_HEIGHT tall whatever units it was
         // authored in - a model exported in centimetres would otherwise be 100x too big.
         const box = new THREE.Box3().setFromObject(avatarModel);
@@ -902,8 +1000,35 @@ freeconsole.onDisconnect = (device_id) => {
 };
 
 freeconsole.onMessage = (device_id, data) => {
+  if (!data) return;
+
+  // Graphics messages are handled BEFORE the player lookup below: a phone that is
+  // spectating (or joined between races) is not in `players`, but may well be the master
+  // controller, and the settings panel has to work for them too.
+  if (data.type === "get-quality") {
+    broadcastQuality();
+    return;
+  }
+
+  // Graphics quality, set from the master controller.
+  //
+  // Restricted to the master because this is a room-wide setting on a shared screen, not a
+  // per-player preference — otherwise anyone could drop the display to Low mid-race for
+  // everyone. Master is derived (lowest-numbered controller), so it survives that phone
+  // leaving with no handover.
+  if (data.type === "set-quality") {
+    const master = safeCall(() => freeconsole.getMasterControllerDeviceId());
+    if (Number(device_id) !== master) return;
+    if (!QUALITY_CHOICES.includes(data.choice)) return;
+    // An explicit choice retires the watchdog: the admin has spoken, and a later automatic
+    // step-down would silently contradict them.
+    watchdog?.stop();
+    applyQuality(data.choice);
+    return;
+  }
+
   const r = players[device_id];
-  if (!r || !data) return;
+  if (!r) return;
   if (data.hold === undefined) return;
 
   if (data.hold === true) {
@@ -1052,6 +1177,14 @@ function detachRope(r) {
 
 /* ---------------------------------------------------------------- step */
 
+/**
+ * Fixed-timestep accumulator, so physics runs at wall-clock pace regardless of frame rate.
+ * `world.timestep` is 1/60, and these must agree or the simulation drifts from real time.
+ */
+const FIXED_STEP_MS = 1000 / 60;
+let physicsDebt = 0;
+let lastStepAt = performance.now();
+
 function step() {
   const now = performance.now();
 
@@ -1176,7 +1309,26 @@ function step() {
     }
   }
 
-  world.step();
+  // Step physics once per 1/60s of REAL time, not once per rendered frame.
+  //
+  // world.timestep is fixed at 1/60, so a frame-locked step makes the simulation run at
+  // whatever rate the display happens to manage — the 30fps cap on the low tier would run
+  // the whole race at half speed, and a struggling TV would play slow-motion. Consuming an
+  // accumulator keeps wall-clock pace at any frame rate, which also makes the race fair
+  // between a fast screen and a slow one.
+  //
+  // Capped at 4 steps: after a long stall (a tab in the background, a course rebuild) the
+  // backlog is dropped rather than simulated, because catching up 200 steps in one frame
+  // is a freeze followed by every player teleporting.
+  physicsDebt += Math.min(now - lastStepAt, 250);
+  lastStepAt = now;
+  let steps = 0;
+  while (physicsDebt >= FIXED_STEP_MS && steps < 4) {
+    world.step();
+    physicsDebt -= FIXED_STEP_MS;
+    steps++;
+  }
+  if (steps === 4) physicsDebt = 0;   // gave up catching up; don't accumulate forever
 
   // Hold every grappled player exactly ropeLength from their anchor.
   //
@@ -1300,6 +1452,9 @@ function startRace() {
   cancelCountdown = runCountdown(() => {
     phase = "racing";
     raceStart = Date.now();
+    // Start the physics clock fresh: the gap since the last race is not simulation time.
+    physicsDebt = 0;
+    lastStepAt = performance.now();
     safeCall(() => freeconsole.broadcast({ phase: "racing" }));
   });
 }
@@ -1710,9 +1865,12 @@ function syncMeshes(dt = 1 / 60) {
       // The rope is still built from segments (so a future rope could curve), but they
       // are laid in a straight line, sharing the span evenly.
       const angle = Math.atan2(dy, dx) - Math.PI / 2;
-      const segLen = len / ROPE_SEGMENTS;
-      for (let i = 0; i < ROPE_SEGMENTS; i++) {
-        const t = (i + 0.5) / ROPE_SEGMENTS;
+      // Count from the mesh, not from ROPE_SEGMENTS: a rope built before a quality switch
+      // still has its original segments, and indexing past them would throw.
+      const segments = r.ropeMesh.children.length;
+      const segLen = len / segments;
+      for (let i = 0; i < segments; i++) {
+        const t = (i + 0.5) / segments;
         const seg = r.ropeMesh.children[i];
         seg.position.set(r.anchor.x + dx * t, r.anchor.y + dy * t, 0.1);
         seg.scale.set(1, segLen, 1);
@@ -1724,9 +1882,124 @@ function syncMeshes(dt = 1 / 60) {
   }
 }
 
+/* ------------------------------------------------------ switching quality */
+
+/** Last time a frame was actually drawn, for the frame cap. */
+let lastDraw = 0;
+
+/**
+ * Switch tier at runtime.
+ *
+ * The renderer's pixel ratio takes effect immediately. The city has to be rebuilt, because
+ * how many depth rows exist is baked in at build time — that is safe here in a way it was
+ * not in chess, because the course is scenery the physics never sees, and rebuilding it
+ * touches no game state.
+ *
+ * Two things deliberately do NOT change until the page reloads:
+ *   - Antialiasing, which is fixed at WebGL context creation.
+ *   - Texture sizes, which are applied once at load. Re-shrinking would need the original
+ *     image back, and it has already been replaced by the downscaled canvas; re-downloading
+ *     a 7MB asset mid-race to make it *smaller* would cost more than it saves.
+ * The stored choice makes both consistent from the next load, which is when a TV that was
+ * set to Low actually gets the full benefit.
+ *
+ * @param {string} choice   "auto" or a tier name
+ * @param {object} [opts]   `auto: true` when the watchdog chose it, not a person
+ */
+function applyQuality(choice, { auto = false } = {}) {
+  const resolved = resolveTier(choice);
+  const changed = resolved.name !== tierName;
+
+  qualityChoice = choice;
+  tierName = resolved.name;
+  Q = resolved.config;
+  // A watchdog step-down must not be written back as if the admin had asked for it: the
+  // choice stays "auto", so a better device later gets a fresh guess.
+  if (!auto) saveQualityChoice(choice);
+
+  if (!changed) {
+    broadcastQuality();
+    return;
+  }
+
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, Q.maxPixelRatio));
+
+  // Rebuild the city at the new depth. Only the backdrop is touched; anchors, trampolines
+  // and the finish gate are left exactly as they are, so a race in progress is unaffected.
+  if (cityView) {
+    rebuildBackdrop();
+  }
+
+  broadcastQuality();
+}
+
+/** Tell the controllers what the screen is running, so the master can show it selected. */
+function broadcastQuality() {
+  safeCall(() => freeconsole.broadcast({
+    type: "quality",
+    choice: qualityChoice,
+    tier: tierName,
+    tiers: QUALITY_CHOICES.map((name) => ({
+      value: name,
+      label: name === "auto" ? "Auto" : TIERS[name].label,
+      note: name === "auto" ? "Match the device" : TIERS[name].note,
+    })),
+  }));
+}
+
+/**
+ * Live view of what the renderer is actually doing, exposed outside test mode.
+ *
+ * On a TV that is still slow this is the only way to tell whether the tier took effect and
+ * what a frame really costs — not something you can see by looking at the screen.
+ */
+window.__gfxProbe = () => ({
+  choice: qualityChoice,
+  tier: tierName,
+  drawCalls: renderer.info.render.calls,
+  triangles: renderer.info.render.triangles,
+  geometries: renderer.info.memory.geometries,
+  textures: renderer.info.memory.textures,
+  pixelRatio: renderer.getPixelRatio(),
+  cityRows: Q.cityRows,
+  fpsCap: Q.targetFps || 0,
+});
+
 /* ---------------------------------------------------------------- loop */
 
-function frame() {
+/**
+ * Steps the tier down once when the frame rate is persistently bad.
+ * Only armed on "auto" — an explicit choice is an instruction, not a suggestion.
+ */
+const watchdog = qualityChoice === "auto" && tierName !== "low"
+  ? makeFpsWatchdog({
+      onDrop: (fps) => {
+        const next = tierName === "high" ? "medium" : "low";
+        console.info(`[roperaid] ${Math.round(fps)}fps sustained; dropping ${tierName} -> ${next}`);
+        applyQuality(next, { auto: true });
+      },
+    })
+  : null;
+
+function frame(now) {
+  requestAnimationFrame(frame);
+  now = now ?? performance.now();
+
+  // Frame cap. This is the lever that helps a device that is simply out of fill rate: a
+  // steady 30 reads as smooth where an unstable 45 reads as stutter, and it halves GPU
+  // load. The 1ms slack stops a frame arriving a hair early from being skipped, which
+  // would otherwise halve the rate again.
+  //
+  // The physics step lives inside this gate deliberately. Rapier runs at a fixed 1/60
+  // timestep, so stepping it once per RENDERED frame at 30fps makes the race run at half
+  // speed. Stepping it twice keeps wall-clock pace with an uncapped run.
+  if (Q.targetFps) {
+    if (now - lastDraw < 1000 / Q.targetFps - 1) return;
+    lastDraw = now;
+  }
+
+  watchdog?.tick(now);
+
   if (phase === "racing") {
     step();
     // Progress updates: send on CHANGE, not on a timer.
@@ -1809,6 +2082,9 @@ await Promise.all([loadCityModels(), loadAvatar()]);
 assetsReady = true;
 // Anyone who connected while the assets were loading is still waiting for a runner.
 syncPlayers();
+// Announce the active tier once the assets are in. Any controller already up gets it now;
+// one that joins later asks for it itself with get-quality when it opens the panel.
+broadcastQuality();
 
 const params = new URLSearchParams(location.search);
 const isTest = params.get("test") === "1";
@@ -1846,6 +2122,9 @@ function startTestMode(map) {
   cancelCountdown = runCountdown(() => {
     phase = "racing";
     raceStart = Date.now();
+    // Start the physics clock fresh: the gap since the last race is not simulation time.
+    physicsDebt = 0;
+    lastStepAt = performance.now();
   });
 
   const setHold = (held) => {
@@ -1888,6 +2167,9 @@ function restartTest(map) {
   cancelCountdown = runCountdown(() => {
     phase = "racing";
     raceStart = Date.now();
+    // Start the physics clock fresh: the gap since the last race is not simulation time.
+    physicsDebt = 0;
+    lastStepAt = performance.now();
   });
 }
 </script>

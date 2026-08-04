@@ -161,7 +161,10 @@ import {
   squareName, colorOf, kindOf, opposite, findKing,
   WHITE, BLACK, fileOf, rankOf, idx,
 } from "/games/chess3d/chess.js?v=1";
-import { buildPiece, PIECE_HEIGHT } from "/games/chess3d/pieces.js?v=1";
+import { buildPiece, PIECE_HEIGHT } from "/games/chess3d/pieces.js?v=2";
+import {
+  TIERS, QUALITY_CHOICES, DEFAULT_QUALITY, resolveTier, makeFpsWatchdog,
+} from "/games/chess3d/quality.js?v=1";
 
 const freeconsole = new FreeConsole();
 
@@ -207,7 +210,34 @@ const MOVE_MS = 620;         // a piece sliding to its destination
 const HOP_MS = 760;          // knights, which arc higher
 const SWING_MS = 1500;       // camera flight between seats
 const SHATTER_MS = 2600;     // fragments flying, bouncing, then sinking
-const DUST_FADE_MS = 52000;  // how long a death mark lingers on its square
+
+/* ----------------------------------------------------------------- quality */
+
+/**
+ * The admin's choice ("auto" or a tier name) and the tier it resolves to.
+ *
+ * Persisted per-browser so a TV that has been set to Low once comes back Low, rather than
+ * making whoever set it up do it again every session. The choice is what is stored, not
+ * the resolved tier — storing "low" and storing "auto that happened to pick low" are
+ * different intentions, and only the first should survive a hardware change.
+ */
+const QUALITY_KEY = "gambit.quality";
+
+function loadQualityChoice() {
+  try {
+    const stored = localStorage.getItem(QUALITY_KEY);
+    if (stored && QUALITY_CHOICES.includes(stored)) return stored;
+  } catch (err) { /* private mode, or storage disabled — fall through to the default */ }
+  return DEFAULT_QUALITY;
+}
+
+function saveQualityChoice(choice) {
+  try { localStorage.setItem(QUALITY_KEY, choice); } catch (err) { /* not fatal */ }
+}
+
+let qualityChoice = loadQualityChoice();
+let { name: tierName, config: Q } = resolveTier(qualityChoice);
+LOG("quality", { choice: qualityChoice, tier: tierName });
 
 /* ------------------------------------------------------------------- scene */
 
@@ -219,13 +249,20 @@ scene.fog = new THREE.Fog(0x05060d, 20, 46);
 
 const camera = new THREE.PerspectiveCamera(52, 1, 0.05, 200);
 
-const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+// Antialiasing is fixed at context creation — it cannot be toggled on a live renderer —
+// so switching tiers across that boundary rebuilds the page instead (see applyQuality).
+const renderer = new THREE.WebGLRenderer({
+  antialias: Q.antialias,
+  powerPreference: "high-performance",
+});
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, Q.maxPixelRatio));
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.08;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
-renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.shadowMap.enabled = Q.shadows;
+// PCFSoft is the expensive filter. Where shadows survive at all below High, take the
+// cheap one — a harder edge costs far less than dropping the shadow entirely would look.
+renderer.shadowMap.type = tierName === "high" ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
 document.body.appendChild(renderer.domElement);
 
 function resize() {
@@ -239,13 +276,14 @@ resize();
 
 /* ------------------------------------------------------------------ lights */
 
-scene.add(new THREE.AmbientLight(0x2a3350, 1.5));
+const ambient = new THREE.AmbientLight(0x2a3350, 1.5);
+scene.add(ambient);
 
 // Key light hangs over the board and casts the shadows that sell the 3D.
 const key = new THREE.DirectionalLight(0xdfe9ff, 2.4);
 key.position.set(4.5, 11, 3.5);
-key.castShadow = true;
-key.shadow.mapSize.set(2048, 2048);
+key.castShadow = Q.shadows;
+key.shadow.mapSize.set(Q.shadowMapSize, Q.shadowMapSize);
 key.shadow.camera.near = 1;
 key.shadow.camera.far = 30;
 key.shadow.camera.left = -7;
@@ -258,12 +296,26 @@ scene.add(key);
 
 // Two rim lights in the platform's cyan and magenta, one behind each side, so the pieces
 // separate from the dark background even where the key light does not reach.
+//
+// Every additional light multiplies the shading cost of every lit pixel, so the cheap tier
+// drops them and leans on a stronger ambient instead. That loses the coloured edge, but
+// keeps the pieces from sinking into the background — which is the job the rims were
+// really doing.
+// Kept in the scene and toggled with `visible` rather than added and removed, so switching
+// tiers at runtime is a flag flip. An invisible light costs nothing to shade.
 const rimW = new THREE.PointLight(0x35f0e0, 34, 22, 2);
 rimW.position.set(-2.5, 2.4, 6.6);
 scene.add(rimW);
 const rimB = new THREE.PointLight(0xff2e88, 34, 22, 2);
 rimB.position.set(2.5, 2.4, -6.6);
 scene.add(rimB);
+const rimLights = [rimW, rimB];
+
+for (const light of rimLights) light.visible = Q.rimLights;
+if (!Q.rimLights) {
+  ambient.intensity = 2.6;
+  ambient.color.setHex(0x3b4670);
+}
 
 /* ------------------------------------------------------------------ board */
 
@@ -298,7 +350,7 @@ for (let i = 0; i < 64; i++) {
   });
   const mesh = new THREE.Mesh(squareGeo, mat);
   mesh.position.copy(squarePos(i)).setY(-0.06);
-  mesh.receiveShadow = true;
+  mesh.receiveShadow = Q.shadows;
   mesh.userData.base = mat.color.clone();
   boardGroup.add(mesh);
   squareMeshes.push(mesh);
@@ -310,7 +362,7 @@ const plinth = new THREE.Mesh(
   new THREE.MeshStandardMaterial({ color: 0x0a0c18, roughness: 0.85, metalness: 0.2 })
 );
 plinth.position.y = -0.37;
-plinth.receiveShadow = true;
+plinth.receiveShadow = Q.shadows;
 boardGroup.add(plinth);
 
 // A thin lit edge around the board. Kept very dim on purpose: it is a long bright shape
@@ -332,7 +384,7 @@ const ground = new THREE.Mesh(
 );
 ground.rotation.x = -Math.PI / 2;
 ground.position.y = -0.63;
-ground.receiveShadow = true;
+ground.receiveShadow = Q.shadows;
 scene.add(ground);
 
 /* -------------------------------------------------------------- materials */
@@ -362,7 +414,12 @@ const MAT_SEL = {
 let pieceAt = Object.create(null);
 
 function makePiece(kind, color, square) {
-  const group = buildPiece(THREE, kind, MAT[color], 1);
+  const group = buildPiece(THREE, kind, MAT[color], 1, {
+    segments: Q.latheSegments,
+    bandPieces: Q.bandPieces,
+    shadows: Q.shadows,
+    detail: tierName !== "low",
+  });
   group.position.copy(squarePos(square));
   // A knight is only recognisable in profile — head-on it is a featureless slab. It is
   // built facing +X, which is across the board, so leaving the yaw alone presents that
@@ -375,7 +432,15 @@ function makePiece(kind, color, square) {
 
 function clearPieces() {
   for (const key of Object.keys(pieceAt)) {
-    scene.remove(pieceAt[key].group);
+    const group = pieceAt[key].group;
+    scene.remove(group);
+    // Each piece lathes its own geometry, so dropping the group is not enough to give it
+    // back — it has to be disposed explicitly or every rebuild (a new game, or a quality
+    // switch, which rebuilds all 32) strands it on the GPU.
+    //
+    // Materials are deliberately NOT disposed: every piece of a colour shares the same two
+    // globals from MAT, so disposing one here would blank the entire set.
+    group.traverse((o) => { if (o.isMesh) o.geometry.dispose?.(); });
   }
   pieceAt = Object.create(null);
 }
@@ -517,11 +582,18 @@ function updateCamera(now, dt) {
   const pull = 1 - Math.min(VIEW.lift / VIEW.LIFT_LIMIT, 1) * 0.34;
 
   // A slow breathing sway, so a still position never looks like a frozen render.
-  const sway = now / 1000;
+  //
+  // The cheap tier drops it — not for the trigonometry, which is free, but because a camera
+  // that never stops moving means no frame is ever a repeat of the last. At 30fps on a weak
+  // GPU a genuinely still board is worth more than the illusion of life.
+  const sway = Q.cameraSway ? now / 1000 : 0;
+  const swayX = Q.cameraSway ? Math.sin(sway * 0.42) * 0.045 : 0;
+  const swayY = Q.cameraSway ? Math.sin(sway * 0.61) * 0.03 : 0;
+  const swayZ = Q.cameraSway ? Math.cos(sway * 0.37) * 0.045 : 0;
   camera.position.set(
-    ox * pull + Math.sin(sway * 0.42) * 0.045,
-    camPos.y + VIEW.lift + Math.sin(sway * 0.61) * 0.03,
-    oz * pull + Math.cos(sway * 0.37) * 0.045
+    ox * pull + swayX,
+    camPos.y + VIEW.lift + swayY,
+    oz * pull + swayZ
   );
   camera.lookAt(camLook);
 }
@@ -651,6 +723,15 @@ const softDisc = (() => {
  * leaving a dust mark on the square where the piece stood.
  */
 function shatter(entry, impactFrom) {
+  // On the cheap tier a piece is one mesh, so there is nothing to break along — and the
+  // fragments would be the most expensive seconds of the match on the device least able to
+  // afford them. It sinks and fades instead: still clearly a death, at no per-frame cost
+  // beyond the piece that was already there.
+  if (!Q.shatter) {
+    dissolve(entry);
+    return;
+  }
+
   const origin = entry.group.position.clone();
   // Direction the blow came from, so fragments spray away from the attacker rather than
   // symmetrically — a symmetric burst reads as an explosion, this reads as a hit.
@@ -702,9 +783,48 @@ function shatter(entry, impactFrom) {
   addDust(entry.square, entry.color);
 }
 
+/**
+ * The cheap tier's death: the piece sinks through the board and fades out.
+ *
+ * Reuses the shard list rather than adding another update loop, by pushing the whole piece
+ * as a single "fragment" with no velocity and a spin that only settles it. That keeps one
+ * code path responsible for cleaning up dead pieces, which is where the leaks would be.
+ */
+const dissolving = [];
+function dissolve(entry) {
+  // The piece shares the two global materials with every other piece of its colour, so it
+  // has to own a copy before it can fade without taking the whole side with it.
+  entry.group.traverse((o) => {
+    if (!o.isMesh) return;
+    o.material = o.material.clone();
+    o.material.transparent = true;
+  });
+  dissolving.push({ group: entry.group, t0: performance.now(), life: 620 });
+}
+
+function updateDissolving(now) {
+  for (let i = dissolving.length - 1; i >= 0; i--) {
+    const d = dissolving[i];
+    const t = clamp01((now - d.t0) / d.life);
+    d.group.position.y = -t * 0.55;
+    d.group.rotation.y += 0.04;
+    d.group.traverse((o) => { if (o.isMesh) o.material.opacity = 1 - t; });
+    if (t >= 1) {
+      scene.remove(d.group);
+      d.group.traverse((o) => {
+        if (!o.isMesh) return;
+        o.geometry.dispose?.();
+        o.material.dispose?.();
+      });
+      dissolving.splice(i, 1);
+    }
+  }
+}
+
 /** A short-lived cloud of motes at the moment of the break. */
 function puff(origin, color) {
-  const count = 26;
+  const count = Q.puffCount;
+  if (!count) return;
   const positions = new Float32Array(count * 3);
   const velocities = [];
   for (let i = 0; i < count; i++) {
@@ -741,8 +861,30 @@ const puffs = [];
  * over the following minute — so a glance at the board shows not just the position but
  * where the fighting has been. Marks stack: dying twice on a square darkens it further.
  */
+/** Remove every dust mark and give back what it holds on the GPU. */
+function clearDust() {
+  for (const d of dustMarks) {
+    scene.remove(d.mesh);
+    d.mesh.geometry.dispose();
+    d.mesh.material.dispose();
+  }
+  dustMarks.length = 0;
+}
+
 function addDust(square, color) {
-  const geo = new THREE.CircleGeometry(SQ * 0.46, 30);
+  if (!Q.dust) return;
+
+  // Marks are additive, transparent, and overlap each other on a busy board — which is
+  // overdraw, the exact thing a weak GPU is short of. Capping the count bounds that cost:
+  // past the cap the oldest mark (the faintest, so the least missed) is retired early.
+  while (dustMarks.length >= Q.maxDustMarks) {
+    const oldest = dustMarks.shift();
+    scene.remove(oldest.mesh);
+    oldest.mesh.geometry.dispose();
+    oldest.mesh.material.dispose();
+  }
+
+  const geo = new THREE.CircleGeometry(SQ * 0.46, tierName === "high" ? 30 : 16);
   const mat = new THREE.MeshBasicMaterial({
     map: softDisc,
     color: color === WHITE ? 0xbfcbe8 : 0x5b6690,
@@ -759,6 +901,8 @@ function addDust(square, color) {
 }
 
 function updateShards(now, dt) {
+  updateDissolving(now);
+
   const GRAVITY = 9.4;
   for (let i = shards.length - 1; i >= 0; i--) {
     const s = shards[i];
@@ -829,7 +973,7 @@ function updateShards(now, dt) {
     const age = now - d.t0;
     // Bloom in quickly as the fragments land, then fade slowly.
     const fadeIn = clamp01(age / 700);
-    const life = clamp01(age / DUST_FADE_MS);
+    const life = clamp01(age / Q.dustFadeMs);
     d.mesh.material.opacity = 0.44 * fadeIn * (1 - life);
     if (life >= 1) {
       scene.remove(d.mesh);
@@ -1334,9 +1478,10 @@ function startGame() {
   rebuildMarkers();
   renderTaken();
 
-  // Clear any dust left from the previous game.
-  for (const d of dustMarks) scene.remove(d.mesh);
-  dustMarks.length = 0;
+  // Clear any dust left from the previous game. Removing a mesh from the scene does not
+  // free what it holds on the GPU, so each mark is disposed too — without this every game
+  // leaked its dust, which on a TV is the device least able to spare the memory.
+  clearDust();
 
   phase = "playing";
   document.getElementById("lobby").classList.remove("show");
@@ -1512,6 +1657,32 @@ freeconsole.onMessage = (deviceId, data) => {
     return;
   }
 
+  // A phone asking what the graphics settings currently are, so it can draw the panel.
+  if (data.type === "get-quality") {
+    broadcastQuality();
+    return;
+  }
+
+  // Graphics quality, set from the master controller.
+  //
+  // Restricted to the master because this is a room-wide setting on a shared screen, not a
+  // per-player preference: anyone at the table could otherwise drop the display to Low
+  // mid-game for everyone else. Master is derived (lowest-numbered controller) rather than
+  // stored, so it survives that phone leaving with no handover.
+  if (data.type === "set-quality") {
+    const master = safeCall(() => freeconsole.getMasterControllerDeviceId(), undefined);
+    if (Number(deviceId) !== master) {
+      LOG("set-quality ignored: not master", { from: deviceId, master });
+      return;
+    }
+    if (!QUALITY_CHOICES.includes(data.choice)) return;
+    // An explicit choice retires the watchdog: the admin has spoken, and a later automatic
+    // step-down would silently contradict them.
+    watchdog?.stop();
+    applyQuality(data.choice);
+    return;
+  }
+
   if (data.type === "view") {
     // Only the player to move may steer the camera — the screen is showing their seat,
     // and letting the waiting player move it would yank the view out from under them.
@@ -1594,6 +1765,8 @@ if (TEST) {
       return { ok: true };
     },
     select(name) { setSelection(name === null ? null : toIndex(name)); return highlight.targets.length + highlight.captures.length; },
+    /** Switch tier without a phone, so the cost of each can be measured from a test. */
+    quality(choice) { applyQuality(choice); return { choice: qualityChoice, tier: tierName }; },
     /** The authoritative board, for comparing against the rules engine in a test. */
     get board() { return state.board.slice(); },
     /** What the piece table thinks is standing where, to catch it drifting from the board. */
@@ -1612,6 +1785,11 @@ if (TEST) {
         camSide, swinging: !!camSwing,
         taken: { w: takenPieces.w.length, b: takenPieces.b.length },
         highlight: { from: highlight.from, targets: highlight.targets.length, captures: highlight.captures.length },
+        quality: { choice: qualityChoice, tier: tierName },
+        // Draw calls is the number that actually explains a slow TV, so a test can assert
+        // that switching tiers moved it rather than only that the label changed.
+        drawCalls: renderer.info.render.calls,
+        triangles: renderer.info.render.triangles,
       };
     },
   };
@@ -1652,42 +1830,200 @@ window.__camProbe = () => ({
   side: camSide,
 });
 
+/* ------------------------------------------------------ switching quality */
+
+/** Retry handle for a switch that arrived while a move was still animating. */
+let pendingQualityTimer = null;
+
+/**
+ * Switch tier at runtime.
+ *
+ * Most of the scene can be re-tuned in place — shadow flags, light counts, pixel ratio —
+ * but the pieces have to be rebuilt, because banding and segment count are baked into
+ * their geometry. That is fine: the board is the source of truth and the pieces are only
+ * ever a view of it, so buildPiecesFrom(state.board) restores the exact position.
+ *
+ * Antialiasing is the one setting that cannot change on a live WebGL context. Rather than
+ * reload — which would drop an in-progress game — it is simply left as it was until the
+ * page next loads. Everything that matters for frame rate takes effect immediately, and
+ * the stored choice makes the next load consistent.
+ *
+ * @param {string} choice   "auto" or a tier name
+ * @param {object} [opts]   `auto: true` when the watchdog chose it, not a person
+ */
+function applyQuality(choice, { auto = false } = {}) {
+  // Never rebuild the pieces mid-move.
+  //
+  // Rebuilding disposes every piece group, but a move in flight is holding one of those
+  // groups in `moving[]` along with the onArrive callback that commits the new position.
+  // Pulling it out from under the animation would strand the entry on a disposed group and
+  // lose the commit — the move would animate and then never take effect. Waiting for the
+  // board to settle costs at most a second and makes the switch safe from any state.
+  if (isBusy()) {
+    LOG("quality deferred until the board is idle", { choice });
+    clearTimeout(pendingQualityTimer);
+    pendingQualityTimer = setTimeout(() => applyQuality(choice, { auto }), 250);
+    return;
+  }
+
+  const resolved = resolveTier(choice);
+  const changed = resolved.name !== tierName;
+
+  qualityChoice = choice;
+  tierName = resolved.name;
+  Q = resolved.config;
+  // A watchdog step-down must not be written back as if the admin had asked for it: the
+  // choice stays "auto" so a better device later gets a fresh guess.
+  if (!auto) saveQualityChoice(choice);
+
+  LOG("quality applied", { choice, tier: tierName, auto, changed });
+
+  if (!changed) {
+    broadcastQuality();
+    return;
+  }
+
+  // Renderer.
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, Q.maxPixelRatio));
+  renderer.shadowMap.enabled = Q.shadows;
+  renderer.shadowMap.type = tierName === "high" ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
+  // Shadow materials are compiled per-configuration, so every affected material has to be
+  // told to recompile — without this the scene keeps rendering with the old shadow setup.
+  renderer.shadowMap.needsUpdate = true;
+
+  // Lights.
+  key.castShadow = Q.shadows;
+  key.shadow.mapSize.set(Q.shadowMapSize, Q.shadowMapSize);
+  // The shadow map is allocated on first use at the old size; dropping it forces a new one.
+  key.shadow.map?.dispose();
+  key.shadow.map = null;
+
+  for (const light of rimLights) light.visible = Q.rimLights;
+  ambient.intensity = Q.rimLights ? 1.5 : 2.6;
+  ambient.color.setHex(Q.rimLights ? 0x2a3350 : 0x3b4670);
+
+  // Board.
+  for (const mesh of squareMeshes) mesh.receiveShadow = Q.shadows;
+  plinth.receiveShadow = Q.shadows;
+  ground.receiveShadow = Q.shadows;
+
+  // Pieces, which have to be rebuilt from the board rather than re-flagged.
+  buildPiecesFrom(state.board);
+  paintSquares();
+
+  // Effects already in flight belong to the old tier's assumptions; clear them rather than
+  // leave fragments mid-air that the new tier would never have created.
+  clearDust();
+
+  broadcastQuality();
+}
+
+/**
+ * Live view of what the renderer is actually doing, exposed outside test mode.
+ *
+ * Same reasoning as __camProbe: it costs nothing, and on a TV that is still slow this is
+ * the only way to find out whether the tier switch took effect and what the frame is
+ * really costing — which is not something you can see by looking at the screen.
+ */
+window.__gfxProbe = () => ({
+  choice: qualityChoice,
+  tier: tierName,
+  drawCalls: renderer.info.render.calls,
+  triangles: renderer.info.render.triangles,
+  programs: renderer.info.programs?.length ?? 0,
+  geometries: renderer.info.memory.geometries,
+  textures: renderer.info.memory.textures,
+  shadows: renderer.shadowMap.enabled,
+  pixelRatio: renderer.getPixelRatio(),
+  fpsCap: Q.targetFps || 0,
+});
+
+/** Tell the controllers what the screen is running, so the master can show it selected. */
+function broadcastQuality() {
+  safeCall(() => freeconsole.broadcast({
+    type: "quality",
+    choice: qualityChoice,
+    tier: tierName,
+    tiers: QUALITY_CHOICES.map((name) => ({
+      value: name,
+      label: name === "auto" ? "Auto" : TIERS[name].label,
+      note: name === "auto" ? "Match the device" : TIERS[name].note,
+    })),
+  }));
+}
+
 /* --------------------------------------------------------------- the loop */
 
 let lastFrame = performance.now();
+let lastDraw = 0;
 
-function frame() {
-  const now = performance.now();
+/**
+ * Steps the tier down once when the frame rate is persistently bad.
+ *
+ * Only armed on "auto" — an explicit choice is an instruction, not a suggestion, and
+ * quietly overriding it would make the setting look broken.
+ */
+const watchdog = qualityChoice === "auto" && tierName !== "low"
+  ? makeFpsWatchdog({
+      onDrop: (fps) => {
+        const next = tierName === "high" ? "medium" : "low";
+        LOG("fps watchdog: stepping down", { fps: Math.round(fps), from: tierName, to: next });
+        applyQuality(next, { auto: true });
+      },
+    })
+  : null;
+
+function frame(now) {
+  requestAnimationFrame(frame);
+  now = now ?? performance.now();
+
+  // Frame cap. Capping is what actually helps a device that is out of fill rate: a steady
+  // 30 reads as smooth where an unstable 45 reads as stutter, and it halves GPU load. The
+  // 1ms slack stops a frame arriving a hair early from being skipped and halving the rate.
+  if (Q.targetFps) {
+    if (now - lastDraw < 1000 / Q.targetFps - 1) return;
+    lastDraw = now;
+  }
+
   const dt = Math.min((now - lastFrame) / 1000, 0.05);
   lastFrame = now;
+
+  watchdog?.tick(now);
 
   updateCamera(now, dt);
   updateMoving(now);
   updateShards(now, dt);
 
   // Breathe the highlighted squares, so a hint reads as active rather than painted on.
-  const pulse = 0.72 + Math.sin(now / 260) * 0.28;
-  for (let i = 0; i < 64; i++) {
-    const mesh = squareMeshes[i];
-    if (mesh.userData.pulse) mesh.material.emissiveIntensity = mesh.userData.pulse * pulse;
-  }
-  for (const marker of markerGroup.children) {
-    marker.material.opacity = 0.45 + 0.35 * pulse;
+  // Each write here uploads a uniform, so the cheap tier paints the highlight flat and
+  // skips the sweep over all 64 squares entirely.
+  if (Q.squarePulse) {
+    const pulse = 0.72 + Math.sin(now / 260) * 0.28;
+    for (let i = 0; i < 64; i++) {
+      const mesh = squareMeshes[i];
+      if (mesh.userData.pulse) mesh.material.emissiveIntensity = mesh.userData.pulse * pulse;
+    }
+    for (const marker of markerGroup.children) {
+      marker.material.opacity = 0.45 + 0.35 * pulse;
+    }
   }
 
-  // The selected piece bobs, so the player can find it without reading the square.
+  // The selected piece bobs, so the player can find it without reading the square. Kept on
+  // every tier: it is one object, and it is how you find your own piece.
   if (highlight.from !== null && pieceAt[highlight.from]) {
     const p = pieceAt[highlight.from];
     if (!p.anim) p.group.position.y = Math.abs(Math.sin(now / 420)) * 0.11;
   }
 
   renderer.render(scene, camera);
-  requestAnimationFrame(frame);
 }
 
 buildPiecesFrom(state.board);
 paintSquares();
 renderSeats();
+// Announce the active tier once at boot. Any controller already up gets it now; one that
+// joins later asks for it itself with get-quality when it opens the panel.
+broadcastQuality();
 frame();
 </script>
 </body>
