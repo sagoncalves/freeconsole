@@ -334,7 +334,11 @@ function leavePlayer(deviceId) {
 let countdown = 0;
 let countdownTimer = null;
 
+/** Set by the ?sizes=1 harness, which owns the scene and must not have rounds started under it. */
+let roundsSuspended = false;
+
 function maybeStart() {
+  if (roundsSuspended) return;
   if (round.players.size === 0) { showWaiting(); return; }
   if (round.phase === "running" || countdownTimer) return;
   safeCall(() => freeconsole.setActivePlayers());
@@ -696,6 +700,9 @@ requestAnimationFrame(frame);
 // fully playable — so nothing waits on the network and a failed fetch costs only the model.
 loadAvatar().then((gltf) => {
   if (!gltf) return;
+  // The size harness builds its own line-up at its own scales; rebuilding bodies underneath
+  // it would drop them all back to the default height.
+  if (SIZES) return;
   setAvatar(gltf);
   // Re-make any bodies that were built before it arrived.
   for (const id of [...bodies.keys()]) {
@@ -789,7 +796,10 @@ if (TEST) {
  * every candidate on screen at once, at the position the camera actually starts from, so it
  * can be settled by looking. Each is labelled with its index and its height in tiles.
  */
-if (TEST && SIZES) {
+// Deliberately NOT gated behind ?test=1. This is a look-at-it-and-decide tool, and the
+// natural thing to do is append &sizes=1 to the real game running in a real room — which
+// silently did nothing while it required test mode as well.
+if (SIZES) {
   // Largest first, so the biggest candidates sit nearest the camera. Ordered the other way
   // the tall ones end up at the far end where the aisle runs out and they are clipped off
   // the top of the frame — which is exactly the sizes worth judging.
@@ -810,6 +820,14 @@ if (TEST && SIZES) {
     round.mines.fill(0);
     killer.group.visible = false;
     showOverlay(null);
+
+    // In a real room the shell keeps connecting phones and the countdown keeps trying to
+    // start a round, either of which would seat players on top of the line-up and start the
+    // crusher. Neutralise both for as long as the harness is up.
+    roundsSuspended = true;
+    if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+    freeconsole.onConnect = () => {};
+    freeconsole.onDisconnect = () => {};
 
     // Spread them along the AISLE rather than across it. The aisle is only 11 tiles wide but
     // 30 deep, and a 2.5-unit ninja is over 2.5 tiles across at the arms — packed into eleven
