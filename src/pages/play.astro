@@ -141,6 +141,9 @@ const themeColor = "#05060d";
         margin-bottom: 14px;
       }
       .remote-me { flex: 1; min-width: 0; }
+      /* Deliberately quiet: leaving is rare, and it sits beside the player's own name where a
+         stray thumb would otherwise find it. */
+      .btn-leave { flex-shrink: 0; padding: 8px 14px; font-size: 12.5px; opacity: .7; }
       .remote-me .who { font-weight: 700; font-size: 15px; display: flex; align-items: center; gap: 6px; }
       .remote-me .room { font-family: var(--font-mono); font-size: 11px; color: var(--text-faint); }
       .crown { color: var(--amber); }
@@ -278,6 +281,7 @@ const themeColor = "#05060d";
         <div class="who" id="meName">You</div>
         <div class="room" id="meRoom"></div>
       </div>
+      <button class="btn btn-ghost btn-leave" id="leaveRoom" type="button">Leave</button>
     </div>
 
     <div id="masterBanner" hidden>
@@ -338,6 +342,23 @@ const themeColor = "#05060d";
     let myName = null;
     let browsingId = null;   // which poster this device highlights (master only)
 
+    /**
+     * The room this phone is currently in.
+     *
+     * Kept so a reload - a dropped connection, a backgrounded browser, an accidental swipe -
+     * puts the player straight back where they were instead of asking for a code they can no
+     * longer see (the TV has moved on to the game). The slot is claimed by uid, so rejoining
+     * reclaims the same player number rather than taking a new seat.
+     *
+     * Cleared only when the player actually leaves, or when the room turns out to be gone.
+     */
+    const ROOM_KEY = "console:room";
+    const rememberRoom = (code) => { try { localStorage.setItem(ROOM_KEY, code); } catch {} };
+    const forgetRoom = () => { try { localStorage.removeItem(ROOM_KEY); } catch {} };
+    const rememberedRoom = (() => {
+      try { return localStorage.getItem(ROOM_KEY) || ""; } catch { return ""; }
+    })();
+
     nameInput.value = localStorage.getItem("console:name") || "";
 
     /* ---------------------------------------------------------------- join */
@@ -391,10 +412,13 @@ const themeColor = "#05060d";
      * remembers one from a previous game, nothing is needed at all and we join immediately.
      */
     const fromUrl = params.get("room");
-    if (fromUrl) {
-      setCode(fromUrl);
+    // A QR always wins: scanning it is an explicit request for that room, even if this phone
+    // remembers a different one.
+    const startCode = fromUrl || rememberedRoom;
+    if (startCode) {
+      setCode(startCode);
       if (codeInput.value.length === 4) {
-        // The code came from the QR, so say so rather than asking for something already known.
+        // The code is already known, so say so rather than asking for it again.
         document.querySelector(".join-sub").textContent = nameInput.value.trim()
           ? "Joining…"
           : "Just pick a name to join.";
@@ -434,6 +458,9 @@ const themeColor = "#05060d";
 
         const roomSnap = await get(ref(db, `rooms/${code}`));
         if (!roomSnap.exists()) {
+          // The remembered room has been closed on the TV. Drop it so the next reload asks
+          // for a code instead of retrying a room that no longer exists.
+          if (code === rememberedRoom) forgetRoom();
           $("connecting").classList.remove("show");
           showError("No room found with that code. Check the screen and try again.");
           $("go").disabled = false;
@@ -442,6 +469,7 @@ const themeColor = "#05060d";
         }
 
         localStorage.setItem("console:name", name);
+        rememberRoom(code);
         roomCode = code;
         myName = name;
 
@@ -670,6 +698,24 @@ const themeColor = "#05060d";
       } finally {
         $("exitGame").disabled = false;
       }
+    });
+
+    /**
+     * Leaves the room for good.
+     *
+     * This is the one action that should forget the code: the player is asking not to come
+     * back. Everything else - reloads, crashes, closing the tab - deliberately keeps it.
+     *
+     * The page is reloaded rather than unwound by hand, because the join view assumes a fresh
+     * start (no session, no claimed slot, no watchers) and reproducing that in place is more
+     * fragile than starting over.
+     */
+    $("leaveRoom").addEventListener("click", () => {
+      if (!confirm("Leave this room?\n\nYou'll need the code to join again.")) return;
+      forgetRoom();
+      if (session) session.detach();
+      // Drop ?room= too, or the QR code we arrived with would just rejoin us.
+      location.replace(location.pathname);
     });
 
     $("prevGame").addEventListener("click", () => step(-1));

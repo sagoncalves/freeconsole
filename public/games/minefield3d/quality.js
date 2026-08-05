@@ -18,6 +18,12 @@
  *      with aisle size, so low tiers refresh it less often and accept slightly steppy light.
  *   3. Fill rate — antialiasing and pixel ratio, brutal on a 4K panel.
  *   4. Transient effects — blast sparks, crater decals, fog.
+ *
+ * One thing deliberately does *not* scale: the red dread wash over the stage. It is a DOM
+ * layer whose only animated property is opacity, so the compositor owns it and it costs the
+ * GPU essentially nothing even at 4K — but it is the clearest warning the game gives that
+ * something is about to kill you, and Low is the tier a TV actually runs. The knob below
+ * trades its softness, not its presence.
  */
 
 /** @typedef {"low"|"medium"|"high"} Tier */
@@ -40,6 +46,12 @@ export const TIERS = {
     /** A soft glow sprite under each player, so their own lamp is legible. */
     playerGlow: true,
     groundDetail: true,
+    /**
+     * How many steps the dread wash's opacity is quantised to. More steps = a smoother
+     * ramp and more style writes; each write is compositor-only, so this is cheap
+     * everywhere and the tiers differ only slightly.
+     */
+    dreadSteps: 24,
     targetFps: 0,
   },
   medium: {
@@ -56,6 +68,7 @@ export const TIERS = {
     craterDecals: true,
     playerGlow: true,
     groundDetail: false,
+    dreadSteps: 16,
     targetFps: 0,
   },
   low: {
@@ -72,6 +85,10 @@ export const TIERS = {
     craterDecals: false,
     playerGlow: true,        // the whole game is unreadable without it
     groundDetail: false,
+    // Coarser steps, and it matters more here: Low caps the render rate at 30, so a fade
+    // that changed every frame would be visibly steppy without the CSS transition carrying
+    // it. Twelve steps over a half-second ease reads as continuous.
+    dreadSteps: 12,
     targetFps: 30,
   },
 };

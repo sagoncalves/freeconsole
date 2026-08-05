@@ -92,10 +92,32 @@
   }
   @keyframes spin { to { transform: rotate(360deg); } }
 
+  /* A red wash that closes in from the edges as a threat does.
+
+     Fixed gradient, animated opacity only. Opacity is a compositor-only property, so a TV
+     fades this on the GPU without re-rasterising the stage; rewriting the colour or the
+     blur radius every frame instead — an inset box-shadow, say — repaints full-screen each
+     time and is what actually costs a weak GPU its frame budget. `will-change` takes the
+     one-off layer promotion up front rather than on the frame the killer arrives. */
   #dread {
     position: absolute; inset: 0; pointer-events: none; z-index: 4;
-    box-shadow: inset 0 0 18vw 6vw rgba(255,46,136,0);
-    transition: box-shadow .5s ease-out;
+    opacity: 0;
+    will-change: opacity;
+    background:
+      radial-gradient(ellipse 75% 65% at 50% 50%,
+        rgba(255,46,136,0) 40%,
+        rgba(255,46,136,.28) 78%,
+        rgba(255,30,110,.62) 100%);
+    transition: opacity .5s ease-out;
+  }
+  /* Survival runs the wash tighter and thinner — see updateDread for why. Swapping a class
+     changes the gradient once per mode rather than per frame, so it stays off the hot path. */
+  #dread.survival {
+    background:
+      radial-gradient(ellipse 88% 82% at 50% 50%,
+        rgba(255,46,136,0) 55%,
+        rgba(255,46,136,.18) 84%,
+        rgba(255,30,110,.4) 100%);
   }
 
   #quality {
@@ -148,7 +170,7 @@ import {
 } from "/games/minefield3d/scene.js?v=14";
 import {
   TIERS, QUALITY_CHOICES, DEFAULT_QUALITY, resolveTier, makeFpsWatchdog,
-} from "/games/minefield3d/quality.js?v=3";
+} from "/games/minefield3d/quality.js?v=4";
 
 const freeconsole = new FreeConsole();
 
@@ -299,6 +321,10 @@ function rebuildScene() {
   for (const id of round.players.keys()) ensureBody(id);
   setGateOpen(ctx, round.exitOpen);
   document.getElementById("quality").textContent = tierName;
+
+  // The wash quantises against the tier's step count, so a cached step from the old tier
+  // means a different number — force the next frame to write rather than compare.
+  dreadStep = -1;
 }
 
 function applyQuality(choice) {
@@ -928,9 +954,7 @@ function frame(ts) {
 }
 
 function updateDread() {
-  const clear = () => {
-    dread.style.boxShadow = "inset 0 0 18vw 6vw rgba(255,46,136,0)";
-  };
+  const clear = () => setDread(0);
   if (round.phase !== "running") { clear(); return; }
 
   let nearest = Infinity;
@@ -961,16 +985,38 @@ function updateDread() {
   const reach = isSurvival() ? 2.2 : round.rows * 0.35;
   const close = Math.max(0, 1 - nearest / reach);
 
-  // Survival keeps the vignette tight and thin. The escape formula assumes one approaching
-  // threat and ramps to a half-opaque wash; here there are up to a dozen machines and
-  // somebody is nearly always near one, so the same curve floods the screen pink for the
-  // whole round and buries the thing it is supposed to be warning about.
-  const spread = isSurvival() ? 7 + close * 5 : 18 + close * 10;
-  const blur = isSurvival() ? 2 + close * 3 : 6 + close * 5;
-  const alpha = close * (isSurvival() ? 0.3 : 0.5);
+  // Survival keeps the wash tight and thin. The escape curve assumes one approaching threat
+  // and ramps to a half-opaque flood; here there are up to a dozen machines and somebody is
+  // nearly always near one, so the same curve pins the screen pink for the whole round and
+  // buries the thing it is supposed to be warning about. The tighter gradient shape comes
+  // from the .survival class; this only holds the ceiling down.
+  setDread(close * (isSurvival() ? 0.6 : 1));
+}
 
-  dread.style.boxShadow = "inset 0 0 " + spread.toFixed(1) + "vw " +
-    blur.toFixed(1) + "vw rgba(255,46,136," + alpha.toFixed(3) + ")";
+/**
+ * Writes the wash's strength, quantised to the tier's step count.
+ *
+ * Two savings on top of the compositor-friendly gradient itself. Skipping the write when
+ * nothing changed means a still moment costs zero style recalcs; quantising means a player
+ * drifting slowly toward a blade produces a handful of writes rather than one per frame.
+ * Neither is visible — the .5s ease on opacity smooths the steps back into a fade.
+ */
+let dreadStep = -1;
+let dreadSurvival = null;
+function setDread(level) {
+  // The gradient shape is a class, not a per-frame style, so it is only touched when the
+  // mode actually changes — which is at most once per round.
+  const survival = isSurvival();
+  if (survival !== dreadSurvival) {
+    dreadSurvival = survival;
+    dread.classList.toggle("survival", survival);
+  }
+
+  const steps = Q.dreadSteps || 16;
+  const step = Math.round(Math.max(0, Math.min(1, level)) * steps);
+  if (step === dreadStep) return;
+  dreadStep = step;
+  dread.style.opacity = (step / steps).toFixed(3);
 }
 
 /* --------------------------------------------------------------------- boot */

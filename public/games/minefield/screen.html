@@ -90,11 +90,25 @@
   }
   @keyframes spin { to { transform: rotate(360deg); } }
 
-  /* A vignette that tightens as the killer closes. Pure atmosphere, driven by the sim. */
+  /* A red wash that closes in from the edges as the killer does. Pure atmosphere, driven by
+     the sim.
+
+     The gradient itself is fixed and only `opacity` changes per frame, which is deliberate:
+     opacity is a compositor-only property, so a TV animates this on the GPU without
+     re-rasterising anything. Driving the colour or the geometry instead (an inset box-shadow
+     whose blur and alpha are rewritten every frame, say) repaints the whole stage each time
+     and is exactly what makes a weak GPU stutter. `will-change` promotes it to its own layer
+     once, up front, rather than on the first frame the killer appears. */
   #dread {
     position: absolute; inset: 0; pointer-events: none; z-index: 4;
-    box-shadow: inset 0 0 18vw 6vw rgba(255,46,136,0);
-    transition: box-shadow .5s ease-out;
+    opacity: 0;
+    will-change: opacity;
+    background:
+      radial-gradient(ellipse 75% 65% at 50% 50%,
+        rgba(255,46,136,0) 40%,
+        rgba(255,46,136,.28) 78%,
+        rgba(255,30,110,.62) 100%);
+    transition: opacity .5s ease-out;
   }
 </style>
 </head>
@@ -827,10 +841,10 @@ function frame(ts) {
  * the screen itself gets more claustrophobic as it closes.
  */
 function updateDread() {
-  // Nothing while the killer is still off the field: the vignette means "it is close", and
+  // Nothing while the killer is still off the field: the wash means "it is close", and
   // showing it during the opening seconds spends the effect before there is anything to fear.
   if (round.phase !== "running" || round.killerY > round.rows) {
-    dread.style.boxShadow = "inset 0 0 18vw 6vw rgba(255,46,136,0)";
+    setDread(0);
     return;
   }
   let nearest = Infinity;
@@ -842,8 +856,23 @@ function updateDread() {
   // Scaled to the field's depth rather than a fixed row count, so a shallow field does not
   // sit permanently pinned at full dread.
   const close = Math.max(0, 1 - nearest / (round.rows * 0.4));
-  dread.style.boxShadow = "inset 0 0 " + (18 + close * 10).toFixed(1) + "vw " +
-    (6 + close * 5).toFixed(1) + "vw rgba(255,46,136," + (close * 0.5).toFixed(3) + ")";
+  setDread(close);
+}
+
+/**
+ * Writes the wash's strength, quantised to 20 steps.
+ *
+ * Two separate savings, both aimed at the TV. Skipping the write when the value has not
+ * changed means a still moment costs nothing at all; quantising means a player drifting
+ * slowly toward the killer produces a handful of style writes rather than one every frame.
+ * Neither is visible — the .5s transition smooths the steps into a continuous fade.
+ */
+let dreadLevel = -1;
+function setDread(close) {
+  const step = Math.round(Math.max(0, Math.min(1, close)) * 20);
+  if (step === dreadLevel) return;
+  dreadLevel = step;
+  dread.style.opacity = (step / 20).toFixed(2);
 }
 
 function updatePulseBar() {
