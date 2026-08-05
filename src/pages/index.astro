@@ -667,6 +667,13 @@ const description =
           // The store is rendered by this page; anything else is a game loaded in the frame.
           resolveUrl: (home) => (gameUrl(home) === STORE_LOCATION ? null : screenUrlFor(home)),
           onState: renderState,
+          // A dropped room subscription otherwise leaves the stage black with nothing to
+          // explain it - the screen is across the room, so it has to say so itself.
+          onError: (err) => {
+            $("storeEyebrow").textContent = "Connection problem";
+            $("storeTitle").textContent = "Lost contact with the room";
+            $("storeSub").textContent = err && err.message ? err.message : String(err);
+          },
         });
       } catch (err) {
         console.error(err);

@@ -157,21 +157,36 @@ export async function navigate(roomCode, url) {
   await set(ref(db, `rooms/${roomCode}/home`), url || STORE_LOCATION);
 }
 
-/** Subscribes to the room. Fires with { home, devices } on every change. */
-export function watchRoom(roomCode, callback) {
-  return onValue(ref(db, `rooms/${roomCode}`), (snap) => {
-    const room = snap.val();
-    if (!room) return;
+/**
+ * Subscribes to the room. Fires with { home, devices } on every change.
+ *
+ * `onError` matters as much as the value callback. Without it a rejected read - permission
+ * denied, or a socket the browser never manages to open - is COMPLETELY silent: the value
+ * callback simply never fires, so whatever the caller renders from room state never renders
+ * at all. On a screen that means the shell paints its chrome and then shows an empty stage
+ * forever, with nothing logged anywhere to say why.
+ */
+export function watchRoom(roomCode, callback, onError) {
+  return onValue(
+    ref(db, `rooms/${roomCode}`),
+    (snap) => {
+      const room = snap.val();
+      if (!room) return;
 
-    // RTDB returns a sparse object for numeric keys; normalise to a dense array indexed by
-    // slot so `devices[device_id]` works the way the SDK expects.
-    const devices = [];
-    for (const [slot, device] of Object.entries(room.devices || {})) {
-      devices[Number(slot)] = device;
-    }
+      // RTDB returns a sparse object for numeric keys; normalise to a dense array indexed by
+      // slot so `devices[device_id]` works the way the SDK expects.
+      const devices = [];
+      for (const [slot, device] of Object.entries(room.devices || {})) {
+        devices[Number(slot)] = device;
+      }
 
-    callback({ home: room.home || STORE_LOCATION, devices });
-  });
+      callback({ home: room.home || STORE_LOCATION, devices });
+    },
+    (err) => {
+      console.error("[room] watch failed", err);
+      if (onError) onError(err);
+    },
+  );
 }
 
 /**
