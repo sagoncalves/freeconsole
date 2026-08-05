@@ -103,6 +103,16 @@
     position: absolute; inset: 0; pointer-events: none; z-index: 4;
     opacity: 0;
     will-change: opacity;
+    /* Two declarations on purpose. The explicit `ellipse <w> <h>` size is CSS Images 3, and
+       old TV WebKits (some webOS/Tizen builds) drop the whole declaration when they cannot
+       parse it — which would silently delete the warning rather than degrade it. The
+       keyword form below parses everywhere and lands close enough; the second declaration
+       wins wherever it is understood. */
+    background:
+      radial-gradient(ellipse farthest-corner at 50% 50%,
+        rgba(255,46,136,0) 40%,
+        rgba(255,46,136,.28) 78%,
+        rgba(255,30,110,.62) 100%);
     background:
       radial-gradient(ellipse 75% 65% at 50% 50%,
         rgba(255,46,136,0) 40%,
