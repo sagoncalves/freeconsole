@@ -137,7 +137,14 @@ export async function setLocation(roomCode, slot, location) {
 
 /** Publishes this device's custom state — the late-joiner-safe sync primitive. */
 export async function setCustomState(roomCode, slot, custom) {
-  await set(ref(db, `rooms/${roomCode}/devices/${slot}/custom`), custom ?? null);
+  // Written longhand, not with `??`. Files in public/ are served verbatim - Vite treats
+  // them as external so their URLs stay literal for the game iframes - which means ES2020
+  // syntax reaches the client uncompiled. Smart-TV browsers on old Chromium fail to PARSE
+  // it, killing this whole module and every page that imports it before a line runs.
+  await set(
+    ref(db, `rooms/${roomCode}/devices/${slot}/custom`),
+    custom === null || custom === undefined ? null : custom,
+  );
 }
 
 /**
@@ -208,7 +215,7 @@ export async function sendMessage(roomCode, fromSlot, to, data) {
   await push(ref(db, `rooms/${roomCode}/messages`), {
     from: fromSlot,
     to: to === undefined ? null : to,
-    data: data ?? null,
+    data: data === null || data === undefined ? null : data,
     at: Date.now(),
   });
 

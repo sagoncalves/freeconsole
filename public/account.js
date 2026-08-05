@@ -32,7 +32,10 @@ export function mountAccount(app) {
       return;
     }
     const token = await user.getIdTokenResult().catch(() => null);
-    render(host, user, token?.claims?.admin === true, auth);
+    // Longhand rather than `?.`: served verbatim from public/, so ES2020 syntax would fail
+    // to parse on old smart-TV browsers and take the importing page down with it.
+    const isAdmin = !!(token && token.claims && token.claims.admin === true);
+    render(host, user, isAdmin, auth);
   });
 }
 
