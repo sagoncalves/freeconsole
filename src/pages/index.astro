@@ -215,13 +215,7 @@ const description =
          else is the stage. In a game the stage is the entire viewport. */
       #landing.hidden { display: none; }
       #session { display: none; }
-      /* `vh` first, `dvh` second: dvh is Chrome 108+, and Samsung Tizen TVs are frozen on
-         Chrome 94 (Tizen 5.5 ships SamsungBrowser 3.0 / Chrome 94). An unsupported unit
-         makes the browser DROP the whole declaration, so #session got no height, #stage
-         (flex:1) collapsed to zero, and #store (position:absolute; inset:0) rendered its
-         tiles correctly inside a zero-height box - a black screen with no error anywhere.
-         A TV viewport has no dynamic toolbar, so vh and dvh are identical there anyway. */
-      #session.active { display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
+      #session.active { display: flex; flex-direction: column; height: 100dvh; }
 
       /* Two levels of hiding.
          In a room (store or game): the site nav and footer go entirely — this is a console
@@ -409,43 +403,6 @@ const description =
         color: var(--text-faint);
         margin-top: 11px;
       }
-      /* ---------------------------------------------------------------- debug log */
-      /* Above the stage, the code bar and any game frame: if it can't be seen when the
-         screen is black, it is useless. Fixed rather than absolute so it survives whatever
-         layout the room is in. */
-      #debugLog {
-        position: fixed;
-        left: 0; right: 0; bottom: 0;
-        z-index: 9999;
-        max-height: 46vh;
-        overflow-y: auto;
-        background: rgba(0,0,0,.92);
-        border-top: 2px solid #35f0e0;
-        color: #eaf2ff;
-        font-family: ui-monospace, monospace;
-        font-size: 15px;
-        line-height: 1.45;
-        padding: 8px 12px 12px;
-      }
-      #debugLog[hidden] { display: none; }
-      .debug-head {
-        display: flex; align-items: center; justify-content: space-between;
-        position: sticky; top: 0;
-        background: rgba(0,0,0,.92);
-        padding-bottom: 5px;
-        color: #35f0e0;
-        letter-spacing: .1em; text-transform: uppercase; font-size: 12px;
-      }
-      .debug-head button {
-        background: #35f0e0; color: #05060d; border: 0; border-radius: 5px;
-        padding: 5px 12px; font: 700 12px ui-monospace, monospace; cursor: pointer;
-      }
-      .debug-line { padding: 2px 0; border-bottom: 1px solid rgba(120,160,220,.14); word-break: break-word; }
-      .debug-line .t { color: #8492b8; }
-      .debug-line.err { color: #ff6b9d; }
-      .debug-line.warn { color: #ffc247; }
-      .debug-line.good { color: #9dff4f; }
-
       .skeleton {
         height: 232px; border-radius: var(--radius);
         background: linear-gradient(100deg, rgba(26,32,56,.5) 30%, rgba(53,240,224,.07) 50%, rgba(26,32,56,.5) 70%);
@@ -551,61 +508,7 @@ const description =
     </section>
   </main>
 
-  <!-- On-screen debug log.
-       The screen is across the room from anyone who could open devtools, and a TV browser
-       generally has none, so anything that goes wrong has to say so ON the TV. Sits above
-       every layer (including a black stage) and only appears once something is logged. -->
-  <div id="debugLog" hidden>
-    <div class="debug-head">
-      <strong>debug</strong>
-      <button type="button" id="debugClose" aria-label="Hide log">hide</button>
-    </div>
-    <div id="debugBody"></div>
-  </div>
-
   <script type="module">
-    /* ---------------------------------------------------------------- debug log */
-    // Declared before every import runs so nothing can fail earlier than the logger.
-    const debugBody = document.getElementById("debugBody");
-    const debugPanel = document.getElementById("debugLog");
-    const started = Date.now();
-
-    function log(message, kind) {
-      // Console too, for the cases where devtools DO exist.
-      if (kind === "err") console.error("[room]", message);
-      else console.info("[room]", message);
-
-      if (!debugBody || !debugPanel) return;
-      debugPanel.hidden = false;
-
-      const row = document.createElement("div");
-      row.className = "debug-line" + (kind ? " " + kind : "");
-      const time = document.createElement("span");
-      time.className = "t";
-      time.textContent = ((Date.now() - started) / 1000).toFixed(2) + "s ";
-      row.appendChild(time);
-      row.appendChild(document.createTextNode(String(message)));
-      debugBody.appendChild(row);
-      // Keep the newest line in view; the interesting one is always the last.
-      debugPanel.scrollTop = debugPanel.scrollHeight;
-    }
-
-    // Anything thrown anywhere on the page, including inside promises, lands on the TV.
-    window.addEventListener("error", (e) => {
-      log("JS ERROR: " + e.message + " @ " + (e.filename || "?") + ":" + e.lineno, "err");
-    });
-    window.addEventListener("unhandledrejection", (e) => {
-      const r = e.reason;
-      log("UNHANDLED: " + ((r && (r.code || r.message)) || r), "err");
-    });
-
-    document.getElementById("debugClose")?.addEventListener("click", () => {
-      debugPanel.hidden = true;
-    });
-
-    log("page script started");
-    log("UA " + navigator.userAgent);
-
     import { collection, getDocs, getFirestore } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-firestore.js";
     import { getFunctions, httpsCallable } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-functions.js";
     import { app, ensureAuth } from "/relay.js";
@@ -625,7 +528,6 @@ const description =
     const catalog = new Map();   // gameId -> catalog entry
     let session = null;
     let roomCode = null;
-    let catalogReady = null;     // in-flight (or settled) loadCatalog(), so the room can await it
 
     function showError(message) {
       const box = $("error");
@@ -635,32 +537,19 @@ const description =
 
     /* ---------------------------------------------------------------- catalog */
 
-    /**
-     * Loads the catalog once and remembers the in-flight promise.
-     *
-     * Everything that needs games must await this rather than assume it has already
-     * finished: the landing page kicks it off on page load, but a slow TV can reach
-     * renderStore() long before Firestore answers, and an empty catalog there is
-     * indistinguishable from a genuinely empty one.
-     *
-     * A failure is not cached - the room retries rather than inheriting a permanently
-     * empty store from one bad request.
-     */
-    function loadCatalog() {
-      if (catalogReady) return catalogReady;
+    async function loadCatalog() {
+      let snap;
+      try {
+        snap = await getDocs(collection(firestore, "games"));
+      } catch (err) {
+        $("games").innerHTML = "";
+        showError("Could not load the game catalog: " + err.message);
+        return;
+      }
 
-      catalogReady = (async () => {
-        const snap = await getDocs(collection(firestore, "games"));
-        catalog.clear();
-        snap.forEach((doc) => catalog.set(doc.id, doc.data()));
-      })();
-
-      catalogReady = catalogReady.catch((err) => {
-        catalogReady = null;
-        throw err;
-      });
-
-      return catalogReady;
+      catalog.clear();
+      snap.forEach((doc) => catalog.set(doc.id, doc.data()));
+      renderLandingGames();
     }
 
     function renderLandingGames() {
@@ -733,22 +622,9 @@ const description =
       $("error").classList.remove("show");
 
       try {
-        log("startRoom: signing in…");
         const user = await ensureAuth();
-        log("signed in uid=" + user.uid.slice(0, 8) + " anon=" + user.isAnonymous, "good");
-
-        // The store cannot render tiles it doesn't have, and renderStore() is only ever
-        // driven by room changes - so a catalog that arrives after the first render would
-        // leave this TV showing an empty store for the rest of the session. Wait for it
-        // here, where the failure is still reportable, rather than racing it.
-        log("loading catalog…");
-        await loadCatalog();
-        log("catalog loaded: " + catalog.size + " games", catalog.size ? "good" : "warn");
-
-        log("calling createRoom…");
         const { data } = await httpsCallable(functions, "createRoom")({});
         roomCode = data.roomCode;
-        log("room created: " + roomCode, "good");
 
         $("landing").classList.add("hidden");
         $("session").classList.add("active");
@@ -761,7 +637,6 @@ const description =
         $("joinUrl").textContent = joinUrl.replace(/^https?:\/\//, "");
         $("qr").innerHTML = "";
         $("qr").appendChild(renderQR(joinUrl, 48));
-        log("QR drawn, starting session…");
 
         session = await startSession({
           roomCode,
@@ -771,18 +646,8 @@ const description =
           // The store is rendered by this page; anything else is a game loaded in the frame.
           resolveUrl: (home) => (gameUrl(home) === STORE_LOCATION ? null : screenUrlFor(home)),
           onState: renderState,
-          // A dropped room subscription otherwise leaves the stage black with nothing to
-          // explain it - the screen is across the room, so it has to say so itself.
-          onError: (err) => {
-            log("ROOM WATCH FAILED: " + ((err && (err.code || err.message)) || err), "err");
-            $("storeEyebrow").textContent = "Connection problem";
-            $("storeTitle").textContent = "Lost contact with the room";
-            $("storeSub").textContent = err && err.message ? err.message : String(err);
-          },
         });
-        log("session started, deviceId=" + session.deviceId, "good");
       } catch (err) {
-        log("startRoom FAILED: " + ((err && (err.code || err.message)) || err), "err");
         console.error(err);
         showError(err.message || "Could not open the room.");
         toast("Could not open the room", { kind: "error", note: err.message });
@@ -799,29 +664,12 @@ const description =
       return `/games/${id}/screen.html`;
     }
 
-    let renderCount = 0;
-
     function renderState(state) {
       const atStore = gameUrl(state.home) === STORE_LOCATION;
 
       // #store lives inside #stage and is owned by this page, so guard against it being
       // absent rather than assuming - a null here used to take the whole render down.
       const store = $("store");
-
-      // The whole question when the stage is black: did this run, what did it decide, and
-      // was there anything to decide it on. Logged every time for the first few renders.
-      if (++renderCount <= 6) {
-        log(
-          "render#" + renderCount +
-          " home=" + JSON.stringify(state.home) +
-          " atStore=" + atStore +
-          " store=" + (store ? "found" : "MISSING") +
-          " devices=" + (state.devices ? state.devices.length : "none") +
-          " catalog=" + catalog.size,
-          atStore && store ? "good" : "err",
-        );
-      }
-
       if (store) store.classList.toggle("active", atStore);
 
       // In a game nothing of ours should be on screen - the code bar goes too, and the game
@@ -888,12 +736,9 @@ const description =
       }
 
       const grid = $("storeGrid");
-      // An empty catalog is never cached: it is usually "not loaded yet" rather than
-      // "no games", and caching it under a key of "" is what used to leave a slow TV
-      // stuck on an empty store forever.
-      const key = catalog.size === 0 ? null : [...catalog.keys()].join(",");
+      const key = [...catalog.keys()].join(",");
 
-      if (key === null || key !== storeKey) {
+      if (key !== storeKey) {
         storeKey = key;
         grid.innerHTML = "";
 
@@ -948,12 +793,7 @@ const description =
       const focusId = browsing || [...catalog.keys()][0] || null;
       const showFocus = master !== undefined && !!focusId;
 
-      const tiles = grid.querySelectorAll(".tile");
-      if (renderCount <= 6) {
-        log("store drawn: " + tiles.length + " tiles, focus=" + focusId, tiles.length ? "good" : "err");
-      }
-
-      for (const tile of tiles) {
+      for (const tile of grid.querySelectorAll(".tile")) {
         const isFocus = showFocus && tile.dataset.gameId === focusId;
         tile.classList.toggle("focused", isFocus);
         tile.classList.toggle("dim", showFocus && !isFocus);
@@ -969,10 +809,7 @@ const description =
       // Only this page has the button; the event fires for every route.
       if (!button) return;
       button.addEventListener("click", startRoom);
-      loadCatalog().then(renderLandingGames, (err) => {
-        $("games").innerHTML = "";
-        showError("Could not load the game catalog: " + err.message);
-      });
+      loadCatalog();
     });
   </script>
 </BaseLayout>

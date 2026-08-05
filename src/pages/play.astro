@@ -19,9 +19,6 @@ const themeColor = "#05060d";
 
       /* ---------------------------------------------------------------- join */
       .join-wrap {
-        /* vh fallback first - dvh is Chrome 108+ and an unsupported unit drops the whole
-           declaration. See the note in index.astro. */
-        min-height: 100vh;
         min-height: 100dvh;
         display: flex; flex-direction: column; justify-content: center;
         padding: max(24px, env(safe-area-inset-top)) 22px max(24px, env(safe-area-inset-bottom));
@@ -128,7 +125,6 @@ const themeColor = "#05060d";
       .remote-view { display: none; }
       .remote-view.active {
         display: flex; flex-direction: column;
-        min-height: 100vh;
         min-height: 100dvh;
         padding: max(16px, env(safe-area-inset-top)) 16px 0;
         max-width: 560px; margin: 0 auto;
@@ -456,10 +452,6 @@ const themeColor = "#05060d";
           // At the store this page renders the remote itself; anything else loads the game.
           resolveUrl: (home) => (gameUrl(home) === STORE_LOCATION ? null : controllerUrlFor(home)),
           onState: renderState,
-          onError: (err) => {
-            $("guestNote").textContent =
-              "Lost contact with the room: " + ((err && err.message) || err);
-          },
         });
 
         $("joinView").classList.add("hidden");
@@ -474,14 +466,14 @@ const themeColor = "#05060d";
       }
     }
 
-    /**
-     * Loads the catalog. Failures propagate: without it the master gets a picker with
-     * nothing in it and no way to tell that something went wrong.
-     */
     async function loadCatalog() {
-      const snap = await getDocs(collection(firestore, "games"));
-      catalog.clear();
-      snap.forEach((d) => catalog.set(d.id, d.data()));
+      try {
+        const snap = await getDocs(collection(firestore, "games"));
+        catalog.clear();
+        snap.forEach((d) => catalog.set(d.id, d.data()));
+      } catch (err) {
+        console.error("catalog load failed", err);
+      }
     }
 
     function controllerUrlFor(home) {

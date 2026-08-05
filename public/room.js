@@ -137,14 +137,7 @@ export async function setLocation(roomCode, slot, location) {
 
 /** Publishes this device's custom state — the late-joiner-safe sync primitive. */
 export async function setCustomState(roomCode, slot, custom) {
-  // Written longhand, not with `??`. Files in public/ are served verbatim - Vite treats
-  // them as external so their URLs stay literal for the game iframes - which means ES2020
-  // syntax reaches the client uncompiled. Smart-TV browsers on old Chromium fail to PARSE
-  // it, killing this whole module and every page that imports it before a line runs.
-  await set(
-    ref(db, `rooms/${roomCode}/devices/${slot}/custom`),
-    custom === null || custom === undefined ? null : custom,
-  );
+  await set(ref(db, `rooms/${roomCode}/devices/${slot}/custom`), custom ?? null);
 }
 
 /**
@@ -157,36 +150,21 @@ export async function navigate(roomCode, url) {
   await set(ref(db, `rooms/${roomCode}/home`), url || STORE_LOCATION);
 }
 
-/**
- * Subscribes to the room. Fires with { home, devices } on every change.
- *
- * `onError` matters as much as the value callback. Without it a rejected read - permission
- * denied, or a socket the browser never manages to open - is COMPLETELY silent: the value
- * callback simply never fires, so whatever the caller renders from room state never renders
- * at all. On a screen that means the shell paints its chrome and then shows an empty stage
- * forever, with nothing logged anywhere to say why.
- */
-export function watchRoom(roomCode, callback, onError) {
-  return onValue(
-    ref(db, `rooms/${roomCode}`),
-    (snap) => {
-      const room = snap.val();
-      if (!room) return;
+/** Subscribes to the room. Fires with { home, devices } on every change. */
+export function watchRoom(roomCode, callback) {
+  return onValue(ref(db, `rooms/${roomCode}`), (snap) => {
+    const room = snap.val();
+    if (!room) return;
 
-      // RTDB returns a sparse object for numeric keys; normalise to a dense array indexed by
-      // slot so `devices[device_id]` works the way the SDK expects.
-      const devices = [];
-      for (const [slot, device] of Object.entries(room.devices || {})) {
-        devices[Number(slot)] = device;
-      }
+    // RTDB returns a sparse object for numeric keys; normalise to a dense array indexed by
+    // slot so `devices[device_id]` works the way the SDK expects.
+    const devices = [];
+    for (const [slot, device] of Object.entries(room.devices || {})) {
+      devices[Number(slot)] = device;
+    }
 
-      callback({ home: room.home || STORE_LOCATION, devices });
-    },
-    (err) => {
-      console.error("[room] watch failed", err);
-      if (onError) onError(err);
-    },
-  );
+    callback({ home: room.home || STORE_LOCATION, devices });
+  });
 }
 
 /**
@@ -230,7 +208,7 @@ export async function sendMessage(roomCode, fromSlot, to, data) {
   await push(ref(db, `rooms/${roomCode}/messages`), {
     from: fromSlot,
     to: to === undefined ? null : to,
-    data: data === null || data === undefined ? null : data,
+    data: data ?? null,
     at: Date.now(),
   });
 

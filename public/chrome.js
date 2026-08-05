@@ -24,11 +24,7 @@ let toastHost = null;
  */
 export function toast(title, opts = {}) {
   const { kind = "ok", note = null } = opts;
-  // Longhand rather than `??`: this file is served verbatim from public/, so ES2020 syntax
-  // would fail to parse on old smart-TV browsers and take the importing page down with it.
-  const fallbackDuration = kind === "error" ? 6500 : 3600;
-  const duration =
-    opts.duration === null || opts.duration === undefined ? fallbackDuration : opts.duration;
+  const duration = opts.duration ?? (kind === "error" ? 6500 : 3600);
 
   if (!toastHost) {
     toastHost = document.createElement("div");

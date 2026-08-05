@@ -259,29 +259,14 @@ export async function startSession(opts) {
     setLocation(roomCode, deviceId, room.home).catch(() => {});
   }
 
-  // Render once from what we already know, before the first snapshot arrives.
-  //
-  // Everything the shell draws hangs off onState, so until RTDB answers there is nothing on
-  // screen at all. That is a blank stage on any slow connection, and a PERMANENTLY blank one
-  // if the socket never opens - a failure mode with no visible symptom other than "it just
-  // doesn't work". The room's opening state is already known here (the store, this device),
-  // so paint it now and let the subscription correct it.
-  if (onState) onState({ ...room, deviceId, isMaster: session.isMaster });
-
-  unwatchRoom = watchRoom(
-    roomCode,
-    (next) => {
-      room = next;
-      syncFrame();
-      syncPeers();
-      if (bridge) bridge.pushDevices(room.devices);
-      if (bridge) bridge.pushActivePlayers(activePlayerIds(room.devices));
-      if (onState) onState({ ...room, deviceId, isMaster: session.isMaster });
-    },
-    (err) => {
-      if (opts.onError) opts.onError(err);
-    },
-  );
+  unwatchRoom = watchRoom(roomCode, (next) => {
+    room = next;
+    syncFrame();
+    syncPeers();
+    if (bridge) bridge.pushDevices(room.devices);
+    if (bridge) bridge.pushActivePlayers(activePlayerIds(room.devices));
+    if (onState) onState({ ...room, deviceId, isMaster: session.isMaster });
+  });
 
   unwatchMessages = watchMessages(roomCode, deviceId, (from, data) => {
     // Unwrap the dedup tag. Messages from an older client arrive untagged and pass through.

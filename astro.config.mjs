@@ -29,14 +29,6 @@ export default defineConfig({
   devToolbar: { enabled: false },
   vite: {
     build: {
-      // Smart-TV browsers are frozen on old Chromium. Anything they cannot PARSE takes the
-      // whole module down before a line runs - which is not a degraded experience but a
-      // black screen. Pin the floor explicitly rather than inheriting a default that moves.
-      //
-      // NOTE: this only covers what Vite compiles. The shared modules in public/ are marked
-      // external below and served verbatim, so their syntax is NOT lowered by this - keep
-      // them free of ES2020+ syntax by hand.
-      target: "chrome60",
       // lightningcss trips on some legacy CSS fixtures (empty after comment stripping);
       // keep cssMinify off until migrated — gzip still wins most of the bytes back.
       cssMinify: false,
