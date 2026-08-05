@@ -686,7 +686,10 @@ export function createPlayerMesh(colorHex, Q) {
     // fix. The skinned vertex positions are the only source of truth.
     const height = Math.max(0.0001, avatarSourceHeight);
     holder.scale.setScalar(AVATAR_HEIGHT / height);
-    holder.rotation.y = Math.PI;     // it faces +z; players walk toward -z
+    // The export's rest pose already faces down the aisle (toward -z, the gate). The player
+    // group is turned by `heading`, which is atan2(vx, vz) — that is 0 when walking toward
+    // -z, so adding a half turn here spun every ninja to run backwards up the aisle.
+    holder.rotation.y = 0;
 
     body = holder;
     fitScale = holder.scale.x;

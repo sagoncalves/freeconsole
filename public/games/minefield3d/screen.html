@@ -790,7 +790,11 @@ if (TEST) {
  * can be settled by looking. Each is labelled with its index and its height in tiles.
  */
 if (TEST && SIZES) {
-  const HEIGHTS = [0.35, 0.5, 0.65, 0.8, 0.95, 1.1, 1.35, 1.6, 2.0, 2.5];
+  // Largest first, so the biggest candidates sit nearest the camera. Ordered the other way
+  // the tall ones end up at the far end where the aisle runs out and they are clipped off
+  // the top of the frame — which is exactly the sizes worth judging.
+  const HEIGHTS = [2.5, 2.0, 1.6, 1.35, 1.1, 0.95, 0.8, 0.65, 0.5, 0.35];
+  const sizeRigs = [];
 
   loadAvatar().then((gltf) => {
     if (!gltf) { console.warn("[sizes] avatar failed to load"); return; }
@@ -807,17 +811,33 @@ if (TEST && SIZES) {
     killer.group.visible = false;
     showOverlay(null);
 
-    const z = round.rows - 3.5;
-    const lane = round.cols / (HEIGHTS.length + 1);
+    // Spread them along the AISLE rather than across it. The aisle is only 11 tiles wide but
+    // 30 deep, and a 2.5-unit ninja is over 2.5 tiles across at the arms — packed into eleven
+    // lanes the big ones simply overlap and hide the small ones. Marching down the length
+    // gives every figure clear air, and seeing them recede is itself useful: it shows how
+    // each size holds up at the distances the game actually renders them at.
+    const zNear = round.rows - 2.5;
+    const zStep = 1.9;
+    const x = round.cols / 2;
 
     HEIGHTS.forEach((h, i) => {
       setAvatarHeight(h);
       const hex = colorHexOf(i + 1);
       const mesh = createPlayerMesh(hex, Q);
-      mesh.group.position.set(lane * (i + 1), 0, z);
-      // Face the camera so the silhouette is judged the way it will be seen.
+      const z = zNear - i * zStep;
+      // Stagger left/right of the centre line so consecutive figures never occlude.
+      mesh.group.position.set(x + (i % 2 === 0 ? -1.9 : 1.9), 0, z);
       mesh.group.rotation.y = 0;
       ctx.world.add(mesh.group);
+
+      // Run them, so the facing and the animation are judged too — a static T-pose says
+      // nothing about either.
+      if (mesh.actions && mesh.actions.running) {
+        mesh.actions.running.paused = false;
+        // Offset each one's phase so the line is not a chorus line.
+        mesh.actions.running.time = (i * 0.13) % 0.67;
+      }
+      sizeRigs.push(mesh);
 
       // A floating label: index above, height below.
       const cv = document.createElement("canvas");
@@ -826,31 +846,40 @@ if (TEST && SIZES) {
       g.fillStyle = "#eaf2ff";
       g.font = "bold 74px monospace";
       g.textAlign = "center";
-      g.fillText(String(i + 1), 128, 62);
+      // Number by size rank, smallest = 1, so the labels read the same regardless of the
+      // order they happen to be laid out in.
+      g.fillText(String(HEIGHTS.length - i), 128, 62);
       g.font = "38px monospace";
       g.fillStyle = "#8492b8";
       g.fillText(h.toFixed(2), 128, 110);
       const tex = new THREE.CanvasTexture(cv);
       const label = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true }));
       label.scale.set(1.4, 0.7, 1);
-      label.position.set(lane * (i + 1), h + 0.75, z);
+      label.position.set(x + (i % 2 === 0 ? -1.9 : 1.9), h + 0.7, z);
       ctx.world.add(label);
     });
 
     // Put the height back so nothing else in the page is affected.
     setAvatarHeight(1.35);
 
-    // Park the camera where the round actually begins, looking down the line.
-    let held = 0;
-    const hold = () => {
+    // Park the camera behind and above the line, looking down the aisle at it. Roughly the
+    // angle the game itself uses, so the sizes are judged in the framing they will be seen in.
+    let prev = performance.now();
+    const hold = (now) => {
       requestAnimationFrame(hold);
+      const step = Math.min(0.05, ((now || prev) - prev) / 1000);
+      prev = now || prev;
+
+      // The main loop only advances a mixer for a player that is moving, and these rigs are
+      // not in the sim at all, so their run cycles have to be driven here.
+      for (const rig of sizeRigs) if (rig.mixer) rig.mixer.update(step);
+
       // updateCamera runs every frame in the main loop, so the override has to be re-applied
       // after it — otherwise the follow-cam drags the shot off the line-up immediately.
-      ctx.camera.position.set(round.cols / 2, 6.5, z + 11);
-      ctx.camera.lookAt(round.cols / 2, 0.8, z);
-      held++;
+      ctx.camera.position.set(x, 9.5, zNear + 8.5);
+      ctx.camera.lookAt(x, 0.4, zNear - HEIGHTS.length * zStep * 0.62);
     };
-    hold();
+    requestAnimationFrame(hold);
 
     console.log("[sizes] heights:", HEIGHTS.join(", "));
   });
