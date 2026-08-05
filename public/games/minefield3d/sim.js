@@ -178,6 +178,15 @@ export function addPlayer(round, deviceId) {
     pingCount: 0,
 
     input: { up: false, down: false, left: false, right: false },
+
+    /**
+     * Analog stick, when the controller sends one. Held separately from the boolean input
+     * rather than folded into it, because a stick carries a magnitude the four flags cannot
+     * represent: pushing the thumb halfway must actually walk at half speed. `axis` is null
+     * whenever no stick is engaged, which is what lets the two input styles coexist — see
+     * the read in stepPlayer.
+     */
+    axis: null,            // { x, z } with hypot <= 1 while the stick is held, else null
   };
   round.players.set(deviceId, p);
   p.lastPrintX = p.x;
@@ -195,10 +204,31 @@ export function setInput(round, deviceId, key, value) {
   p.input[key] = !!value;
 }
 
+/**
+ * Analog movement from a stick controller. Clamped here rather than trusted, because this
+ * arrives straight off the wire: a magnitude above 1 would otherwise be a speed hack, and a
+ * non-finite one would poison p.x/p.z into NaN for the rest of the round with no way back.
+ *
+ * A zero-length vector is stored as "no stick" rather than as a zero axis. The distinction
+ * matters on the read side — null means the boolean flags still govern, so a controller that
+ * centres its stick falls back cleanly instead of pinning the player in place.
+ */
+export function setAxis(round, deviceId, x, z) {
+  const p = round.players.get(deviceId);
+  if (!p) return;
+  if (!Number.isFinite(x) || !Number.isFinite(z)) { p.axis = null; return; }
+
+  const len = Math.hypot(x, z);
+  if (len < 1e-3) { p.axis = null; return; }
+  const scale = len > 1 ? 1 / len : 1;
+  p.axis = { x: x * scale, z: z * scale };
+}
+
 export function clearInput(round, deviceId) {
   const p = round.players.get(deviceId);
   if (!p) return;
   p.input.up = p.input.down = p.input.left = p.input.right = false;
+  p.axis = null;
 }
 
 /* ------------------------------------------------------------------ lifecycle */
@@ -376,16 +406,34 @@ function stepPlayer(round, p, dt) {
     return;
   }
 
-  let vx = (p.input.right ? 1 : 0) - (p.input.left ? 1 : 0);
-  // "up" is toward the gate, which is toward *lower* z.
-  let vz = (p.input.down ? 1 : 0) - (p.input.up ? 1 : 0);
-  if (vx === 0 && vz === 0) { p.dx = 0; p.dz = 0; return; }
+  let vx;
+  let vz;
+  let throttle;
 
-  const len = Math.hypot(vx, vz);
-  vx /= len;
-  vz /= len;
+  if (p.axis) {
+    // The stick already carries direction *and* magnitude, so it is used as-is. Normalising
+    // it the way the buttons are normalised would quantise every partial push back up to
+    // full speed and throw away the only thing the stick adds over four flags.
+    vx = p.axis.x;
+    vz = p.axis.z;
+    throttle = Math.min(1, Math.hypot(vx, vz));
+    if (throttle < 1e-3) { p.dx = 0; p.dz = 0; return; }
+    vx /= throttle;
+    vz /= throttle;
+  } else {
+    vx = (p.input.right ? 1 : 0) - (p.input.left ? 1 : 0);
+    // "up" is toward the gate, which is toward *lower* z.
+    vz = (p.input.down ? 1 : 0) - (p.input.up ? 1 : 0);
+    if (vx === 0 && vz === 0) { p.dx = 0; p.dz = 0; return; }
 
-  const speed = speedOf(p);
+    const len = Math.hypot(vx, vz);
+    vx /= len;
+    vz /= len;
+    // A pressed button is always full commitment; only the stick can ask for less.
+    throttle = 1;
+  }
+
+  const speed = speedOf(p) * throttle;
   p.dx = vx * speed;
   p.dz = vz * speed;
   p.heading = Math.atan2(vx, vz);

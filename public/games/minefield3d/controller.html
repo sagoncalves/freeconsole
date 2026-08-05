@@ -38,43 +38,59 @@
   .slot.used { background: var(--hot); border-color: var(--hot); box-shadow: 0 0 10px var(--hot); }
   .slot.free { background: var(--lime); border-color: var(--lime); box-shadow: 0 0 10px var(--lime); }
 
+  /* The whole lower half is the stick surface. It is one big touch target rather than a
+     drawn circle you must hit, because in the dark nobody looks at their phone — the thumb
+     lands wherever it lands and the stick forms there. */
   #pad {
-    flex: 1; min-height: 0;
-    display: grid; gap: 8px;
-    grid-template-columns: 1fr 1fr 1fr;
-    grid-template-rows: 1fr 1fr 1fr;
-    grid-template-areas: ".    up    ." "left mid   right" ".    down  .";
+    flex: 1; min-height: 0; position: relative;
+    display: grid; place-items: center;
+    border-radius: 22px; border: 1px solid var(--line);
+    background:
+      radial-gradient(circle at 50% 50%, rgba(53,240,224,.05), transparent 62%),
+      rgba(10,12,24,.45);
+    overflow: hidden;
   }
   #pad.locked { opacity: .3; pointer-events: none; }
 
-  .dir {
-    border-radius: 18px; border: 1px solid var(--line);
-    background: rgba(26,32,56,.5);
-    display: grid; place-items: center;
-    font-size: clamp(20px,8vw,34px); color: var(--text-dim);
-    transition: background .06s, transform .06s, box-shadow .06s, color .06s;
+  /* Base + knob are placed from JS, so they start hidden and centred by transform only. */
+  #base, #knob {
+    position: absolute; left: 0; top: 0;
+    border-radius: 50%; pointer-events: none;
+    opacity: 0; transition: opacity .16s;
   }
-  .dir.up { grid-area: up; border-color: rgba(157,255,79,.35); color: var(--lime); }
-  .dir.down { grid-area: down; border-style: dashed; }
-  .dir.left { grid-area: left; }
-  .dir.right { grid-area: right; }
+  #base {
+    width: 148px; height: 148px; margin: -74px 0 0 -74px;
+    border: 1px solid rgba(53,240,224,.22);
+    background: radial-gradient(circle at 50% 50%, rgba(53,240,224,.07), transparent 70%);
+  }
+  #knob {
+    width: 66px; height: 66px; margin: -33px 0 0 -33px;
+    border: 2px solid var(--me, var(--glow));
+    background: rgba(53,240,224,.16);
+    box-shadow: 0 0 22px rgba(53,240,224,.35), inset 0 0 18px rgba(53,240,224,.2);
+  }
+  #pad.active #base, #pad.active #knob { opacity: 1; }
 
-  .dir.down-active {
-    background: rgba(53,240,224,.22);
-    box-shadow: inset 0 0 26px rgba(53,240,224,.28);
-    color: var(--text); transform: scale(.975);
+  /* The idle hint fades out the moment a thumb lands — it is instruction, not decoration. */
+  #hint {
+    position: absolute; bottom: 12px; left: 0; right: 0; text-align: center;
+    font-family: var(--font-mono); font-size: 9px; letter-spacing: .14em;
+    text-transform: uppercase; color: var(--text-faint);
+    transition: opacity .16s; pointer-events: none;
   }
-  .dir.up.down-active {
-    background: rgba(157,255,79,.22);
-    box-shadow: inset 0 0 26px rgba(157,255,79,.3);
-  }
+  #pad.active #hint { opacity: 0; }
 
-  /* The centre cell is YOUR ping clock. With per-player sonar this is no longer a shared
-     rhythm — it is your own lamp, and knowing when it fires is the difference between
-     stepping into the dark and waiting half a second for the light. */
-  #mid { grid-area: mid; display: grid; place-items: center; position: relative; }
+  /* YOUR ping clock. With per-player sonar this is no longer a shared rhythm — it is your
+     own lamp, and knowing when it fires is the difference between stepping into the dark
+     and waiting half a second for the light. It sits centred *behind* the stick, and fades
+     back while you steer so it never competes with the knob for attention. */
+  #mid {
+    position: absolute; inset: 0; display: grid; place-items: center;
+    pointer-events: none; transition: opacity .16s;
+  }
+  #pad.active #mid { opacity: .25; }
   #pulsering {
-    width: 78%; aspect-ratio: 1; border-radius: 50%;
+    width: 112px; height: 112px; border-radius: 50%;
     border: 2px solid rgba(53,240,224,.14);
     display: grid; place-items: center; gap: 1px;
     font-family: var(--font-mono); font-size: 9px; letter-spacing: .12em;
@@ -126,11 +142,10 @@
 <div id="gate"></div>
 
 <div id="pad" class="locked">
-  <div class="dir up" data-hold="up">▲</div>
-  <div class="dir left" data-hold="left">◀</div>
   <div id="mid"><div id="pulsering"><span class="lbl">your ping</span><span id="pulsetext">—</span></div></div>
-  <div class="dir right" data-hold="right">▶</div>
-  <div class="dir down" data-hold="down">▼</div>
+  <div id="base"></div>
+  <div id="knob"></div>
+  <div id="hint">touch anywhere and drag to move</div>
 </div>
 
 <div id="admin">
@@ -170,87 +185,129 @@
     document.documentElement.style.setProperty("--me", freeconsole.getPlayerColor());
   } catch (err) { /* no shell yet; the default stands */ }
 
-  var held = { up: false, down: false, left: false, right: false };
+  /**
+   * Floating analog stick.
+   *
+   * The stick has no fixed home: wherever the thumb lands becomes the centre, and the vector
+   * is measured from there. That is the right shape for this game specifically — the screen
+   * is dark, the player is watching the TV and not the phone, and a fixed stick you have to
+   * find by feel costs a life every time you miss it.
+   *
+   * `stickId` is the single source of truth for "is a stick engaged", and it holds a pointer
+   * id rather than a boolean. Anything that ends must match the id that started, so a second
+   * finger landing elsewhere on the pad cannot hijack a stick that is already being steered,
+   * and its release cannot cancel one it never owned.
+   */
+  var DEAD_ZONE = 8;    // px of slack, so resting a thumb is not a step into a minefield
+  var MAX_RADIUS = 62;  // px from centre for full speed; matches #base's visual radius
 
-  function sendHold(key, value) {
-    if (held[key] === value) return;
-    held[key] = value;
-    freeconsole.message(FreeConsole.SCREEN, { t: "hold", k: key, v: value });
-  }
+  var stickId = null;
+  var originX = 0;
+  var originY = 0;
+  var sentX = 0;
+  var sentZ = 0;
+
+  var baseEl = document.getElementById("base");
+  var knobEl = document.getElementById("knob");
 
   /**
-   * Pointer routing. Directions come from document-level events rather than per-element
-   * listeners, so a thumb sliding from one arrow to another switches direction without
-   * lifting — which is what walking a diagonal around a mine you just lit requires.
-   *
-   * A held arrow is never state in its own right: `held` and the `down-active` classes are
-   * both *derived*, every time, from which pointers are currently down on which element.
-   * That is the whole defence against a stuck button — there is no path that can turn a
-   * hold on without a live pointer to justify it, so the worst a dropped `pointerup` can do
-   * is survive until the next reconcile, and every exit route reconciles.
+   * Push the vector to the screen, rate-limited by *change* rather than by a timer. A stick
+   * sampled at pointermove rate would be per-frame traffic, which is exactly what the
+   * platform asks games not to send; a small threshold cuts the stream to the moments the
+   * direction actually differs while staying far below anything a thumb can perceive.
    */
-  var active = new Map();
-
-  function keyAt(x, y) {
-    var el = document.elementFromPoint(x, y);
-    while (el && el !== document.body) {
-      if (el.dataset && el.dataset.hold) return el;
-      el = el.parentElement;
-    }
-    return null;
+  function sendAxis(x, z) {
+    if (Math.abs(x - sentX) < 0.04 && Math.abs(z - sentZ) < 0.04) return;
+    sentX = x;
+    sentZ = z;
+    freeconsole.message(FreeConsole.SCREEN, { t: "axis", x: x, z: z });
   }
 
-  /** Recompute holds + highlights from `active`. The single writer for both. */
-  function reconcile() {
-    var want = { up: false, down: false, left: false, right: false };
-    active.forEach(function (el) {
-      if (el && el.dataset && el.dataset.hold in want) want[el.dataset.hold] = true;
-    });
-    for (var k in want) sendHold(k, want[k]);
-
-    var dirs = document.querySelectorAll(".dir[data-hold]");
-    for (var i = 0; i < dirs.length; i++) {
-      dirs[i].classList.toggle("down-active", !!want[dirs[i].dataset.hold]);
-    }
+  function placeStick(cx, cy, kx, ky) {
+    var r = pad.getBoundingClientRect();
+    baseEl.style.transform = "translate(" + (cx - r.left) + "px," + (cy - r.top) + "px)";
+    knobEl.style.transform = "translate(" + (kx - r.left) + "px," + (ky - r.top) + "px)";
   }
 
+  /** Turn a raw touch position into a clamped vector, and move the knob to match. */
+  function updateStick(px, py) {
+    var dx = px - originX;
+    var dy = py - originY;
+    var dist = Math.hypot(dx, dy);
+
+    if (dist < DEAD_ZONE) {
+      placeStick(originX, originY, originX, originY);
+      sendAxis(0, 0);
+      return;
+    }
+
+    // Re-map so the vector ramps from 0 at the dead-zone edge instead of jumping to a
+    // sizeable value the instant it is crossed.
+    var mag = Math.min(1, (dist - DEAD_ZONE) / (MAX_RADIUS - DEAD_ZONE));
+    var ux = dx / dist;
+    var uy = dy / dist;
+
+    var draw = Math.min(dist, MAX_RADIUS);
+    placeStick(originX, originY, originX + ux * draw, originY + uy * draw);
+
+    // Screen y grows downward and the world's +z runs away from the gate, which is the same
+    // direction — so dy maps to z with no flip. "Up" on the pad is toward lower z, and that
+    // falls out of the sign automatically.
+    sendAxis(ux * mag, uy * mag);
+  }
+
+  function endStick() {
+    stickId = null;
+    pad.classList.remove("active");
+    sendAxis(0, 0);
+    // Send the neutral vector unconditionally, even if sendAxis just suppressed it as
+    // too-small a change: a release must never be the message that gets rate-limited away,
+    // or the player keeps walking after lifting off.
+    sentX = 0;
+    sentZ = 0;
+    freeconsole.message(FreeConsole.SCREEN, { t: "release" });
+  }
+
+  /** Every exit route funnels here, so there is one definition of "not steering". */
   function releaseAll() {
-    active.clear();
-    reconcile();
-  }
-
-  function engage(pointerId, el) {
-    if (active.get(pointerId) === el) return;
-    if (el) active.set(pointerId, el);
-    else active.delete(pointerId);
-    reconcile();
+    if (stickId === null) return;
+    endStick();
   }
 
   document.addEventListener("pointerdown", function (e) {
     if (over) { again(); return; }
     if (e.target && e.target.classList && e.target.classList.contains("q")) return;
+    // The stick lives on the pad only, so the status text and the admin row stay tappable.
+    if (!pad.contains(e.target)) return;
     e.preventDefault();
 
+    // A stick is already being steered by another finger; ignore this one entirely rather
+    // than snatching the origin out from under a thumb that is mid-move.
+    if (stickId !== null) return;
+
     // Deliberately NO setPointerCapture. On iOS it retargets pointerup to the capturing
-    // element, so a release handler bound to document may never fire and the arrow sticks
+    // element, so a release handler bound to document may never fire and the player walks
     // on forever. See the same note in roperaid/controller.html. Releases are covered by
     // the handlers below instead, which do not depend on where the finger came up.
-    engage(e.pointerId, keyAt(e.clientX, e.clientY));
+    stickId = e.pointerId;
+    originX = e.clientX;
+    originY = e.clientY;
+    pad.classList.add("active");
+    placeStick(originX, originY, originX, originY);
+    updateStick(e.clientX, e.clientY);
   }, { passive: false });
 
   document.addEventListener("pointermove", function (e) {
-    if (!active.has(e.pointerId)) return;
+    if (stickId !== e.pointerId) return;
     e.preventDefault();
     // Do NOT test e.buttons here. It is a mouse-button bitmask; for touch pointers browsers
     // report 0 on stationary/coalesced moves even while the finger is firmly down, so using
     // it as a "still pressed" probe kills long presses partway through. Releases come from
     // pointerup/pointercancel/touchend only.
     //
-    // A miss (finger in the gutter between arrows, or the layout shifted under a stationary
-    // thumb when the admin row appeared) keeps the arrow it already had. Only landing on a
-    // *different* arrow switches. Lifting is what ends a hold, never a hit-test miss.
-    var el = keyAt(e.clientX, e.clientY);
-    if (el) engage(e.pointerId, el);
+    // The finger is free to travel outside the pad — the vector just clamps at full tilt.
+    // Dragging past the edge is how you hold a run, not how you let go.
+    updateStick(e.clientX, e.clientY);
   }, { passive: false });
 
   /**
@@ -262,7 +319,7 @@
    * the page stops propagation, and so a lift over an element outside body's subtree (the
    * fixed banner, the scrollbar gutter) is still seen.
    */
-  function release(e) { engage(e.pointerId, null); }
+  function release(e) { if (stickId === e.pointerId) endStick(); }
   window.addEventListener("pointerup", release, true);
   window.addEventListener("pointercancel", release, true);
 
@@ -293,16 +350,13 @@
   /**
    * Last resort, and deliberately not a timer. There is no API that answers "is pointer N
    * still down", so a periodic sweep can only guess — and a wrong guess drops a finger that
-   * is genuinely held, which is worse than the stuck arrow it would be trying to clear.
-   * Instead: any fresh touch that finds no other pointer down proves the old ids are dead.
+   * is genuinely held, which is worse than the stuck stick it would be trying to clear.
+   * Instead: a fresh *primary* touch proves no other finger is on the glass, so a stick
+   * still held by some earlier id can only be a leak. Runs in the capture phase, ahead of
+   * the handler that claims the new pointer, so the clear cannot wipe the stick just made.
    */
   document.addEventListener("pointerdown", function (e) {
-    if (e.isPrimary && active.size) {
-      var dead = [];
-      active.forEach(function (el, id) { if (id !== e.pointerId) dead.push(id); });
-      for (var i = 0; i < dead.length; i++) active.delete(dead[i]);
-      if (dead.length) reconcile();
-    }
+    if (e.isPrimary && stickId !== null && stickId !== e.pointerId) endStick();
   }, true);
 
   function again() {

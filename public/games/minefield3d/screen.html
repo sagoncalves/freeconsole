@@ -396,6 +396,7 @@ freeconsole.onMessage = function (deviceId, data) {
   if (!data) return;
 
   if (data.t === "hold") { sim.setInput(round, deviceId, data.k, data.v); return; }
+  if (data.t === "axis") { sim.setAxis(round, deviceId, data.x, data.z); return; }
   if (data.t === "release") { sim.clearInput(round, deviceId); return; }
 
   if (data.t === "quality" && QUALITY_CHOICES.includes(data.choice)) {
