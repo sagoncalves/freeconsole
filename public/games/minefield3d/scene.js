@@ -511,6 +511,15 @@ let AVATAR_HEIGHT = 2.5;
  */
 const CRAWL_PIVOT_SHIFT = 1.59 / 2.5;
 
+/**
+ * How far a pitched-over body must be lifted to sit ON the floor rather than through it.
+ *
+ * Same cause as the forward shift: rotating about the feet swings the torso downward too.
+ * Measured at 0.65 units sunk below ground on a 2.5-unit avatar, plus a little clearance so
+ * the chest rests on the surface instead of intersecting it.
+ */
+const CRAWL_LIFT = 0.73 / 2.5;
+
 /** Override the avatar height. Used by the size-comparison harness (?sizes=1). */
 export function setAvatarHeight(h) {
   if (h > 0) AVATAR_HEIGHT = h;
@@ -931,11 +940,11 @@ function poseCrawlIdle(mesh) {
   // Both arms tucked in under the chest, elbows bent, holding the upper body off the floor.
   if (bones.LeftArm) {
     bones.LeftArm.rotation.x = rest.LeftArm.rot.x - 0.55;
-    bones.LeftArm.rotation.z = rest.LeftArm.rot.z + 0.5;
+    bones.LeftArm.rotation.z = rest.LeftArm.rot.z - 0.3;
   }
   if (bones.RightArm) {
     bones.RightArm.rotation.x = rest.RightArm.rot.x - 0.55;
-    bones.RightArm.rotation.z = rest.RightArm.rot.z - 0.5;
+    bones.RightArm.rotation.z = rest.RightArm.rot.z + 0.3;
   }
   if (bones.LeftForeArm) bones.LeftForeArm.rotation.x = rest.LeftForeArm.rot.x - 1.15;
   if (bones.RightForeArm) bones.RightForeArm.rotation.x = rest.RightForeArm.rot.x - 1.15;
@@ -955,7 +964,9 @@ function poseCrawlIdle(mesh) {
   if (bones.Spine01) bones.Spine01.rotation.y = rest.Spine01.rot.y;
   if (bones.Spine02) bones.Spine02.rotation.y = rest.Spine02.rot.y;
 
-  body.position.y = 0.15 + breath * 0.012;
+  // Relative to the lift set by poseCrawl, not an absolute height — hardcoding a value
+  // here would sink the body back through the floor.
+  body.position.y = CRAWL_LIFT * AVATAR_HEIGHT + breath * 0.012 * AVATAR_HEIGHT;
 }
 
 /** Put every hand-driven bone back to its bind pose, so the run clip owns the body again. */
@@ -995,7 +1006,13 @@ function poseCrawl(mesh, p, moving, dt) {
   // Tip FORWARD onto the front, not backward. The model faces -z, so a -90° pitch rotates
   // its forward axis up and behind it — the crawler ends up dragging itself head-first in
   // the direction it came from. +90° lays it on its front still pointing down the aisle.
-  body.rotation.x = Math.PI / 2 - 0.12;
+  //
+  // Go slightly PAST flat rather than stopping short of it. Seen from a camera that is
+  // already looking down, a body held a few degrees above horizontal still presents its back
+  // as an upright silhouette — it reads as someone standing, with whichever arm is forward
+  // sticking out sideways. Overshooting pins the chest to the ground and makes the pose
+  // unmistakably prone from this angle.
+  body.rotation.x = Math.PI / 2 + 0.16;
   body.scale.setScalar(baseScale);
 
   // Pull the body back onto the player's actual position.
@@ -1008,7 +1025,12 @@ function poseCrawl(mesh, p, moving, dt) {
   //
   // The shift is derived from the avatar's height rather than hardcoded, so it stays right
   // if AVATAR_HEIGHT changes.
-  body.position.set(0, 0.16, -CRAWL_PIVOT_SHIFT * AVATAR_HEIGHT);
+  // Lift enough to clear the floor. Pitching about the foot pivot swings the torso DOWN as
+  // well as forward, so a fixed nudge is not enough: measured, the body sank 0.65 units
+  // through the ground and only the raised shoulder stayed visible — which reads as a lump
+  // lying at an angle rather than as a person on their front. Both the lift and the forward
+  // shift scale with the avatar so they stay right at any size.
+  body.position.set(0, CRAWL_LIFT * AVATAR_HEIGHT, -CRAWL_PIVOT_SHIFT * AVATAR_HEIGHT);
 
   if (!bones || !rest) return;
 
@@ -1028,13 +1050,17 @@ function poseCrawl(mesh, p, moving, dt) {
   const reachL = Math.sin(t);
   const reachR = Math.sin(t + Math.PI);
 
+  // Arms stay tucked close to the body and reach along it, rather than out to the sides.
+  // Splaying them wide was what made a crawler read as a standing figure with one arm
+  // pointing off to the right: from overhead the outstretched limb is the most legible part
+  // of the silhouette, and it dominates the shape.
   if (bones.LeftArm) {
     bones.LeftArm.rotation.x = rest.LeftArm.rot.x + (-0.9 + reachL * 0.75) * amp;
-    bones.LeftArm.rotation.z = rest.LeftArm.rot.z + 0.35 * amp;
+    bones.LeftArm.rotation.z = rest.LeftArm.rot.z - 0.22 * amp;
   }
   if (bones.RightArm) {
     bones.RightArm.rotation.x = rest.RightArm.rot.x + (-0.9 + reachR * 0.75) * amp;
-    bones.RightArm.rotation.z = rest.RightArm.rot.z - 0.35 * amp;
+    bones.RightArm.rotation.z = rest.RightArm.rot.z + 0.22 * amp;
   }
   // Forearms bend hardest at the end of the pull, where the hand is under the shoulder.
   if (bones.LeftForeArm) {
@@ -1055,7 +1081,8 @@ function poseCrawl(mesh, p, moving, dt) {
   if (bones.Head) bones.Head.rotation.x = rest.Head.rot.x - 0.45;
 
   // A slight bob as the body is hauled along.
-  body.position.y = 0.16 + (moving ? Math.abs(Math.sin(t)) * 0.03 : 0);
+  body.position.y = CRAWL_LIFT * AVATAR_HEIGHT
+    + (moving ? Math.abs(Math.sin(t)) * 0.03 * AVATAR_HEIGHT : 0);
 }
 
 /* ------------------------------------------------------------------- killer */
