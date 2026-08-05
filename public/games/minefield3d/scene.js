@@ -987,7 +987,13 @@ export function posePlayer(mesh, p, states, dt) {
       running.setEffectiveWeight(animated ? mesh.blend : 0);
       // Tie the stride to how fast this player can actually move, so a limper's legs do not
       // windmill at full walking speed.
-      running.timeScale = Math.max(0.4, speed / 3.0);
+      //
+      // The floor is well above 1 rather than at 0.4, because speed/3.0 is only "normal
+      // rate" for a two-legged player at a dead sprint. Anything slower — a limp, a stick
+      // pushed halfway, or any of the shoving that goes on in an arena — drove the clip down
+      // toward a third rate and read as slow motion. Legs that turn over slightly too fast
+      // are invisible; legs that turn over too slowly look broken.
+      running.timeScale = Math.max(1.15, speed / 3.0);
     }
 
     // Keep stepping while either clip still carries weight, so the fade itself plays out.
@@ -1341,22 +1347,33 @@ export function createRoombaMesh(Q, colorHex = 0xff2e88) {
   if (Q.shadows) disc.castShadow = true;
   group.add(blade);
 
-  // The face: one eye pointing along -z, which is the group's forward once it is rotated by
-  // the sim's heading.
+  // A bright bar across the leading edge — a bumper, not a face.
+  //
+  // This was an eye in an earlier pass, when the machines still chose a target. With nothing
+  // steering, an eye actively lies: players read it as being looked at and try to break line of
+  // sight from something that has no sight to break. A blunt bar says "this end hits things",
+  // which is the whole truth about it.
   const eyeMat = new THREE.MeshBasicMaterial({ color: colorHex });
-  const eye = new THREE.Mesh(new THREE.SphereGeometry(0.075, 8, 6), eyeMat);
-  eye.position.set(0, 0.22, -0.42);
+  const eye = new THREE.Mesh(new THREE.BoxGeometry(0.58, 0.09, 0.07), eyeMat);
+  eye.position.set(0, 0.2, -0.44);
   group.add(eye);
 
-  // Two headlamps thrown on the floor ahead. These are the tell for "it has seen you" — they
-  // brighten on lock — and they double as the only moving light source in the room.
+  // A streak of light on the floor ahead of the machine, along its line of travel.
+  //
+  // Read carefully as a *trail*, not as a headlamp: a cone thrown forward implies something is
+  // looking down it, and nothing here is looking at anything. Its job is to make the line a
+  // saw is currently on visible a beat before the saw gets there, because sidestepping that
+  // line is the only defence the mode offers.
+  // Deliberately a warm near-white rather than the machine's own dim hazard pink: the trail is
+  // the single piece of forewarning the mode gives, and in the machines' own colour it sat at
+  // the same value as the unlit floor and read as a smear rather than as a heading.
   const beamMat = new THREE.MeshBasicMaterial({
-    color: colorHex, transparent: true, opacity: 0.1,
+    color: 0xffc9a8, transparent: true, opacity: 0.1,
     blending: THREE.AdditiveBlending, depthWrite: false,
   });
-  const beam = new THREE.Mesh(new THREE.PlaneGeometry(1.1, 2.6), beamMat);
+  const beam = new THREE.Mesh(new THREE.PlaneGeometry(0.5, 3.4), beamMat);
   beam.rotation.x = -Math.PI / 2;
-  beam.position.set(0, 0.03, -1.5);
+  beam.position.set(0, 0.03, -1.7);
   group.add(beam);
 
   // A pool of light under the machine so it is never invisible on unlit floor. Without it a
@@ -1382,23 +1399,76 @@ export function createRoombaMesh(Q, colorHex = 0xff2e88) {
   return { group, body, blade, rim, eye, beam, beamMat, glow, glowMat, lamp };
 }
 
-/** Pose one machine from its sim state. */
+/**
+ * Pose one machine from its sim state.
+ *
+ * There is no "hunting" state to show any more — nothing targets anybody, so brightening a
+ * machine that had locked on would be showing an intent that no longer exists. What the
+ * lighting tracks instead is speed: a saw that has been knocked around a few times is genuinely
+ * more dangerous than a fresh one, and that is worth reading across the room.
+ */
 export function updateRoombaMesh(mesh, r, dt) {
   mesh.group.position.set(r.x, 0, r.z);
   mesh.group.rotation.y = r.heading;
   mesh.blade.rotation.y = r.spin;
 
-  // Locked on: lamps up, so a player can tell which of the machines in the room is theirs.
-  const hunting = !!r.target && r.stagger <= 0;
-  mesh.beamMat.opacity += ((hunting ? 0.3 : 0.08) - mesh.beamMat.opacity) * Math.min(1, dt * 6);
-  mesh.glowMat.opacity += ((hunting ? 0.34 : 0.2) - mesh.glowMat.opacity) * Math.min(1, dt * 6);
-  if (mesh.lamp) mesh.lamp.intensity = hunting ? 2.6 : 1.4;
+  // How wound-up this machine is, 0..1, from its accumulated tempo.
+  const hot = Math.max(0, Math.min(1, (r.tempo - 0.9) / 1.0));
 
-  // Stalled by a mine: sagging and tilted, so the window to move is unmistakable from across
-  // the room rather than something you have to infer from it not advancing.
-  const hurt = r.stagger > 0;
-  mesh.group.position.y = hurt ? -0.06 : 0;
-  mesh.group.rotation.z = hurt ? Math.sin(r.spin * 2) * 0.12 : 0;
+  mesh.beamMat.opacity += ((0.1 + hot * 0.22) - mesh.beamMat.opacity) * Math.min(1, dt * 6);
+  mesh.glowMat.opacity += ((0.2 + hot * 0.2) - mesh.glowMat.opacity) * Math.min(1, dt * 6);
+  if (mesh.lamp) mesh.lamp.intensity = 1.4 + hot * 1.4;
+
+  // A slight wobble that rises with speed, so a fast machine visibly judders rather than
+  // gliding. It sells "out of control" more cheaply than any amount of extra geometry.
+  //
+  // Driven off its own clock rather than off r.spin: the blade turns at 34 rad/s, and a wobble
+  // riding that would oscillate several times per frame and alias into a static tilt.
+  mesh.wobble = (mesh.wobble || 0) + dt * 9;
+  mesh.group.rotation.z = Math.sin(mesh.wobble) * 0.05 * hot;
+}
+
+/**
+ * The flash where two machines slam into each other.
+ *
+ * Deliberately loud. The collisions ARE the mode — they are the moment the room stops being
+ * predictable — so they need to announce themselves, and a player who was not looking at that
+ * corner still has to learn that two blades just changed direction.
+ */
+export function createClang(hard) {
+  const group = new THREE.Group();
+
+  const mat = new THREE.MeshBasicMaterial({
+    color: hard ? 0xfff0b0 : 0x9fd8ff,
+    transparent: true,
+    opacity: hard ? 0.85 : 0.4,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  });
+  const ring = new THREE.Mesh(new THREE.RingGeometry(0.18, 0.32, 16), mat);
+  ring.rotation.x = -Math.PI / 2;
+  ring.position.y = 0.28;
+  group.add(ring);
+
+  let light = null;
+  if (hard) {
+    light = new THREE.PointLight(0xffd070, 3.5, 4, 2);
+    light.position.y = 0.5;
+    group.add(light);
+  }
+
+  return { group, ring, mat, light, life: 1, hard };
+}
+
+/** Advance a clang. Returns false once it is done. */
+export function stepClang(fx, dt) {
+  fx.life -= dt * (fx.hard ? 3.4 : 5.5);
+  if (fx.life <= 0) return false;
+  const a = fx.life;
+  fx.ring.scale.setScalar(1 + (1 - a) * (fx.hard ? 3.4 : 1.8));
+  fx.mat.opacity = a * a * (fx.hard ? 0.85 : 0.4);
+  if (fx.light) fx.light.intensity = a * a * 3.5;
+  return true;
 }
 
 /* ------------------------------------------------------------------- sonar */

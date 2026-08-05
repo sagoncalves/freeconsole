@@ -130,33 +130,40 @@ export function getLevel(index) {
  * the only question is how long you last.
  *
  * That inversion is why it needs its own arenas rather than a flag on the ones above. A long
- * narrow aisle is exactly wrong for it: with walls that close on two sides, a saw that picks
- * you cannot be circled, and the whole mode is circling. These rooms are wide and roughly
- * square so there is always somewhere to go — the pressure has to come from the machines
- * choosing you, never from the geometry running out.
+ * narrow aisle is exactly wrong for it: blades that ricochet need room to ricochet *in*, and
+ * in a corridor every bounce sends one straight back down the only line the players can stand
+ * on. These rooms are wide and roughly square so there is always somewhere to go — the
+ * pressure has to come from the machines, never from the geometry running out.
  *
- * The minefield stays, and it changes meaning completely. In the aisle a mine is a toll on
- * the way somewhere. Here it is terrain you kite across: the saws detonate what they roll
- * over, so the safest floor in the room is the ground a roomba has already cleared, and
- * getting it cleared means letting one chase you over it.
+ * There are no mines in these rooms. The floor is bare. A mine is a static hazard you beat by
+ * reading the ground and remembering it, and asking a player to do that while a dozen loose
+ * blades ricochet around them splits their attention between a puzzle and a reflex test — so
+ * the deaths that came from the floor read as arbitrary next to the ones that came from the
+ * machines. Everything dangerous in an arena is visibly, movingly dangerous.
+ *
+ * Nothing in here hunts, either. The saws travel in straight lines and bounce — off the walls
+ * and off each other — and that is the entire design: a machine that aims at you can be read
+ * and beaten the same way every time, where a room of loose blades has no intent behind it to
+ * anticipate. The danger is the absence of a plan, not the presence of one.
  *
  * @typedef {object} Arena
  * @property {string} name
  * @property {string} tagline
  * @property {number} cols          Room width in tiles.
  * @property {number} rows          Room depth in tiles.
- * @property {number} mineDensity   Fraction of eligible tiles mined.
  * @property {number} sonarPeriod   Seconds between each player's own pings.
  * @property {number} sonarRadius   How far a ping reaches, in tiles.
- * @property {number} sonarHold     Seconds a revealed mine stays lit after the ring passes.
+ * @property {number} sonarHold     Seconds a revealed tile stays lit after the ring passes.
  * @property {number} sonarSpeed    Tiles/second the personal ring expands.
  * @property {number} startRoombas  How many saws are on the floor at the opening bell.
  * @property {number} waveEvery     Seconds between reinforcements.
  * @property {number} maxRoombas    Hard cap, so a long round cannot become a slideshow.
- * @property {number} roombaSpeed   Tiles/second while wandering.
- * @property {number} roombaChase   Tiles/second while it has someone.
- * @property {number} roombaSense   How close you must be for one to notice you, in tiles.
- * @property {number} safeRadius    Mine-free circle around the spawn ring.
+ * @property {number} roombaSpeed   Tiles/second. Faster than a player can run, always.
+ * @property {number} safeRadius    Radius of the spawn ring the players start on. Machines
+ *                                  enter from the walls rather than inside it, but nothing
+ *                                  keeps them out once the round is running — at these speeds
+ *                                  one crosses the room in a few seconds, and a permanently
+ *                                  safe circle in the middle would be somewhere to hide.
  */
 
 /** @type {Arena[]} */
@@ -168,68 +175,59 @@ export const ARENAS = [
     // walled into a corner by the room itself.
     cols: 22,
     rows: 22,
-    // Thinner than the aisle. The mines are a second hazard layered under the first here,
-    // not the main event, and aisle density in an open room means every dodge is a coin flip.
-    mineDensity: 0.055,
 
     // A shorter period than the aisle's. Survival is played in constant motion, and a
-    // two-second blackout while something is actively hunting you is not a tense wait, it is
-    // an unreadable one.
+    // two-second blackout with blades loose in the room is not a tense wait, it is an
+    // unreadable one. The radius is generous for the same reason: with nothing on the floor
+    // to find, the sonar's whole job here is showing you where the machines are.
     sonarPeriod: 1.6,
     sonarRadius: 5.0,
     sonarHold: 0.8,
     sonarSpeed: 10,
 
-    startRoombas: 2,
-    waveEvery: 20,
-    maxRoombas: 9,
-    // Slower than a walking player (3.0) on purpose. A saw must never simply catch someone
-    // in a straight line — it wins by cornering, by numbers, and by the mines you back into.
-    roombaSpeed: 1.5,
-    roombaChase: 2.35,
-    roombaSense: 6.0,
+    startRoombas: 3,
+    waveEvery: 12,
+    maxRoombas: 16,
+    // Faster than a player can run (3.0). Since nothing steers, outrunning a saw in a straight
+    // line is not supposed to be the answer — sidestepping the line it is already on is. A
+    // machine slower than the players would simply be scenery they walk around.
+    roombaSpeed: 3.6,
     safeRadius: 3.2,
   },
   {
     name: "The Grinder",
-    tagline: "More of them, sooner, and they can smell you further off.",
+    tagline: "More of them, faster, and they set each other off.",
     cols: 24,
     rows: 22,
-    mineDensity: 0.07,
     sonarPeriod: 1.8,
     sonarRadius: 4.4,
     sonarHold: 0.7,
     sonarSpeed: 10,
-    startRoombas: 3,
-    waveEvery: 16,
-    maxRoombas: 12,
-    roombaSpeed: 1.7,
-    roombaChase: 2.6,
-    roombaSense: 7.5,
+    // The dial this arena turns is the count. More machines is superlinear rather than just
+    // harder: collisions go up with the square of them, and collisions are where the chaos
+    // actually comes from.
+    startRoombas: 5,
+    waveEvery: 10,
+    maxRoombas: 20,
+    roombaSpeed: 4.0,
     safeRadius: 3.0,
   },
   {
     name: "Lights Out",
-    tagline: "They see you better than you see the floor.",
+    tagline: "You will hear them before you see them.",
     cols: 20,
     rows: 20,
-    // The dial this arena turns is the sonar, not the saw count: a radius this short means
-    // you are reading the floor from the sparks off their blades as much as your own ping.
-    mineDensity: 0.085,
+    // Here the dial is the sonar. A radius this short means a blade can cross the room and
+    // reach you having never once been lit — you are navigating on the glow off their own
+    // chassis and on where you last saw one heading.
     sonarPeriod: 2.2,
     sonarRadius: 3.2,
     sonarHold: 0.6,
     sonarSpeed: 10,
-    startRoombas: 2,
-    waveEvery: 15,
-    maxRoombas: 10,
-    roombaSpeed: 1.6,
-    roombaChase: 2.5,
-    // A long nose, on purpose: this is the arena where they find you before you find the
-    // floor. It is affordable here only because the opening pack is small — headless runs with
-    // three starters ended at a 29s median, before the first wave had even landed, so the
-    // escalation this mode is built on never got to happen.
-    roombaSense: 8.5,
+    startRoombas: 4,
+    waveEvery: 11,
+    maxRoombas: 18,
+    roombaSpeed: 3.8,
     safeRadius: 3.0,
   },
 ];

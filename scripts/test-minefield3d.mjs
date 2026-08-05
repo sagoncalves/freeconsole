@@ -728,22 +728,87 @@ console.log("\nsurvival: arena and machines");
   ok("a saw hit is reported", r6.events.some((e) => e.type === "saw") ||
      victim.legs === 1);
 
-  // A machine rolling over a mine sets it off and is stalled by it.
-  const r7 = beginS(0, 29, 1);
-  const m7 = r7.roombas[0];
-  const mx = Math.floor(m7.x);
-  const mz = Math.floor(m7.z);
-  r7.mines[mz * r7.level.cols + mx] = 1;
-  m7.x = mx + 0.5;
-  m7.z = mz + 0.5;
-  sim.step(r7, DT);
-  ok("a machine detonates the mine it rolls over",
-     sim.mineAt(r7, mx, mz) === 0 && sim.craterAt(r7, mx, mz) === 1);
-  ok("and is stalled by the blast", m7.stagger > 0, "(stagger " + m7.stagger.toFixed(2) + ")");
+  // The floor is bare. Mines are an escape-mode mechanic and must not appear in an arena.
+  let arenaMines = 0;
+  for (let ai = 0; ai < ARENAS.length; ai++) {
+    for (let s = 1; s <= 25; s++) {
+      const r = sim.createRound(ai, s, sim.MODE_SURVIVAL);
+      for (let z = 0; z < r.level.rows; z++) {
+        for (let x = 0; x < r.level.cols; x++) if (sim.mineAt(r, x, z)) arenaMines++;
+      }
+    }
+  }
+  ok("arenas are never mined", arenaMines === 0, "(" + arenaMines + " found)");
+  ok("escape is still mined",
+     (() => {
+       const r = sim.createRound(0, 5);
+       let n = 0;
+       for (let z = 0; z < r.level.rows; z++) {
+         for (let x = 0; x < r.level.cols; x++) if (sim.mineAt(r, x, z)) n++;
+       }
+       return n > 0;
+     })());
 
-  // Losing legs must remain survivable — the whole reason the chase speed backs off.
-  ok("a crawler is not simply outrun", ARENAS.every((a) => a.roombaChase > sim.SPEED_CRAWL),
-     "(the cap in stepRoombas is what protects them, not the arena value)");
+  // No trail is dropped in an arena.
+  const r7 = beginS(0, 29, 1);
+  const walker = r7.players.get(1);
+  run(r7, 3, () => sim.setAxis(r7, 1, 1, 0));
+  ok("survival leaves no footprints", r7.prints.length === 0, "(" + r7.prints.length + ")");
+  ok("and the player really did move", walker.distance > 1, "(" + walker.distance.toFixed(1) + ")");
+
+  // Nothing steers. A machine's heading must not bend toward a player standing beside it.
+  const r10 = beginS(0, 41, 1);
+  const m10 = r10.roombas[0];
+  const bait = r10.players.get(1);
+  // Park a player just off the machine's flank, outside blade reach, and hold everything else
+  // still: no walls in range, no other machines. A chaser would curve; a pinball cannot.
+  m10.x = r10.level.cols / 2;
+  m10.z = r10.level.rows / 2;
+  m10.heading = 0;
+  bait.x = m10.x + 2.2;
+  bait.z = m10.z;
+  const heading10 = m10.heading;
+  for (let i = 0; i < 12; i++) { bait.x = m10.x + 2.2; bait.z = m10.z; sim.step(r10, DT); }
+  ok("machines do not steer toward players",
+     Math.abs(m10.heading - heading10) < 1e-9,
+     "(drifted " + (m10.heading - heading10).toFixed(4) + " rad)");
+
+  // Two machines driven into each other must both come away on new headings.
+  const r11 = beginS(1, 43, 1);
+  const [a11, b11] = r11.roombas;
+  a11.x = 8; a11.z = 8; a11.heading = Math.PI / 2;    // travelling +x
+  b11.x = 9; b11.z = 8; b11.heading = -Math.PI / 2;   // travelling -x, head on
+  for (const other of r11.roombas.slice(2)) { other.x = 1; other.z = 1; }
+  const ha = a11.heading;
+  const hb = b11.heading;
+  sim.step(r11, DT);
+  ok("machines bounce off each other",
+     a11.heading !== ha && b11.heading !== hb,
+     "(" + ha.toFixed(2) + "->" + a11.heading.toFixed(2) + ", " +
+       hb.toFixed(2) + "->" + b11.heading.toFixed(2) + ")");
+  ok("a collision is announced", r11.events.some((e) => e.type === "clang" && e.hard));
+  ok("machines never end up overlapping",
+     Math.hypot(a11.x - b11.x, a11.z - b11.z) > 0.9,
+     "(" + Math.hypot(a11.x - b11.x, a11.z - b11.z).toFixed(2) + ")");
+
+  // Collisions wind the room up, but only to a ceiling.
+  const r12 = beginS(1, 47, 1);
+  let guard12 = 0;
+  while (r12.phase === "running" && guard12++ < 60 * 60 * 3) {
+    for (const p of r12.players.values()) { p.legs = 2; p.state = sim.ALIVE; }
+    r12.phase = "running";
+    sim.step(r12, DT);
+  }
+  ok("tempo is capped", r12.roombas.every((m) => m.tempo <= 1.9 + 1e-9),
+     "(max " + Math.max(...r12.roombas.map((m) => m.tempo)).toFixed(2) + ")");
+  ok("headings stay finite through thousands of collisions",
+     r12.roombas.every((m) => Number.isFinite(m.heading) &&
+       Number.isFinite(m.x) && Number.isFinite(m.z)));
+
+  // The machines have to be genuinely unoutrunnable, which is the premise of the whole mode.
+  ok("machines are faster than a running player",
+     ARENAS.every((a) => a.roombaSpeed > sim.SPEED_WALK),
+     "(" + ARENAS.map((a) => a.roombaSpeed).join(", ") + " vs " + sim.SPEED_WALK + ")");
 
   console.log("\nsurvival: rounds resolve");
   // The mode must end on its own. A survival round that cannot finish is worse than a hard

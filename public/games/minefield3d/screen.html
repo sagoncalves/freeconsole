@@ -137,15 +137,15 @@
 <script src="/sdk.js"></script>
 <script type="module">
 import * as THREE from "/vendor/three.js?v=5";
-import * as sim from "/games/minefield3d/sim.js?v=4";
-import { LEVELS, getLevel, ARENAS, getArena } from "/games/minefield3d/levels.js?v=4";
+import * as sim from "/games/minefield3d/sim.js?v=6";
+import { LEVELS, getLevel, ARENAS, getArena } from "/games/minefield3d/levels.js?v=5";
 import {
   createScene, updateCamera, updateArenaCamera, updateFloor, setGateOpen, resize,
   buildMineField, updateMineField,
   createPlayerMesh, posePlayer, createKillerMesh, loadAvatar, setAvatar, createBloodSplat,
-  setAvatarHeight, createRoombaMesh, updateRoombaMesh,
+  setAvatarHeight, createRoombaMesh, updateRoombaMesh, createClang, stepClang,
   createPingRing, updatePingRing, createBlast, stepBlast, createPrintMesh,
-} from "/games/minefield3d/scene.js?v=11";
+} from "/games/minefield3d/scene.js?v=14";
 import {
   TIERS, QUALITY_CHOICES, DEFAULT_QUALITY, resolveTier, makeFpsWatchdog,
 } from "/games/minefield3d/quality.js?v=3";
@@ -252,6 +252,9 @@ const splats = [];            // permanent blood decals, oldest first
  */
 const roombaMeshes = new Map();
 
+/** Live collision sparks. Short-lived, so this stays small even on a busy floor. */
+const clangs = [];
+
 // The crusher spans the aisle, so its geometry depends on the level's width and it is
 // rebuilt whenever the scene is.
 let killer = createKillerMesh(Q, round.level);
@@ -280,6 +283,7 @@ function rebuildScene() {
   // The machines belong to the disposed scene. Cleared rather than re-parented so the frame
   // loop rebuilds them from the sim, which is the only thing that knows how many there are.
   roombaMeshes.clear();
+  clangs.length = 0;
 
   // Rebuilt rather than re-parented: its width is the aisle's width, so carrying the old one
   // across a level change would leave a crusher sized for the previous aisle.
@@ -288,6 +292,8 @@ function rebuildScene() {
   ctx.world.add(killer.group);
 
   mineField = buildMineField(round, sim, Q);
+  // Nothing to show in an arena, and updateMineField never runs there to correct the count.
+  mineField.mesh.visible = !isSurvival();
   ctx.world.add(mineField.mesh);
 
   for (const id of round.players.keys()) ensureBody(id);
@@ -738,6 +744,18 @@ function drainEvents() {
       }
       renderRoster();
       broadcastState();
+    } else if (e.type === "clang") {
+      // Machine-on-machine hits are frequent, so this stays cheap and is capped rather than
+      // trusted to be rare — a late round on The Grinder can throw several in one frame.
+      if (clangs.length < 14) {
+        const fx = createClang(e.hard);
+        fx.group.position.set(e.x, 0, e.z);
+        ctx.world.add(fx.group);
+        clangs.push(fx);
+      }
+      // Only the real collisions kick the camera. Adding a shake per wall bounce meant the
+      // frame never sat still for a moment in a room with a dozen machines in it.
+      if (e.hard) shake = Math.min(1, shake + 0.16);
     } else if (e.type === "wave") {
       shake = Math.min(1, shake + 0.4);
       broadcastState();
@@ -868,8 +886,17 @@ function frame(ts) {
     }
   }
 
+  for (let i = clangs.length - 1; i >= 0; i--) {
+    if (!stepClang(clangs[i], dt)) {
+      ctx.world.remove(clangs[i].group);
+      clangs.splice(i, 1);
+    }
+  }
+
   updateFloor(ctx, round, sim, ts);
-  updateMineField(mineField, round, sim, Q, ts);
+  // Survival lays no mines, so there is nothing for the instanced field to draw. Skipped
+  // rather than left to find zero mines every frame — it is a full sweep of the tile grid.
+  if (!isSurvival()) updateMineField(mineField, round, sim, Q, ts);
 
   if (isSurvival()) {
     // A fixed shot of the whole room. There is no pack to follow and no direction that counts

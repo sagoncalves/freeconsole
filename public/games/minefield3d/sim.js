@@ -14,7 +14,7 @@
  * end, closest to the camera) and walk toward the gate at z = 0. x is the narrow axis.
  */
 
-import { getLevel, getArena } from "/games/minefield3d/levels.js?v=4";
+import { getLevel, getArena } from "/games/minefield3d/levels.js?v=5";
 
 /* ------------------------------------------------------------------ constants */
 
@@ -27,13 +27,19 @@ const KILLER_CATCH_R = 0.55;
 export const MODE_ESCAPE = "escape";
 
 /**
- * Survival: an open room, no gate, and saw-armed roombas that hunt you until you are gone.
+ * Survival: an open room, no gate, and saw-armed roombas ricocheting around it.
  *
- * Held as a field on the round rather than as a second sim module because everything
- * underneath is genuinely shared — the mines, the per-player sonar, the legs economy, the
- * footprints. What changes is only what is trying to kill you and what counts as winning, so
- * the mode branches at exactly three places (createRound, startRound, step) and every other
- * function in this file is mode-blind.
+ * Nothing in here hunts. The machines travel in straight lines and bounce — off the walls and
+ * off each other — and never steer toward anybody. That is deliberate and it is the whole
+ * mode: a machine that aims at you is a machine you can read, and an earlier version that
+ * chased collapsed into one repeated dodge once players learned it overshoots. Unguided blades
+ * have no intent to anticipate, so the floor never resolves into a pattern.
+ *
+ * Held as a field on the round rather than as a second sim module because the substrate is
+ * genuinely shared — per-player sonar, the legs economy, movement and collision. What differs
+ * is what is trying to kill you and what counts as winning. The mode branches at exactly three
+ * places (createRound, startRound, step), plus two suppressions that are cheaper as a check
+ * than as a fork: no mines are laid, and no footprints are dropped.
  */
 export const MODE_SURVIVAL = "survival";
 
@@ -42,9 +48,10 @@ export const MODES = [MODE_ESCAPE, MODE_SURVIVAL];
 /* ------------------------------------------------------------------ roombas */
 
 /**
- * How close a blade has to get before it takes a leg. Slightly larger than the mine's trigger
- * so a saw is meaningfully harder to skirt than a mine — you can shave past a mine you have
- * seen, but a machine that is actively turning toward you should not be beatable by pixels.
+ * How close a blade has to get before it takes a leg. Comfortably larger than the chassis, so
+ * a near miss at these speeds still costs you — the machines cross a tile in under a third of
+ * a second, and a hitbox tight to the body would make survival a matter of frame timing rather
+ * than of where you chose to stand.
  */
 const SAW_HIT_R = 0.62;
 
@@ -59,14 +66,42 @@ const SAW_HIT_R = 0.62;
  */
 const SAW_COOLDOWN = 2.4;
 
-/** Seconds a roomba is stalled after eating a mine. The reward for kiting one across the field. */
-const ROOMBA_STAGGER = 1.6;
-
-/** How sharply a roomba can turn, in radians per second. This is the whole counter-play. */
-const ROOMBA_TURN = 2.4;
-
-/** Radius used for wall bounces and mine contact. */
+/** Radius used for wall bounces and machine-on-machine contact. */
 const ROOMBA_R = 0.5;
+
+/**
+ * Blade rotation, radians per second. Absurdly fast on purpose — these read as out of control.
+ *
+ * The exact value is chosen against the tooth count, not picked for feel. The blade has 8
+ * teeth, so it is rotationally symmetric every 45°, and any rate that advances it close to a
+ * whole number of teeth per rendered frame strobes: at 26 rad/s it steps 1.10 teeth/frame on
+ * the low tier's 30fps cap and the saw appears to hang almost motionless — the exact opposite
+ * of the intent, on the TVs this tier exists for. 34 lands at 0.72 and 1.44 teeth/frame at 60
+ * and 30fps respectively, far from whole in both.
+ */
+const ROOMBA_SPIN = 34;
+
+/**
+ * Radians of noise added on a wall bounce and on a machine-to-machine hit.
+ *
+ * Without these the room is deterministic: perfectly elastic bounces put the machines into
+ * stable repeating orbits within about twenty seconds, and a stable orbit is a pattern players
+ * can stand still inside. The hit scatter is larger than the wall scatter because a collision
+ * is meant to be the moment everything goes wrong.
+ */
+const WALL_SCATTER = 0.5;
+const HIT_SCATTER = 0.9;
+
+/**
+ * How much faster both machines get when they hit each other, and the ceiling on it.
+ *
+ * Collisions are the only thing in the room that adds energy, so a crowded floor winds itself
+ * up — which is exactly the escalation this mode wants, and it comes from the machines rather
+ * than from a timer. The cap is what stops a late round from becoming a blur nobody can react
+ * to at all.
+ */
+const COLLIDE_BOOST = 1.05;
+const TEMPO_MAX = 1.9;
 
 /** Movement, in tiles per second. Losing legs is a heavy tax — that is the whole tension. */
 export const SPEED_WALK = 3.0;
@@ -182,28 +217,20 @@ function generateField(round) {
 }
 
 /**
- * Mine the arena, leaving a clear circle in the middle.
+ * Prepare the arena. Deliberately empty ground.
  *
- * There is no route to carve here — the whole point is that there is nowhere in particular to
- * get to, so a guaranteed path would be guaranteeing nothing. What must be guaranteed instead
- * is the opening: players spawn in a ring at the centre and the saws come at them immediately,
- * so a mine under the spawn ring would kill somebody before they had touched the stick.
+ * There are no mines in survival. They were tried and removed: a mine is a *static* hazard you
+ * beat by reading the floor and remembering it, and the saws already fill the entire hazard
+ * budget with something moving. Together they asked the player to watch the floor and the
+ * machines at once, and since the machines are what actually kill you, the mines just added
+ * deaths that felt arbitrary. The room is bare so that everything dangerous in it is visibly
+ * dangerous, and the only thing to track is the machines.
+ *
+ * The `mines` and `exploded` arrays stay allocated and zeroed rather than being left null:
+ * checkMine, tileReveal and the renderer's mine field all index them unconditionally, and a
+ * null here would mean a branch in each of those hot paths for a mode that simply has none.
  */
 function generateArenaField(round, rng) {
-  const { level } = round;
-  const cx = level.cols / 2;
-  const cz = level.rows / 2;
-  const safe = level.safeRadius * level.safeRadius;
-
-  for (let z = 0; z < level.rows; z++) {
-    for (let x = 0; x < level.cols; x++) {
-      const dx = x + 0.5 - cx;
-      const dz = z + 0.5 - cz;
-      if (dx * dx + dz * dz < safe) continue;
-      if (rng() < level.mineDensity) round.mines[z * level.cols + x] = 1;
-    }
-  }
-
   // There is no gate in survival. Point the span off the board so nothing can stumble into an
   // escape: moveTo's gate check reads exitFrom/exitTo, and leaving them at 0 would make the
   // whole z = 0 edge an exit.
@@ -573,16 +600,15 @@ function spawnRoomba(round, index) {
     id: round.nextRoombaId++,
     x,
     z,
-    // Aimed at the middle of the room, which is where the players start and where they tend
-    // to be pushed back to.
-    heading: Math.atan2(level.cols / 2 - x, level.rows / 2 - z),
-    target: null,
-    stagger: 0,
+    // Fired across the room on a slant, not straight at the middle. Aiming every machine at
+    // the centre made the opening seconds identical every time and put them all through the
+    // same point — where they promptly collided into a predictable starburst.
+    heading: Math.atan2(level.cols / 2 - x, level.rows / 2 - z)
+      + (Math.random() - 0.5) * 1.5,
     spin: Math.random() * Math.PI * 2,
     bornAt: round.t,
     // A little variation per unit so a pack never moves as one body.
     tempo: 0.88 + Math.random() * 0.28,
-    wanderAt: round.t + 1.5 + Math.random() * 2,
   };
   round.roombas.push(r);
   round.events.push({ type: "roomba-spawn", id: r.id, x: r.x, z: r.z });
@@ -606,57 +632,27 @@ function stepWaves(round) {
 /**
  * Drive every machine one tick.
  *
- * The behaviour is deliberately simple and completely legible: pick the nearest living player
- * inside the sense radius, turn toward them at a fixed rate, drive forward. All the difficulty
- * comes from the turn rate being finite — a saw at full chase overshoots anyone who cuts
- * across its nose, so the counter-play is to stay close and keep turning rather than to run,
- * which is exactly the wrong instinct and the reason the mode is interesting.
+ * **Nothing here hunts.** An earlier version had each saw pick the nearest player and steer at
+ * them, and it was the wrong game: a machine that aims at you is a machine you can read, and
+ * once players learned it overshoots when you cut across its nose, the whole room resolved
+ * into the same repeated dodge. Being chased is a puzzle with an answer.
+ *
+ * These are pinballs. They travel in straight lines at a speed nobody can outrun, ricochet off
+ * the walls, and — the part that actually creates the mode — ricochet off *each other*. Two
+ * machines meeting is the only event in the room that neither the players nor the machines can
+ * predict, and with a dozen of them the floor is a shifting mess of vectors that no one is
+ * steering. You are not being hunted. You are standing in a room full of loose blades and the
+ * danger is that there is no intent behind any of it to anticipate.
  */
 function stepRoombas(round, dt) {
   const { level } = round;
 
   for (const r of round.roombas) {
-    // The blade keeps spinning even while the chassis is stalled — it is the thing that is
-    // dangerous, and a saw that visibly stops looks safe when it is not.
-    r.spin += dt * (r.stagger > 0 ? 6 : 13) * r.tempo;
+    // The blade is always screaming. There is no stalled state any more — nothing in the room
+    // stops, which is most of why it feels out of control.
+    r.spin += dt * ROOMBA_SPIN * r.tempo;
 
-    if (r.stagger > 0) {
-      r.stagger -= dt;
-      continue;
-    }
-
-    // Reacquire every tick: a machine that keeps chasing someone who has died, or who has run
-    // out of its range, leaves the rest of the room unattended.
-    r.target = nearestTarget(round, r);
-
-    let wantHeading;
-    let speed;
-    if (r.target) {
-      wantHeading = Math.atan2(r.target.x - r.x, r.target.z - r.z);
-      speed = level.roombaChase * r.tempo;
-
-      // A machine chasing someone on the floor eases off.
-      //
-      // Without this the mode has no legs economy at all: a crawler moves at 0.75 tiles/s and
-      // a saw at full chase does well over 2, so the first leg you lose is simply death with
-      // extra steps and every arena measured the same — ~3 hits landed per player, on a body
-      // with two legs. Backing off to something a crawler can still work with turns a lost leg
-      // into a bad position you might survive, which is the whole point of having legs.
-      if (r.target.legs === 0) speed = Math.min(speed, SPEED_CRAWL * 1.12);
-      else if (r.target.legs === 1) speed = Math.min(speed, SPEED_LIMP * 1.05);
-    } else {
-      // Nobody in reach: patrol. It re-picks a direction every few seconds instead of holding
-      // one forever, so an idle saw sweeps the room rather than parking in a corner.
-      if (round.t >= r.wanderAt) {
-        r.wanderAt = round.t + 2 + Math.random() * 3;
-        r.heading += (Math.random() - 0.5) * 2.2;
-      }
-      wantHeading = r.heading;
-      speed = level.roombaSpeed * r.tempo;
-    }
-
-    r.heading = turnToward(r.heading, wantHeading, ROOMBA_TURN * dt);
-
+    const speed = level.roombaSpeed * r.tempo;
     const vx = Math.sin(r.heading);
     const vz = Math.cos(r.heading);
     let nx = r.x + vx * speed * dt;
@@ -668,80 +664,112 @@ function stepRoombas(round, dt) {
     const lo = ROOMBA_R;
     const hiX = level.cols - ROOMBA_R;
     const hiZ = level.rows - ROOMBA_R;
-    let bounced = false;
     if (nx < lo || nx > hiX) {
       nx = Math.max(lo, Math.min(hiX, nx));
+      // heading is atan2(sin, cos) with x = sin, so mirroring x is negating the angle.
       r.heading = -r.heading;
-      bounced = true;
+      wallKick(round, r, nx, nz);
     }
     if (nz < lo || nz > hiZ) {
       nz = Math.max(lo, Math.min(hiZ, nz));
       r.heading = Math.PI - r.heading;
-      bounced = true;
+      wallKick(round, r, nx, nz);
     }
-    if (bounced) r.wanderAt = round.t + 1.2;
 
     r.x = nx;
     r.z = nz;
-
-    roombaMine(round, r);
-    sawPlayers(round, r);
   }
-}
 
-/** The nearest living player within this machine's sense radius, or null. */
-function nearestTarget(round, r) {
-  const reach = round.level.roombaSense;
-  let best = null;
-  let bestD = reach * reach;
-  for (const p of round.players.values()) {
-    if (p.state !== ALIVE) continue;
-    const dx = p.x - r.x;
-    const dz = p.z - r.z;
-    const d = dx * dx + dz * dz;
-    if (d < bestD) { bestD = d; best = p; }
-  }
-  return best;
-}
+  // Machine-on-machine collisions, resolved after everything has moved so the outcome does not
+  // depend on which one happens to be first in the array.
+  collideRoombas(round);
 
-/** Rotate `from` toward `to` by at most `max` radians, the short way around. */
-function turnToward(from, to, max) {
-  let diff = (to - from) % (Math.PI * 2);
-  if (diff > Math.PI) diff -= Math.PI * 2;
-  if (diff < -Math.PI) diff += Math.PI * 2;
-  return from + Math.max(-max, Math.min(max, diff));
+  for (const r of round.roombas) sawPlayers(round, r);
 }
 
 /**
- * A machine rolling over a mine sets it off, and is stalled by the blast.
+ * Kick a machine off a wall with a little scatter, and tell the renderer about it.
  *
- * This is the mode's central bargain. The saws are the only thing that can clear the floor,
- * so the ground you want to be standing on later is ground you have to lead one of them
- * across now — and the stall is the reward for doing it, a second and a half of free room
- * bought by putting yourself in front of a saw on purpose.
+ * The randomness is the point. A perfectly elastic bounce is deterministic: a saw entering a
+ * corner at a known angle leaves at a known angle, and a room of them settles into stable
+ * repeating orbits that players simply memorise. A few degrees of noise on every bounce keeps
+ * the floor from ever resolving into a pattern.
  */
-function roombaMine(round, r) {
-  const { cols } = round.level;
-  const tx = Math.floor(r.x);
-  const tz = Math.floor(r.z);
-  if (tx < 0 || tz < 0 || tx >= round.level.cols || tz >= round.level.rows) return;
+function wallKick(round, r, x, z) {
+  r.heading += (Math.random() - 0.5) * WALL_SCATTER;
+  round.events.push({ type: "clang", x, z, hard: false });
+}
 
-  const i = tz * cols + tx;
-  if (round.mines[i] !== 1) return;
-  if (Math.hypot(r.x - (tx + 0.5), r.z - (tz + 0.5)) > MINE_TRIGGER_R + ROOMBA_R) return;
+/**
+ * Machines bouncing off each other — the heart of the mode.
+ *
+ * A real elastic exchange rather than "both turn around": they swap the components of their
+ * velocity along the line between them and keep the perpendicular parts, which is what makes a
+ * glancing hit deflect slightly and a head-on hit reverse both. That difference is what makes
+ * the floor read as physical rather than as scripted, and it is where the genuine chaos comes
+ * from — one collision changes two vectors, and each of those goes on to hit something else.
+ */
+function collideRoombas(round) {
+  const list = round.roombas;
+  const minDist = ROOMBA_R * 2;
 
-  round.mines[i] = 0;
-  round.exploded[i] = 1;
-  r.stagger = ROOMBA_STAGGER;
-  // Thrown back the way it came, so the blast visibly costs it ground.
-  r.x -= Math.sin(r.heading) * 0.7;
-  r.z -= Math.cos(r.heading) * 0.7;
-  r.heading += Math.PI + (Math.random() - 0.5) * 0.8;
-  r.target = null;
+  for (let i = 0; i < list.length; i++) {
+    for (let j = i + 1; j < list.length; j++) {
+      const a = list[i];
+      const b = list[j];
 
-  round.events.push({
-    type: "blast", x: tx + 0.5, z: tz + 0.5, id: null, legsLost: 0, legs: 2, roomba: r.id,
-  });
+      let dx = b.x - a.x;
+      let dz = b.z - a.z;
+      let d = Math.hypot(dx, dz);
+      if (d >= minDist) continue;
+
+      // Exactly coincident: shove them apart on an arbitrary axis, or the normal is NaN and
+      // both machines' headings turn into NaN for the rest of the round.
+      if (d < 1e-4) { dx = 1; dz = 0; d = 1; }
+
+      const nxAxis = dx / d;
+      const nzAxis = dz / d;
+
+      // Separate them first. Without this they stay overlapped, collide again next frame, and
+      // vibrate against each other in place instead of bouncing apart.
+      const push = (minDist - d) / 2 + 0.01;
+      a.x -= nxAxis * push;
+      a.z -= nzAxis * push;
+      b.x += nxAxis * push;
+      b.z += nzAxis * push;
+
+      // Swap the velocity components along the collision normal.
+      const avx = Math.sin(a.heading);
+      const avz = Math.cos(a.heading);
+      const bvx = Math.sin(b.heading);
+      const bvz = Math.cos(b.heading);
+
+      const aAlong = avx * nxAxis + avz * nzAxis;
+      const bAlong = bvx * nxAxis + bvz * nzAxis;
+      // Already separating — resolve the overlap but do not flip them back together.
+      if (aAlong - bAlong <= 0) continue;
+
+      const anx = avx - (aAlong - bAlong) * nxAxis;
+      const anz = avz - (aAlong - bAlong) * nzAxis;
+      const bnx = bvx + (aAlong - bAlong) * nxAxis;
+      const bnz = bvz + (aAlong - bAlong) * nzAxis;
+
+      a.heading = Math.atan2(anx, anz) + (Math.random() - 0.5) * HIT_SCATTER;
+      b.heading = Math.atan2(bnx, bnz) + (Math.random() - 0.5) * HIT_SCATTER;
+
+      // Both come out of it faster. Collisions are the only thing that adds energy, so a busy
+      // floor accelerates itself — and the cap keeps that from running away.
+      a.tempo = Math.min(TEMPO_MAX, a.tempo * COLLIDE_BOOST);
+      b.tempo = Math.min(TEMPO_MAX, b.tempo * COLLIDE_BOOST);
+
+      round.events.push({
+        type: "clang",
+        x: (a.x + b.x) / 2,
+        z: (a.z + b.z) / 2,
+        hard: true,
+      });
+    }
+  }
 }
 
 /** Anything alive touching the blade loses a leg — once per cooldown, per machine. */
@@ -765,10 +793,17 @@ function sawPlayers(round, r) {
 
     // Knocked clear, so a single contact cannot become a grind against a machine that is
     // still driving into you. Shorter than a mine's throw — this is a shove, not a blast.
+    //
+    // Thrown along the machine's own heading as well as away from its centre. Purely radial
+    // knockback shoves a player sideways out of a saw's path, which quietly turns a hit into
+    // an escape; being batted *down-range* is both what a spinning blade would actually do and
+    // what keeps a bad position bad.
     p.stun = 0.45;
     const away = Math.hypot(p.x - r.x, p.z - r.z) || 1;
-    p.x = Math.max(0.32, Math.min(round.level.cols - 0.32, p.x + ((p.x - r.x) / away) * 0.85));
-    p.z = Math.max(0.32, Math.min(round.level.rows - 0.32, p.z + ((p.z - r.z) / away) * 0.85));
+    const kx = ((p.x - r.x) / away) * 0.55 + Math.sin(r.heading) * 0.55;
+    const kz = ((p.z - r.z) / away) * 0.55 + Math.cos(r.heading) * 0.55;
+    p.x = Math.max(0.32, Math.min(round.level.cols - 0.32, p.x + kx));
+    p.z = Math.max(0.32, Math.min(round.level.rows - 0.32, p.z + kz));
   }
 }
 
@@ -957,6 +992,13 @@ function escape(round, p) {
  */
 function dropPrint(round, p, dist) {
   p.distance += dist;
+
+  // No trail in survival. Footprints exist to say "somebody walked here and did not explode",
+  // which is information only a minefield can carry — with a bare floor they mark nothing, and
+  // in a room where everyone is constantly running they just smear the ground with dotted
+  // lines that compete with the machines for attention.
+  if (round.mode === MODE_SURVIVAL) return;
+
   if (Math.hypot(p.x - p.lastPrintX, p.z - p.lastPrintZ) < PRINT_SPACING) return;
 
   p.lastPrintX = p.x;
