@@ -457,11 +457,36 @@ function buildArenaWalls(level) {
 export function updateArenaCamera(ctx, dt) {
   const { camera, level } = ctx;
 
-  const span = Math.max(level.cols, level.rows);
+  // Height and setback are derived from the vertical field of view rather than picked, so a
+  // 20-tile room and a 24-tile room both fill the same fraction of the frame. Guessed
+  // constants looked right on one arena and left the next one as a postage stamp with the
+  // near wall cropped off the bottom.
+  const fov = (camera.fov * Math.PI) / 180;
+
+  // Fit the room to whichever axis actually binds. Sizing to the diagonal (the obvious first
+  // guess) is wrong: the room is seen tilted, not corner-on, so its depth is foreshortened by
+  // sin(tilt) and the diagonal overstates what has to fit — it rendered the arena noticeably
+  // smaller than the aisle camera did.
+  //
+  // Horizontally the limit is the width against the horizontal fov; vertically it is the
+  // *projected* depth plus the walls' height, which leans into frame at this angle.
+  //
+  // The wall term is the part that is easy to drop and the reason an earlier pass cropped the
+  // near wall off the bottom of the shot: the floor fitted perfectly and the 2.6-unit walls
+  // standing on it did not.
+  const aspect = camera.aspect || 16 / 9;
+  const tiltRad = (58 * Math.PI) / 180;
+  const WALL_H = 2.6;
+  const needV = (level.rows * Math.sin(tiltRad) + WALL_H * Math.cos(tiltRad)) * 0.5;
+  const needH = (level.cols * 0.5) / aspect;
+  // A little air on top of that, so the room never touches the edges of the frame.
+  const dist = (Math.max(needV, needH) * 1.3) / Math.tan(fov / 2);
+
+  // The tilt is fixed at 58°: steep enough to read the floor as a plane and judge gaps between
+  // machines, shallow enough that the avatars keep a silhouette instead of becoming discs.
   const wantX = level.cols / 2;
-  const wantY = span * 0.95;
-  // Pulled back off the near edge so the tilt is a real angle rather than straight down.
-  const wantZ = level.rows + span * 0.42;
+  const wantY = Math.sin(tiltRad) * dist;
+  const wantZ = level.rows / 2 + Math.cos(tiltRad) * dist;
 
   // Still eased rather than snapped, so a level change or a quality rebuild slides into place
   // instead of cutting.
@@ -470,6 +495,9 @@ export function updateArenaCamera(ctx, dt) {
   camera.position.y += (wantY - camera.position.y) * k;
   camera.position.z += (wantZ - camera.position.z) * k;
 
+  // Aim at the middle of the floor. Biasing the look-at further down the room was tried and
+  // reverted: it tilts the whole arena up in frame and takes the near wall — the one the
+  // players are most often backed against — off the bottom of the screen.
   camera.lookAt(level.cols / 2, 0, level.rows / 2);
 }
 

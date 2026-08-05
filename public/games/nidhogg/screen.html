@@ -484,95 +484,146 @@ function poseOf(p) {
   /** Anticipation: dip backwards before committing forwards. */
   function windup(depth, until) { return t < until ? -depth * Math.sin((t / until) * Math.PI) : 0; }
 
-  // Stride amplitude scales with speed so a walk is a shuffle and a run is a stride.
+  /**
+   * En garde.
+   *
+   * A fencer does not stand like a person: the torso is held back over the rear leg rather
+   * than leaning into the fight, the legs are split wide with both knees bent, the sword arm
+   * is carried half-extended at the guard height, and the free arm is thrown up and back as
+   * a counterweight. Those four things together are what make the silhouette read as fencing
+   * rather than as a man holding a stick, so they are the defaults and every non-fencing
+   * state has to opt out of them.
+   *
+   * `stance` scales the whole posture in and out, which is what lets a run drop smoothly out
+   * of guard and an attack drive out of it without any of the poses fighting each other.
+   */
+  let stance = 1;        // 0 = neutral standing, 1 = full en garde
   let amp = Math.min(1, Math.abs(p.vx) / 300);
-  let lean = 0;          // torso pitch, radians, positive leans forward
-  let crouch = 0;        // extra hip drop as a fraction of thigh length
-  let armFwd = 0.55;     // how far the sword arm reaches ahead, 0..1
-  let offArm = -0.25;    // trailing arm, negative swings it behind
+  let lean = -0.16;      // torso pitch; negative sits the chest back over the rear leg
+  let crouch = 0.30;     // both knees bent - the sink that makes a lunge possible
+  let split = 1;         // 0..1 how wide the feet are planted along the facing axis
+  let armFwd = 0.72;     // sword arm carried half-extended, not hanging
+  let offArm = -0.95;    // free arm swept up and behind as a counterweight
   let kick = 0;          // 0..1 extension of the kicking leg
   let spin = 0;          // whole-body rotation, radians, for the roll
 
-  if (st === "run") { lean = 0.22; armFwd = 0.5; }
-  else if (st === "walk") { lean = 0.10; }
-  else if (st === "duck") { crouch = 0.55; lean = 0.30; amp = 0; }
-  else if (st === "crawl") { crouch = 0.8; lean = 0.55; amp = Math.min(1, Math.abs(p.vx) / 90) * 0.5; }
+  // Moving breaks guard: you cannot sprint in a fencing stance, and the legs need the room.
+  if (st === "run") { stance = 0; lean = 0.22; crouch = 0; split = 0; armFwd = 0.5; offArm = -0.25; }
+  else if (st === "walk") {
+    // An advance keeps guard - this is footwork, not travelling. Partially relax so the legs
+    // can still cycle without the split fighting the stride.
+    stance = 0.6; lean = -0.08; crouch = 0.2; split = 0.35; armFwd = 0.7; offArm = -0.8;
+  }
+  else if (st === "duck") { stance = 0.5; crouch = 0.75; lean = 0.10; split = 0.6; armFwd = 0.68; offArm = -0.5; amp = 0; }
+  else if (st === "crawl") { stance = 0; crouch = 0.9; lean = 0.55; split = 0; armFwd = 0.3; offArm = 0.1; amp = Math.min(1, Math.abs(p.vx) / 90) * 0.5; }
   else if (st === "lunge") {
-    // The signature move, so it gets the most anticipation: a visible coil, then everything
-    // extends at once - front leg, torso and blade - and stays extended for the active frames.
+    // The classical lunge: from the coil, the front leg is thrown out along the floor, the
+    // sword arm leads and finishes straight, and the rear arm whips down and back as the
+    // counterweight. The chest stays comparatively upright - a fencer lunges from the legs.
     const e = strike(0.35, 0.75, 1);
     const w = windup(0.5, 0.35);
-    lean = 0.15 + e * 0.42 + w * 0.5;
-    armFwd = 0.55 + e * 0.9 + w * 0.55;
-    offArm = -0.25 - e * 0.5;
-    crouch = e * 0.28;
+    lean = -0.16 + e * 0.34 + w * 0.45;
+    armFwd = 0.72 + e * 0.78 + w * 0.5;
+    offArm = -0.95 + e * 0.45;      // free arm sweeps down and behind on the extension
+    crouch = 0.30 + e * 0.32 - w * 0.12;
+    split = 1 + e * 1.15;           // the front foot travels: this is where the reach comes from
     amp = 0;
   } else if (st === "thrust" || st === "airstab") {
+    // A thrust extends the arm from guard without moving the feet, which is exactly what
+    // distinguishes it from the lunge in both the sim and the silhouette.
     const e = strike(0.3, 0.62, 1);
-    lean = 0.1 + e * 0.16 + windup(0.35, 0.3) * 0.3;
-    armFwd = 0.55 + e * 0.68 + windup(0.35, 0.3);
-    offArm = -0.25 - e * 0.2;
+    lean = -0.16 + e * 0.2 + windup(0.35, 0.3) * 0.25;
+    armFwd = 0.72 + e * 0.62 + windup(0.35, 0.3);
+    offArm = -0.95 + e * 0.15;
+    crouch = 0.30 + e * 0.1;
+    split = 1 + e * 0.15;
     amp = 0;
   } else if (st === "punch") {
+    // Unarmed, so the fencing carriage is gone: this is a boxer's cross, squared up.
+    stance = 0.25;
     const e = strike(0.28, 0.55, 1);
     lean = 0.08 + e * 0.16;
+    crouch = 0.15;
+    split = 0.3;
     armFwd = 0.35 + e * 0.85 + windup(0.4, 0.28);
     offArm = -0.2 - e * 0.35;
     amp = 0;
   } else if (st === "kick") {
     // The leg leads and the torso counter-rotates away, which is what sells the weight.
+    // Guard is abandoned for the duration - you cannot kick and stay en garde.
     kick = strike(0.32, 0.6, 1);
-    lean = 0.05 - kick * 0.3;
-    armFwd = 0.5 - kick * 0.2;
-    offArm = -0.2 - kick * 0.3;
+    stance = 1 - kick * 0.8;
+    lean = -0.16 + kick * 0.1 - kick * 0.25;
+    crouch = 0.30 - kick * 0.2;
+    split = 1 - kick * 0.7;
+    armFwd = 0.72 - kick * 0.3;
+    offArm = -0.95 + kick * 0.55;
     amp = 0;
   } else if (st === "divekick") {
     // Already committed and falling: a quick chamber-and-extend over the first third of the
     // dive, then held out for the rest of the descent. Fast, but it still has to unfold -
     // a leg that is simply already extended reads as a pose, not a kick.
+    stance = 0;
     kick = ease(Math.min(1, t * 3));
     lean = -0.1 - kick * 0.15;
+    crouch = 0;
+    split = 0;
     armFwd = 0.35;
+    offArm = -0.3;
     amp = 0;
   } else if (st === "throw") {
-    // The arm is already empty by the time this state exists, so this is pure follow-through.
+    // The arm is already empty by the time this state exists, so this is pure follow-through
+    // from the throwing extension back toward a guard the fencer no longer has a blade for.
     const e = strike(0.25, 0.5, 1);
-    lean = 0.05 + e * 0.2;
-    armFwd = 0.5 + e * 0.85;
-    offArm = -0.2 - e * 0.45;
+    stance = 0.5;
+    lean = -0.05 + e * 0.28;
+    crouch = 0.2;
+    split = 0.7 + e * 0.3;
+    armFwd = 0.6 + e * 0.8;
+    offArm = -0.6 - e * 0.35;
     amp = 0;
   } else if (st === "roll") {
     // A full tuck that rotates once through the roll and lands back upright.
+    stance = 0;
     spin = f * ease(t) * Math.PI * 2;
     crouch = 0.9;
     lean = 0.9;
+    split = 0;
     armFwd = 0.15;
     offArm = 0.1;
     amp = 0;
   } else if (st === "recover") {
-    // Unwind from the strike back to a stance, so recovery is visible as a real pose and
-    // not an instant snap - this is the punish window, and it should look like one.
+    // Recovery is the return to guard: the classical recover pulls the front foot back under
+    // the body and the arm back to en garde. This is the punish window, so it should be
+    // visibly a fencer collecting themselves rather than an instant snap.
     const u = 1 - ease(t);
-    lean = 0.28 * u;
-    armFwd = 0.55 + 0.5 * u;
-    crouch = 0.18 * u;
+    lean = -0.16 + 0.3 * u;
+    armFwd = 0.72 + 0.55 * u;
+    offArm = -0.95 + 0.35 * u;
+    crouch = 0.30 + 0.25 * u;
+    split = 1 + 0.85 * u;
     amp = 0;
   } else if (st === "land") {
-    // A short absorb on touchdown, which also covers the landing recovery frames.
-    crouch = (1 - ease(t)) * 0.4;
-    lean = 0.12;
+    // A short absorb on touchdown that settles back into guard.
+    const u = 1 - ease(t);
+    crouch = 0.30 + u * 0.35;
+    lean = -0.16 + u * 0.22;
+    split = 1 - u * 0.3;
     amp = 0;
   } else if (st === "knockdown") {
     // Fall flat quickly, lie there, then start gathering up as the timer runs out.
+    stance = 0;
     const down = ease(Math.min(1, t * 3.2));
     const rise = t > 0.75 ? ease((t - 0.75) / 0.25) : 0;
     lean = (1.35 * down) * (1 - rise * 0.45);
     crouch = (0.95 * down) * (1 - rise * 0.3);
+    split = 0.2;
     armFwd = 0.2;
     offArm = 0.3;
     amp = 0;
-  } else if (st === "dead") { lean = 1.35; crouch = 0.95; amp = 0; }
-  else if (st === "wallslide" || st === "wallclimb") { lean = -0.1; amp = 0; }
+  } else if (st === "dead") { stance = 0; lean = 1.35; crouch = 0.95; split = 0.2; armFwd = 0.2; offArm = 0.3; amp = 0; }
+  else if (st === "wallslide" || st === "wallclimb") { stance = 0; lean = -0.1; crouch = 0.15; split = 0.2; armFwd = 0.4; offArm = -0.3; amp = 0; }
+  else if (airborne) { stance = 0.35; lean = -0.05; crouch = 0.1; split = 0.3; armFwd = 0.68; offArm = -0.6; amp = 0; }
 
   const hy = hipY + thigh * crouch;
   const hx = cx - f * Math.sin(lean) * (hy - neckY) * 0.25;
@@ -595,30 +646,47 @@ function poseOf(p) {
   // --- legs ---------------------------------------------------------------
   // Angle 0 points straight down; positive swings the foot toward `facing`.
   let legA, legB;
-  if (airborne && st !== "wallslide" && st !== "wallclimb") {
-    // Tuck the leading knee and trail the other - a jump silhouette, not a stride.
-    const tuck = p.vy < 0 ? 0.9 : 0.5;
-    legA = limb(hx, hy, f * 0.5, thigh, shin, -f * tuck);
-    legB = limb(hx, hy, -f * 0.35, thigh, shin, -f * 0.35);
-  } else if (st === "kick" || st === "divekick") {
+  // A dive kick is airborne but must not fall through to the generic jump tuck, or the one
+  // move whose whole identity is an extended leg gets drawn with its knees pulled in.
+  if (st === "kick" || st === "divekick") {
     // Chambered knee first, then the shin snaps out - a kick that unfolds instead of
     // appearing already extended.
     const chamber = -f * (0.9 - kick * 0.78);
     legA = limb(hx, hy, f * (0.35 + kick * 1.15), thigh, shin, chamber);
     legB = limb(hx, hy, -f * (0.2 + kick * 0.15), thigh, shin, -f * 0.5);
   } else if (st === "lunge") {
-    // Front leg drives out along the lunge while the back leg straightens into the push.
-    const ext = (armFwd - 0.55) / 0.9;
-    legA = limb(hx, hy, f * (0.15 + ext * 0.95), thigh, shin, -f * Math.max(0.08, 0.5 - ext * 0.42));
-    legB = limb(hx, hy, -f * (0.15 + ext * 0.5), thigh, shin, -f * 0.12);
+    // The classical lunge shape: the front leg throws forward and its knee finishes stacked
+    // over the foot, while the rear leg straightens completely into the drive. That straight
+    // trailing leg is the single most recognisable line in fencing, so it is explicit here
+    // rather than falling out of the stride solver.
+    const ext = Math.max(0, (split - 1) / 1.15);
+    legA = limb(hx, hy, f * (0.30 + ext * 0.85), thigh, shin, -f * Math.max(0.10, 0.62 - ext * 0.5));
+    legB = limb(hx, hy, -f * (0.32 + ext * 0.62), thigh, shin, -f * 0.06);
+  } else if (airborne && st !== "wallslide" && st !== "wallclimb") {
+    // Tuck the leading knee and trail the other - a jump silhouette, not a stride. The tuck
+    // is tighter on the way up than on the way down, so the arc reads in the pose itself.
+    const tuck = p.vy < 0 ? 0.9 : 0.5;
+    legA = limb(hx, hy, f * 0.5, thigh, shin, -f * tuck);
+    legB = limb(hx, hy, -f * 0.35, thigh, shin, -f * 0.35);
   } else {
     const a1 = f * swing * 0.75 * amp;
     const a2 = f * swing2 * 0.75 * amp;
     // The knee bends most as the leg passes under the body and straightens at full stride.
     const k1 = -f * (0.25 + Math.max(0, -swing) * 0.85) * Math.max(amp, 0.18);
     const k2 = -f * (0.25 + Math.max(0, -swing2) * 0.85) * Math.max(amp, 0.18);
-    legA = limb(hx, hy, a1 + f * crouch * 0.6, thigh, shin, k1 - f * crouch * 1.3);
-    legB = limb(hx, hy, a2 + f * crouch * 0.6, thigh, shin, k2 - f * crouch * 1.3);
+
+    // En garde plants the feet apart along the facing axis - front foot toward the opponent,
+    // rear foot back - with both knees bent. `split` biases the two legs in opposite
+    // directions on top of whatever the stride is doing, so footwork and stance coexist:
+    // at stance 0 this term vanishes and the plain walk cycle is left untouched.
+    const plant = split * stance * 0.42;
+    // Both knees stay bent in guard. Without this the split alone just does the splits.
+    const bend = -f * stance * 0.30;
+
+    legA = limb(hx, hy, a1 + f * crouch * 0.6 + f * plant, thigh, shin,
+                k1 - f * crouch * 1.3 + bend);
+    legB = limb(hx, hy, a2 + f * crouch * 0.6 - f * plant, thigh, shin,
+                k2 - f * crouch * 1.3 + bend);
   }
 
   // --- arms ---------------------------------------------------------------
@@ -626,14 +694,34 @@ function poseOf(p) {
   // the hitbox agree: the hand ends up where `swordBox` starts the blade.
   const bladeY = p.y + GUARD_Y[p.guard];
   const reachY = bladeY - sy;
-  const reachX = f * BODY_W * 0.5 * armFwd + f * upperArm * armFwd;
-  const swordAng = Math.atan2(reachX, reachY);
+  const reachX = f * BODY_W * 0.5 * armFwd + f * (upperArm + foreArm) * armFwd;
   const armSwing = f * swing2 * 0.5 * amp * (armFwd > 0.9 ? 0 : 1);
 
-  const armMain = limb(sx, sy, swordAng + armSwing * 0.35, upperArm, foreArm,
-                       -f * Math.max(0, 0.55 - armFwd * 0.5));
-  const armOff = limb(sx, sy, f * (offArm - swing * 0.55 * amp) + Math.PI * 0.02,
-                      upperArm, foreArm, f * 0.5);
+  /**
+   * The sword arm aims the hand at the guard height, so the drawing and the hitbox agree.
+   * The elbow is carried below that line - a fencer holds the blade with a bent arm and
+   * straightens it only to attack - but the bend has to be applied as a deviation from the
+   * aim, not against it, or a low guard ends up pointing the forearm back at the chest.
+   *
+   * `aimTo` solves the shoulder angle needed for the hand to land on the target once the
+   * elbow bend is taken into account, which keeps every guard height honest.
+   */
+  const guardBend = -f * (Math.max(0, 0.55 - armFwd * 0.5) + stance * 0.28);
+  const armMain = limb(sx, sy, aimTo(sx, sy, reachX, reachY, upperArm, foreArm, guardBend)
+                       + armSwing * 0.35, upperArm, foreArm, guardBend);
+
+  /**
+   * The free arm. In a fencing stance it is thrown up and behind the head as a counterweight,
+   * which is the other half of the silhouette people recognise. `offArm` is measured from
+   * straight-down, so carrying it above the shoulder means rotating past π/2 - hence the
+   * extra `stance` term rather than just a larger negative angle.
+   */
+  // Past π/2 the upper arm is above horizontal; the classical carry is around 2.1 rad behind
+  // vertical. The elbow then bends the same way the arm is already travelling, so the forearm
+  // keeps rising instead of folding back down across the chest.
+  const offAng = f * (offArm - swing * 0.55 * amp) - f * stance * 1.25 + Math.PI * 0.02;
+  const offBend = f * (0.5 * (1 - stance) - stance * 0.75);
+  const armOff = limb(sx, sy, offAng, upperArm, foreArm, offBend);
 
   const pose = { headX, headY, headR, sx, sy, hx, hy, legA, legB, armMain, armOff };
 
@@ -641,6 +729,23 @@ function poseOf(p) {
   // rotation of the finished skeleton about the body's centre rather than as joint angles.
   if (spin !== 0) rotatePose(pose, cx, p.y + h / 2, spin);
   return pose;
+}
+
+/**
+ * Shoulder angle that puts a bent two-segment limb's endpoint on a target direction.
+ *
+ * With a fixed elbow bend the hand does not sit along the shoulder angle, it sits along the
+ * resultant of the two segments - so aiming the shoulder straight at the target misses by the
+ * bend. Composing the two segments as vectors gives the offset in closed form, and
+ * subtracting it aims the whole limb properly. This is what keeps a low guard pointing the
+ * blade down and forward rather than tucking it back into the ribs.
+ */
+function aimTo(ox, oy, dx, dy, l1, l2, bend) {
+  const want = Math.atan2(dx, dy);
+  // Endpoint of the limb if the shoulder were at angle 0, in the limb's own frame.
+  const ex = Math.sin(0) * l1 + Math.sin(bend) * l2;
+  const ey = Math.cos(0) * l1 + Math.cos(bend) * l2;
+  return want - Math.atan2(ex, ey);
 }
 
 /** Rotate every joint in a solved pose about a pivot. Used only by the roll. */

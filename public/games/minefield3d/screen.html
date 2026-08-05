@@ -145,7 +145,7 @@ import {
   createPlayerMesh, posePlayer, createKillerMesh, loadAvatar, setAvatar, createBloodSplat,
   setAvatarHeight, createRoombaMesh, updateRoombaMesh,
   createPingRing, updatePingRing, createBlast, stepBlast, createPrintMesh,
-} from "/games/minefield3d/scene.js?v=8";
+} from "/games/minefield3d/scene.js?v=11";
 import {
   TIERS, QUALITY_CHOICES, DEFAULT_QUALITY, resolveTier, makeFpsWatchdog,
 } from "/games/minefield3d/quality.js?v=3";
@@ -927,10 +927,23 @@ function updateDread() {
     if (!isFinite(nearest)) nearest = 99;
   }
 
-  const reach = isSurvival() ? 5 : round.rows * 0.35;
+  // Survival's reach is deliberately tight. A saw is only ever a couple of tiles from
+  // *somebody* in a room this size, so a generous radius pins the vignette at full strength
+  // for the whole round and stops it meaning anything — it has to fire on a blade genuinely
+  // being on top of you, not on one being in the room.
+  const reach = isSurvival() ? 2.2 : round.rows * 0.35;
   const close = Math.max(0, 1 - nearest / reach);
-  dread.style.boxShadow = "inset 0 0 " + (18 + close * 10).toFixed(1) + "vw " +
-    (6 + close * 5).toFixed(1) + "vw rgba(255,46,136," + (close * 0.5).toFixed(3) + ")";
+
+  // Survival keeps the vignette tight and thin. The escape formula assumes one approaching
+  // threat and ramps to a half-opaque wash; here there are up to a dozen machines and
+  // somebody is nearly always near one, so the same curve floods the screen pink for the
+  // whole round and buries the thing it is supposed to be warning about.
+  const spread = isSurvival() ? 7 + close * 5 : 18 + close * 10;
+  const blur = isSurvival() ? 2 + close * 3 : 6 + close * 5;
+  const alpha = close * (isSurvival() ? 0.3 : 0.5);
+
+  dread.style.boxShadow = "inset 0 0 " + spread.toFixed(1) + "vw " +
+    blur.toFixed(1) + "vw rgba(255,46,136," + alpha.toFixed(3) + ")";
 }
 
 /* --------------------------------------------------------------------- boot */
@@ -957,6 +970,11 @@ loadAvatar().then((gltf) => {
 /* --------------------------------------------------------------- test mode */
 
 if (TEST) {
+  // ?level=N jumps straight to a level or arena, which is the only practical way to eyeball
+  // the later ones — otherwise they are reachable only by actually winning the earlier rounds.
+  const want = parseInt(params.get("level") || "0", 10);
+  if (want > 0) loadLevel(want - 1);
+
   sim.addPlayer(round, 1);
   ensureBody(1);
   for (let i = 0; i < BOTS; i++) { const id = 2 + i; sim.addPlayer(round, id); ensureBody(id); }
