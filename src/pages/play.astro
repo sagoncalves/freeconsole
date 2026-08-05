@@ -19,6 +19,9 @@ const themeColor = "#05060d";
 
       /* ---------------------------------------------------------------- join */
       .join-wrap {
+        /* vh fallback first - dvh is Chrome 108+ and an unsupported unit drops the whole
+           declaration. See the note in index.astro. */
+        min-height: 100vh;
         min-height: 100dvh;
         display: flex; flex-direction: column; justify-content: center;
         padding: max(24px, env(safe-area-inset-top)) 22px max(24px, env(safe-area-inset-bottom));
@@ -125,6 +128,7 @@ const themeColor = "#05060d";
       .remote-view { display: none; }
       .remote-view.active {
         display: flex; flex-direction: column;
+        min-height: 100vh;
         min-height: 100dvh;
         padding: max(16px, env(safe-area-inset-top)) 16px 0;
         max-width: 560px; margin: 0 auto;
