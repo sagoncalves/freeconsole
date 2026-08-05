@@ -34,6 +34,21 @@
   .slot.used { background: var(--lime); border-color: var(--lime); box-shadow: 0 0 14px var(--lime); }
   #gate.closed .slot { border-color: var(--hot); box-shadow: none; }
 
+  /* Survival's readout, in place of the gate slots. */
+  #survivalHud { display: none; align-items: center; gap: 8px; }
+  #survivalHud.show { display: flex; }
+  #survivalHud .label {
+    font-family: var(--font-mono); font-size: 9px; letter-spacing: .14em;
+    text-transform: uppercase; color: var(--text-faint);
+  }
+  #survivalHud .val {
+    font-family: var(--font-mono); font-weight: 700;
+    font-size: clamp(11px,1.3vw,16px); color: var(--glow);
+  }
+  /* The clock is the score, so it gets the width to change without shifting everything else. */
+  #clock { min-width: 5.5ch; }
+  #survivalHud.hot .val { color: var(--hot); }
+
   #roster { flex: 1; display: flex; gap: 7px; flex-wrap: wrap; justify-content: flex-end; }
   .chip {
     display: flex; align-items: center; gap: 6px;
@@ -98,6 +113,14 @@
     <span class="label">Gate</span>
     <div id="slots"></div>
   </div>
+  <div id="survivalHud">
+    <span class="label">Survived</span>
+    <span id="clock" class="val">0.0s</span>
+    <span class="label">Wave</span>
+    <span id="waveVal" class="val">0</span>
+    <span class="label">Saws</span>
+    <span id="sawVal" class="val">0</span>
+  </div>
   <div id="roster"></div>
 </div>
 
@@ -114,15 +137,15 @@
 <script src="/sdk.js"></script>
 <script type="module">
 import * as THREE from "/vendor/three.js?v=5";
-import * as sim from "/games/minefield3d/sim.js?v=2";
-import { LEVELS, getLevel } from "/games/minefield3d/levels.js?v=2";
+import * as sim from "/games/minefield3d/sim.js?v=4";
+import { LEVELS, getLevel, ARENAS, getArena } from "/games/minefield3d/levels.js?v=4";
 import {
-  createScene, updateCamera, updateFloor, setGateOpen, resize,
+  createScene, updateCamera, updateArenaCamera, updateFloor, setGateOpen, resize,
   buildMineField, updateMineField,
   createPlayerMesh, posePlayer, createKillerMesh, loadAvatar, setAvatar, createBloodSplat,
-  setAvatarHeight,
+  setAvatarHeight, createRoombaMesh, updateRoombaMesh,
   createPingRing, updatePingRing, createBlast, stepBlast, createPrintMesh,
-} from "/games/minefield3d/scene.js?v=7";
+} from "/games/minefield3d/scene.js?v=8";
 import {
   TIERS, QUALITY_CHOICES, DEFAULT_QUALITY, resolveTier, makeFpsWatchdog,
 } from "/games/minefield3d/quality.js?v=3";
@@ -184,8 +207,19 @@ document.getElementById("quality").textContent = tierName;
 
 /* -------------------------------------------------------------------- setup */
 
+/**
+ * Which game this is. Escape crosses an aisle to a gate; survival outlasts saw roombas in a
+ * closed room. The mode owns which table of levels is in play, so every "how many levels are
+ * there" question has to go through modeLevels() rather than reading LEVELS directly.
+ */
+let mode = params.get("mode") === "survival" ? sim.MODE_SURVIVAL : sim.MODE_ESCAPE;
+
+function isSurvival() { return mode === sim.MODE_SURVIVAL; }
+function modeLevels() { return isSurvival() ? ARENAS : LEVELS; }
+function modeLevel(i) { return isSurvival() ? getArena(i) : getLevel(i); }
+
 let levelIndex = 0;
-let round = sim.createRound(levelIndex, (Math.random() * 0xffffffff) >>> 0);
+let round = sim.createRound(levelIndex, (Math.random() * 0xffffffff) >>> 0, mode);
 
 const canvas = document.getElementById("c");
 const overlay = document.getElementById("overlay");
@@ -193,8 +227,12 @@ const dread = document.getElementById("dread");
 const rosterEl = document.getElementById("roster");
 const slotsEl = document.getElementById("slots");
 const gateEl = document.getElementById("gate");
+const survivalHud = document.getElementById("survivalHud");
+const clockEl = document.getElementById("clock");
+const waveEl = document.getElementById("waveVal");
+const sawEl = document.getElementById("sawVal");
 
-let ctx = createScene(canvas, round.level, Q);
+let ctx = createScene(canvas, round.level, Q, isSurvival());
 resize(ctx, canvas);
 addEventListener("resize", () => resize(ctx, canvas));
 
@@ -204,6 +242,15 @@ const rings = new Map();      // id -> { mesh, mat }
 const printMeshes = [];       // { mesh, mat, print }
 const blasts = [];
 const splats = [];            // permanent blood decals, oldest first
+
+/**
+ * Survival's machines, keyed by the sim's roomba id.
+ *
+ * Keyed rather than indexed for the same reason players are: the sim's array is spliced when
+ * a round restarts and appended to on every wave, so a positional mapping would silently
+ * repaint one machine as another.
+ */
+const roombaMeshes = new Map();
 
 // The crusher spans the aisle, so its geometry depends on the level's width and it is
 // rebuilt whenever the scene is.
@@ -221,7 +268,7 @@ function rebuildScene() {
   // Drop the old renderer's GPU resources before making another one, or switching tiers a
   // few times leaks a context per switch and the browser kills the canvas.
   const old = ctx;
-  ctx = createScene(canvas, round.level, Q);
+  ctx = createScene(canvas, round.level, Q, isSurvival());
   resize(ctx, canvas);
   old.renderer.dispose();
 
@@ -230,6 +277,9 @@ function rebuildScene() {
   printMeshes.length = 0;
   blasts.length = 0;
   splats.length = 0;   // the old scene owned their meshes; it is being disposed wholesale
+  // The machines belong to the disposed scene. Cleared rather than re-parented so the frame
+  // loop rebuilds them from the sim, which is the only thing that knows how many there are.
+  roombaMeshes.clear();
 
   // Rebuilt rather than re-parented: its width is the aisle's width, so carrying the old one
   // across a level change would leave a crusher sized for the previous aisle.
@@ -353,7 +403,7 @@ function maybeStart() {
 
 function tickCountdown() {
   if (countdown > 0) {
-    showOverlay(String(countdown), getLevel(levelIndex).tagline, false);
+    showOverlay(String(countdown), modeLevel(levelIndex).tagline, false);
     countdown--;
     return;
   }
@@ -367,18 +417,42 @@ function tickCountdown() {
 }
 
 function loadLevel(index) {
-  levelIndex = Math.max(0, Math.min(LEVELS.length - 1, index));
+  levelIndex = Math.max(0, Math.min(modeLevels().length - 1, index));
   const ids = [...round.players.keys()];
-  round = sim.createRound(levelIndex, (Math.random() * 0xffffffff) >>> 0);
+  round = sim.createRound(levelIndex, (Math.random() * 0xffffffff) >>> 0, mode);
   for (const id of ids) sim.addPlayer(round, id);
 
-  document.getElementById("levelTitle").textContent = getLevel(levelIndex).name;
-  document.querySelector("#levelName .tag").textContent = "Level " + (levelIndex + 1);
+  document.getElementById("levelTitle").textContent = modeLevel(levelIndex).name;
+  document.querySelector("#levelName .tag").textContent =
+    (isSurvival() ? "Arena " : "Level ") + (levelIndex + 1);
 
   // The aisle's dimensions change between levels, so the whole scene is rebuilt.
   rebuildScene();
   renderSlots();
   renderRoster();
+}
+
+/**
+ * Switch modes, from the master controller.
+ *
+ * Always drops back to the first level of the new mode: the two tables are different lengths
+ * and index 3 of LEVELS has no counterpart in ARENAS, so carrying the index across would
+ * silently clamp and land somewhere nobody chose.
+ */
+function setMode(next) {
+  if (next !== sim.MODE_SURVIVAL && next !== sim.MODE_ESCAPE) return;
+  if (next === mode) return;
+
+  mode = next;
+  if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+
+  loadLevel(0);
+  // A mode switch always returns to briefing, even from the middle of a live round — the sim
+  // it was running no longer exists.
+  round.phase = "briefing";
+  showWaiting();
+  broadcastState(true);
+  maybeStart();
 }
 
 /* ---------------------------------------------------------------- shell wiring */
@@ -407,10 +481,23 @@ freeconsole.onMessage = function (deviceId, data) {
     return;
   }
 
+  if (data.t === "mode" && sim.MODES.includes(data.mode)) {
+    // Master only, exactly like the quality switch — a mode change restarts the round for
+    // everybody, so it is not a thing six phones may fight over.
+    const master = safeCall(() => freeconsole.getMasterControllerDeviceId(), deviceId);
+    if (master !== undefined && deviceId !== master) return;
+    setMode(data.mode);
+    return;
+  }
+
   if (data.t === "again" && round.phase === "over") {
     const master = safeCall(() => freeconsole.getMasterControllerDeviceId(), deviceId);
     if (master !== undefined && deviceId !== master) return;
-    const advance = round.escapedOrder.length > 0 && levelIndex + 1 < LEVELS.length;
+    // Escape advances on somebody getting out. Survival advances on somebody being the last
+    // one standing — in a room where everyone died to the opening pack, the next arena would
+    // just be a harder way to lose the same way.
+    const won = isSurvival() ? round.winner !== null : round.escapedOrder.length > 0;
+    const advance = won && levelIndex + 1 < modeLevels().length;
     loadLevel(advance ? levelIndex + 1 : levelIndex);
     maybeStart();
   }
@@ -426,24 +513,33 @@ function broadcastState(force) {
   const states = {};
   for (const [id, p] of round.players) { legs[id] = p.legs; states[id] = p.state; }
 
+  const survival = isSurvival();
+
   const key = JSON.stringify([
-    round.phase, legs, states, round.exitOpen, round.exitUsed, levelIndex,
+    round.phase, legs, states, round.exitOpen, round.exitUsed, levelIndex, mode,
     round.level.exitCapacity, round.level.sonarPeriod, qualityChoice, tierName,
+    survival ? round.wave : 0, survival ? round.roombas.length : 0,
   ]);
   if (!force && key === lastStateKey) return;
   lastStateKey = key;
 
   safeCall(() => freeconsole.broadcast({
     phase: round.phase,
+    mode,
     legs,
     states,
-    exitOpen: round.exitOpen,
-    exitLeft: Math.max(0, round.level.exitCapacity - round.exitUsed),
-    exitCapacity: round.level.exitCapacity,
+    // Survival has no gate. Sent as capacity 0 so the controller's slot row renders empty
+    // rather than showing a door that does not exist.
+    exitOpen: survival ? false : round.exitOpen,
+    exitLeft: survival ? 0 : Math.max(0, round.level.exitCapacity - round.exitUsed),
+    exitCapacity: survival ? 0 : round.level.exitCapacity,
     sonarPeriod: round.level.sonarPeriod,
     level: levelIndex + 1,
-    levelName: getLevel(levelIndex).name,
+    levelName: modeLevel(levelIndex).name,
+    wave: survival ? round.wave : 0,
+    saws: survival ? round.roombas.length : 0,
     quality: { choice: qualityChoice, tier: tierName, choices: QUALITY_CHOICES },
+    modes: { current: mode, choices: sim.MODES },
   }));
 }
 
@@ -474,6 +570,13 @@ function renderRoster() {
 }
 
 function renderSlots() {
+  // The two modes own the same strip of HUD: escape shows the gate's remaining capacity,
+  // survival shows the clock and the wave. Exactly one is ever visible.
+  const survival = isSurvival();
+  gateEl.style.display = survival ? "none" : "";
+  survivalHud.classList.toggle("show", survival);
+  if (survival) return;
+
   const cap = round.level.exitCapacity;
   slotsEl.innerHTML = "";
   for (let i = 0; i < cap; i++) {
@@ -482,6 +585,21 @@ function renderSlots() {
     slotsEl.appendChild(s);
   }
   gateEl.classList.toggle("closed", !round.exitOpen);
+}
+
+/**
+ * The survival clock, ticked from the frame loop rather than from broadcasts.
+ *
+ * It is the score, so it has to move continuously — driving it off the change-keyed broadcast
+ * would step it once a second at best and make the one number the mode is about look frozen.
+ */
+function renderSurvivalHud() {
+  if (!isSurvival()) return;
+  clockEl.textContent = round.t.toFixed(1) + "s";
+  waveEl.textContent = String(round.wave);
+  sawEl.textContent = String(round.roombas.length);
+  // Turns hot once the room is genuinely crowded, as an at-a-glance read on how bad it is.
+  survivalHud.classList.toggle("hot", round.roombas.length >= round.level.maxRoombas * 0.7);
 }
 
 function escapeHtml(s) {
@@ -504,6 +622,8 @@ function showWaiting() {
 }
 
 function showResults() {
+  if (isSurvival()) { showSurvivalResults(); return; }
+
   const escaped = round.escapedOrder;
   // Spectators — phones that joined or reloaded mid-round — are in neither column. They did
   // not get out and they were never in danger, so listing them either way is a lie.
@@ -528,6 +648,43 @@ function showResults() {
       (anyOut
         ? (more ? "Tap to walk into the next one." : "That was the last aisle. Tap to run it again.")
         : "Tap to try this aisle again.") +
+    "</div>";
+}
+
+/**
+ * Survival's end card: a leaderboard by time survived.
+ *
+ * Ranked rather than listed. Escape has a natural ordering built into the fiction — you got
+ * out or you did not — but survival's only fact is how long each person lasted, so the board
+ * has to say it explicitly or the round has no outcome at all.
+ */
+function showSurvivalResults() {
+  const ranked = sim.survivalRanking(round);
+  const champ = ranked.length ? ranked[0] : null;
+  const lasted = champ ? champ.time : round.t;
+
+  let rows = "";
+  ranked.forEach((entry, i) => {
+    const label = escapeHtml(nameOf(entry.id)) + " — " + entry.time.toFixed(1) + "s";
+    rows += i === 0
+      ? "<div><b>" + (i + 1) + ". " + label + "</b>" + (entry.alive ? " — still standing" : "") + "</div>"
+      : "<div>" + (i + 1) + ". " + label + "</div>";
+  });
+
+  const survived = !!champ && champ.alive;
+  const more = levelIndex + 1 < modeLevels().length;
+
+  overlay.classList.remove("hidden");
+  overlay.innerHTML =
+    '<div class="big' + (survived ? "" : " bad") + '">' +
+      (survived ? "Last one standing" : "The floor wins") + "</div>" +
+    '<div class="sub">' + lasted.toFixed(1) + "s · wave " + round.wave +
+      " · " + round.roombas.length + " saws on the floor</div>" +
+    '<div class="roll">' + rows + "</div>" +
+    '<div class="sub">' +
+      (survived
+        ? (more ? "Tap for a worse room." : "That was the last room. Tap to run it again.")
+        : "Tap to go back in.") +
     "</div>";
 }
 
@@ -560,6 +717,29 @@ function drainEvents() {
 
       shake = Math.min(1, shake + 0.9);
       renderRoster();
+      broadcastState();
+    } else if (e.type === "saw") {
+      // A saw hit gets a short kick and a splat, but deliberately less of both than a mine —
+      // it happens far more often, and a full blast shake every time would be unwatchable.
+      shake = Math.min(1, shake + 0.35);
+      if (Q.craterDecals) {
+        const splat = createBloodSplat();
+        splat.group.position.set(e.x, 0, e.z);
+        splat.group.rotation.y = Math.random() * Math.PI * 2;
+        splat.group.scale.setScalar(0.6);
+        ctx.world.add(splat.group);
+        splats.push(splat);
+        if (splats.length > 40) {
+          const old = splats.shift();
+          ctx.world.remove(old.group);
+          old.group.traverse((o) => { if (o.geometry) o.geometry.dispose(); });
+          old.mat.dispose();
+        }
+      }
+      renderRoster();
+      broadcastState();
+    } else if (e.type === "wave") {
+      shake = Math.min(1, shake + 0.4);
       broadcastState();
     } else if (e.type === "death") {
       renderRoster();
@@ -604,6 +784,34 @@ function syncPrints(dt) {
   }
 }
 
+/**
+ * Build, pose and retire the machines to match the sim.
+ *
+ * Reconciled against the sim's array every frame rather than driven by spawn events, so a
+ * scene rebuild — a quality switch mid-round — restores every machine that is still on the
+ * floor. Driving it purely from events would leave the room empty until the next wave.
+ */
+function syncRoombas(dt) {
+  const live = new Set();
+
+  for (const r of round.roombas) {
+    live.add(r.id);
+    let mesh = roombaMeshes.get(r.id);
+    if (!mesh) {
+      mesh = createRoombaMesh(Q);
+      ctx.world.add(mesh.group);
+      roombaMeshes.set(r.id, mesh);
+    }
+    updateRoombaMesh(mesh, r, dt);
+  }
+
+  for (const [id, mesh] of roombaMeshes) {
+    if (live.has(id)) continue;
+    ctx.world.remove(mesh.group);
+    roombaMeshes.delete(id);
+  }
+}
+
 /* --------------------------------------------------------------------- loop */
 
 let last = 0;
@@ -639,10 +847,17 @@ function frame(ts) {
     if (ring) updatePingRing(ring, p.ping, round.level);
   }
 
-  // The crusher, once it is actually in the aisle. It is always centred on the aisle's width
-  // — it spans the whole thing, so there is no lateral position to track.
-  killer.group.visible = round.killerZ <= round.rows + 1;
-  killer.group.position.set(round.cols / 2, 0, round.killerZ);
+  if (isSurvival()) {
+    // The crusher does not exist in this mode.
+    killer.group.visible = false;
+    syncRoombas(dt);
+    renderSurvivalHud();
+  } else {
+    // The crusher, once it is actually in the aisle. It is always centred on the aisle's width
+    // — it spans the whole thing, so there is no lateral position to track.
+    killer.group.visible = round.killerZ <= round.rows + 1;
+    killer.group.position.set(round.cols / 2, 0, round.killerZ);
+  }
 
   syncPrints(dt);
 
@@ -656,18 +871,24 @@ function frame(ts) {
   updateFloor(ctx, round, sim, ts);
   updateMineField(mineField, round, sim, Q, ts);
 
-  // The camera frames the whole surviving pack — from whoever is closest to the gate back to
-  // whoever is furthest behind. A camera that tracks only the leader loses every slower
-  // player off the bottom of the screen, which is precisely the people worth watching.
-  let lead = Infinity;
-  let tail = -Infinity;
-  for (const p of round.players.values()) {
-    if (p.state !== sim.ALIVE) continue;
-    if (p.z < lead) lead = p.z;
-    if (p.z > tail) tail = p.z;
+  if (isSurvival()) {
+    // A fixed shot of the whole room. There is no pack to follow and no direction that counts
+    // as progress, so the camera's job is to hold every machine on screen at once.
+    updateArenaCamera(ctx, dt);
+  } else {
+    // The camera frames the whole surviving pack — from whoever is closest to the gate back to
+    // whoever is furthest behind. A camera that tracks only the leader loses every slower
+    // player off the bottom of the screen, which is precisely the people worth watching.
+    let lead = Infinity;
+    let tail = -Infinity;
+    for (const p of round.players.values()) {
+      if (p.state !== sim.ALIVE) continue;
+      if (p.z < lead) lead = p.z;
+      if (p.z > tail) tail = p.z;
+    }
+    if (!isFinite(lead)) { lead = round.rows - 2; tail = round.rows - 2; }
+    updateCamera(ctx, lead, tail, dt, round.killerZ);
   }
-  if (!isFinite(lead)) { lead = round.rows - 2; tail = round.rows - 2; }
-  updateCamera(ctx, lead, tail, dt, round.killerZ);
 
   if (shake > 0) {
     shake = Math.max(0, shake - dt * 2.6);
@@ -680,17 +901,34 @@ function frame(ts) {
 }
 
 function updateDread() {
-  if (round.phase !== "running" || round.killerZ > round.rows) {
+  const clear = () => {
     dread.style.boxShadow = "inset 0 0 18vw 6vw rgba(255,46,136,0)";
-    return;
-  }
+  };
+  if (round.phase !== "running") { clear(); return; }
+
   let nearest = Infinity;
-  for (const p of round.players.values()) {
-    if (p.state !== sim.ALIVE) continue;
-    nearest = Math.min(nearest, Math.abs(p.z - round.killerZ));
+
+  if (isSurvival()) {
+    // Distance from any living player to the nearest blade. The vignette is the one cue that
+    // works when a player is looking at the far side of the room rather than at themselves.
+    for (const p of round.players.values()) {
+      if (p.state !== sim.ALIVE) continue;
+      for (const r of round.roombas) {
+        nearest = Math.min(nearest, Math.hypot(p.x - r.x, p.z - r.z));
+      }
+    }
+    if (!isFinite(nearest)) { clear(); return; }
+  } else {
+    if (round.killerZ > round.rows) { clear(); return; }
+    for (const p of round.players.values()) {
+      if (p.state !== sim.ALIVE) continue;
+      nearest = Math.min(nearest, Math.abs(p.z - round.killerZ));
+    }
+    if (!isFinite(nearest)) nearest = 99;
   }
-  if (!isFinite(nearest)) nearest = 99;
-  const close = Math.max(0, 1 - nearest / (round.rows * 0.35));
+
+  const reach = isSurvival() ? 5 : round.rows * 0.35;
+  const close = Math.max(0, 1 - nearest / reach);
   dread.style.boxShadow = "inset 0 0 " + (18 + close * 10).toFixed(1) + "vw " +
     (6 + close * 5).toFixed(1) + "vw rgba(255,46,136," + (close * 0.5).toFixed(3) + ")";
 }
@@ -747,6 +985,17 @@ if (TEST) {
       showOverlay(null);
       window.__round = round;
     }
+    // Toggle modes from the keyboard, so both games can be driven without a phone.
+    if (e.code === "KeyM") {
+      setMode(isSurvival() ? sim.MODE_ESCAPE : sim.MODE_SURVIVAL);
+      sim.addPlayer(round, 1);
+      ensureBody(1);
+      for (let i = 0; i < BOTS; i++) { const id = 2 + i; sim.addPlayer(round, id); ensureBody(id); }
+      renderRoster();
+      sim.startRound(round);
+      showOverlay(null);
+      window.__round = round;
+    }
     // Cycle quality from the keyboard, so the tiers can be eyeballed without a phone.
     if (e.code === "KeyQ") {
       const i = QUALITY_CHOICES.indexOf(qualityChoice);
@@ -777,6 +1026,41 @@ if (TEST) {
           }
         }
         const tx = Math.floor(p.x), tz = Math.floor(p.z);
+
+        // In survival there is nowhere to head for, so the bots run from the nearest blades
+        // and from the walls instead of walking the aisle. Same purpose as the escape bots:
+        // populate the room with independent lamps and moving targets to watch.
+        if (isSurvival()) {
+          let fx = 0, fz = 0;
+          for (const r of round.roombas) {
+            const dx = p.x - r.x, dz = p.z - r.z;
+            const d = Math.hypot(dx, dz) || 1;
+            if (d > 8) continue;
+            const w = 1 / (d * d);
+            fx += (dx / d) * w * 9;
+            fz += (dz / d) * w * 9;
+          }
+          const m = 3.5;
+          if (p.x < m) fx += (m - p.x) * 0.55;
+          if (p.x > round.cols - m) fx -= (p.x - (round.cols - m)) * 0.55;
+          if (p.z < m) fz += (m - p.z) * 0.55;
+          if (p.z > round.rows - m) fz -= (p.z - (round.rows - m)) * 0.55;
+          for (let z = tz - 2; z <= tz + 2; z++) {
+            for (let x = tx - 2; x <= tx + 2; x++) {
+              if (!known.has(z * round.cols + x)) continue;
+              const dx = p.x - (x + 0.5), dz = p.z - (z + 0.5);
+              const d = Math.hypot(dx, dz) || 1;
+              if (d > 2.2) continue;
+              fx += (dx / d) * (1 / (d * d)) * 2.2;
+              fz += (dz / d) * (1 / (d * d)) * 2.2;
+            }
+          }
+          const len = Math.hypot(fx, fz);
+          if (len < 1e-3) sim.setAxis(round, id, 0, 0);
+          else sim.setAxis(round, id, fx / len, fz / len);
+          continue;
+        }
+
         const blocked = (x, z) => x < 0 || z < 0 || x >= round.cols || z >= round.rows ||
           known.has(z * round.cols + x);
         for (const d of ["up", "down", "left", "right"]) sim.setInput(round, id, d, false);

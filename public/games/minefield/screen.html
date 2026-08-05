@@ -122,11 +122,11 @@
 <script src="/sdk.js"></script>
 <script type="module">
 import {
-  createRound, addPlayer, removePlayer, setInput, clearInput, startRound, step,
+  createRound, addPlayer, removePlayer, setInput, setAxis, clearInput, startRound, step,
   tileReveal, mineAt, craterAt, speedOf,
   ALIVE, DEAD, ESCAPED, PRINT_LIFE,
-} from "/games/minefield/sim.js?v=1";
-import { LEVELS, getLevel } from "/games/minefield/levels.js?v=1";
+} from "/games/minefield/sim.js?v=2";
+import { LEVELS, getLevel } from "/games/minefield/levels.js?v=2";
 
 const freeconsole = new FreeConsole();
 
@@ -284,6 +284,10 @@ freeconsole.onMessage = function (deviceId, data) {
 
   if (data.t === "hold") {
     setInput(round, deviceId, data.k, data.v);
+    return;
+  }
+  if (data.t === "axis") {
+    setAxis(round, deviceId, data.x, data.y);
     return;
   }
   if (data.t === "release") {

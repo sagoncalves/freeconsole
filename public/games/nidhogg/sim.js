@@ -68,6 +68,10 @@ const PUNCH_SHOVE = 260;
 const THROW_SPEED = 720;
 const THROW_SPIN = 15;
 
+// Gait. Radians of leg cycle per pixel travelled: one full stride every ~76px, which at a run
+// is a little under four strides a second. Cosmetic only.
+const GAIT_PER_PX = (Math.PI * 2) / 76;
+
 /** Sword guard heights (spec 9). Index order matters: adjacent heights are what clash. */
 export const HIGH = 0;
 export const MID = 1;
@@ -120,6 +124,13 @@ export function addPlayer(match, deviceId, side) {
     state: "idle",
     /** Time remaining in a committed action. Zero means free to act. */
     timer: 0,
+    /**
+     * How long `timer` started at, so a renderer can normalise progress into 0..1 without
+     * having to know which constant the sim picked - the same action runs at different
+     * lengths depending on how it was entered. Written by `setAction`; read by nothing in
+     * here. Cosmetic, like `gait`.
+     */
+    timerMax: 0,
     /** The action that owns `timer`, so we know what to resolve when it expires. */
     action: null,
     armed: true,
@@ -132,6 +143,13 @@ export function addPlayer(match, deviceId, side) {
     /** Set while a lethal box is live, so a trade resolves the same way both directions. */
     lethal: false,
     height: BODY_H,
+    /**
+     * Gait phase, in radians. Advances with distance travelled rather than time, so the legs
+     * cycle in step with the ground and a run cycles faster than a walk for free. Purely
+     * cosmetic - nothing in the sim reads it - but it lives here so it stays deterministic
+     * and survives the same reset paths as the rest of the body.
+     */
+    gait: 0,
     input: freshInput(),
     /** Consumed one-shot intents, latched until the sim reads them. */
     pressed: {},
@@ -163,6 +181,16 @@ export function clearInput(match, deviceId) {
   if (!p) return;
   p.input = freshInput();
   p.pressed = {};
+}
+
+/**
+ * Enter a committed action. The single place `action`/`timer` are set together, so the
+ * recorded duration can never drift from the timer it describes.
+ */
+function setAction(p, action, duration) {
+  p.action = action;
+  p.timer = duration;
+  p.timerMax = duration;
 }
 
 /** Latch a one-shot action. The sim consumes it on the next step. */
@@ -431,12 +459,10 @@ function stepPlayer(match, p, dt, now) {
   if (p.onGround && !wasOnGround && p.vy >= 0) {
     if (p.action === "dive") {
       // A dive kick that reaches the floor without connecting leaves you on the ground.
-      p.action = "knockdown";
-      p.timer = T_KNOCKDOWN * 0.6;
+      setAction(p, "knockdown", T_KNOCKDOWN * 0.6);
       p.state = "knockdown";
     } else if (!committed) {
-      p.action = "land";
-      p.timer = T_LAND_RECOVER;
+      setAction(p, "land", T_LAND_RECOVER);
       p.state = "land";
     }
   }
@@ -462,6 +488,17 @@ function stepPlayer(match, p, dt, now) {
     p.state = "walk";
   } else {
     p.state = p.armed ? "ready" : "unarmed";
+  }
+
+  // ---- gait phase -------------------------------------------------------
+  // Distance-driven, so the stride length is constant and the cycle speeds up with the body
+  // instead of drifting against it. Airborne and committed states hold the phase where it is:
+  // a jump keeps its takeoff pose rather than pedalling.
+  if (p.onGround && (p.state === "walk" || p.state === "run" || p.state === "crawl")) {
+    p.gait = (p.gait + Math.abs(p.vx) * dt * GAIT_PER_PX) % (Math.PI * 2);
+  } else if (p.onGround && Math.abs(p.vx) <= 12) {
+    // Ease back to a neutral stance when stopped, so an idle fencer stands square.
+    p.gait *= Math.max(0, 1 - dt * 9);
   }
 
   // Picking a sword back up is automatic on contact (spec 16).
@@ -503,42 +540,36 @@ function startAttack(match, p) {
     return;
   }
   if (!p.onGround) {
-    p.action = "thrust";
-    p.timer = T_THRUST;
+    setAction(p, "thrust", T_THRUST);
     p.state = "airstab";
     return;
   }
   const lunging = p.input.run && Math.abs(p.vx) > 180;
-  p.action = lunging ? "lunge" : "thrust";
-  p.timer = lunging ? T_LUNGE : T_THRUST;
+  setAction(p, lunging ? "lunge" : "thrust", lunging ? T_LUNGE : T_THRUST);
   p.state = p.action;
   match.events.push({ type: lunging ? "lunge" : "thrust", x: p.x, y: p.y, id: p.id });
 }
 
 function startPunch(match, p) {
-  p.action = "punch";
-  p.timer = T_PUNCH;
+  setAction(p, "punch", T_PUNCH);
   p.state = "punch";
 }
 
 function startKick(match, p) {
   if (!p.onGround) { startDive(match, p); return; }
-  p.action = "kick";
-  p.timer = T_KICK;
+  setAction(p, "kick", T_KICK);
   p.state = "kick";
 }
 
 function startDive(match, p) {
-  p.action = "dive";
-  p.timer = T_DIVE;
+  setAction(p, "dive", T_DIVE);
   p.state = "divekick";
   p.vy = 420;
   match.events.push({ type: "dive", x: p.x, y: p.y, id: p.id });
 }
 
 function startRoll(p) {
-  p.action = "roll";
-  p.timer = T_ROLL;
+  setAction(p, "roll", T_ROLL);
   p.state = "roll";
   p.height = CRAWL_H;
 }
@@ -547,8 +578,7 @@ function throwSword(match, p) {
   // A thrown sword leaves you unarmed, which is the cost of the range (spec 15).
   const vy = p.guard === HIGH ? -120 : p.guard === LOW ? 120 : 0;
   dropSword(match, p, p.facing * THROW_SPEED, vy);
-  p.action = "throw";
-  p.timer = T_THRUST_RECOVER;
+  setAction(p, "throw", T_THRUST_RECOVER);
   p.state = "throw";
   match.events.push({ type: "throw", x: p.x, y: p.y, id: p.id });
 }
@@ -557,15 +587,13 @@ function throwSword(match, p) {
 function finishAction(match, p) {
   if (p.action === "lunge") {
     // Missing a lunge leaves you planted - the punish window the whole spacing game turns on.
-    p.action = "recover";
-    p.timer = T_LUNGE_RECOVER;
+    setAction(p, "recover", T_LUNGE_RECOVER);
     p.state = "recover";
     p.vx = 0;
     return;
   }
   if (p.action === "thrust") {
-    p.action = "recover";
-    p.timer = T_THRUST_RECOVER;
+    setAction(p, "recover", T_THRUST_RECOVER);
     p.state = "recover";
     return;
   }
@@ -648,8 +676,7 @@ function isAttacking(p) {
 }
 
 function cancelAttack(p) {
-  p.action = "recover";
-  p.timer = T_THRUST_RECOVER;
+  setAction(p, "recover", T_THRUST_RECOVER);
   p.state = "recover";
   p.vx *= 0.2;
 }
@@ -683,6 +710,7 @@ function resolveUnarmed(match, a, b, deaths) {
     knockDown(match, b, a.facing);
     a.action = null;
     a.timer = 0;
+    a.timerMax = 0;
     a.vy = -240;
     match.events.push({ type: "divehit", x: b.x, y: b.y });
     return;
@@ -693,6 +721,7 @@ function resolveUnarmed(match, a, b, deaths) {
     knockDown(match, b, a.facing);
     a.action = null;
     a.timer = 0;
+    a.timerMax = 0;
     match.events.push({ type: "kick", x: b.x, y: b.y });
     return;
   }
@@ -704,6 +733,7 @@ function resolveUnarmed(match, a, b, deaths) {
       deaths.push([b, a, "necksnap"]);
       a.action = null;
       a.timer = 0;
+      a.timerMax = 0;
       return;
     }
     if (b.armed) {
@@ -714,13 +744,13 @@ function resolveUnarmed(match, a, b, deaths) {
     b.vy = Math.min(b.vy, -90);
     a.action = null;
     a.timer = 0;
+    a.timerMax = 0;
     match.events.push({ type: "punch", x: b.x, y: b.y });
   }
 }
 
 function knockDown(match, p, dir) {
-  p.action = "knockdown";
-  p.timer = T_KNOCKDOWN;
+  setAction(p, "knockdown", T_KNOCKDOWN);
   p.state = "knockdown";
   p.height = CRAWL_H;
   p.vx = dir * 200;
@@ -745,6 +775,7 @@ function kill(match, victim, killer, cause) {
   victim.vy = 0;
   victim.action = null;
   victim.timer = 0;
+  victim.timerMax = 0;
   victim.state = "dead";
   // A dead player's sword falls where they stood, so a kill leaves a weapon on the field.
   if (victim.armed) dropSword(match, victim, 0, -180);
@@ -826,6 +857,8 @@ function respawn(match, p) {
   p.state = "idle";
   p.action = null;
   p.timer = 0;
+  p.timerMax = 0;
+  p.gait = 0;
   p.climbTime = 0;
   p.facing = attackerDir;  // face the incoming attacker
   match.events.push({ type: "respawn", x: p.x, y: p.y, id: p.id });
@@ -1016,6 +1049,8 @@ export function restart(match) {
     p.state = "idle";
     p.action = null;
     p.timer = 0;
+    p.timerMax = 0;
+    p.gait = 0;
     p.kills = 0;
     p.deaths = 0;
     p.input = freshInput();

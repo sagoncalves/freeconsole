@@ -186,6 +186,15 @@ export function addPlayer(round, deviceId) {
     distance: 0,           // tiles travelled, for footprint spacing
     escapedAt: 0,
     input: { up: false, down: false, left: false, right: false },
+
+    /**
+     * Analog stick, when the controller sends one. Held separately from the boolean input
+     * rather than folded into it, because a stick carries a magnitude the four flags cannot
+     * represent: pushing the thumb halfway must actually walk at half speed. `axis` is null
+     * whenever no stick is engaged, which is what lets the two input styles coexist — the
+     * on-screen keyboard controls still drive `input` and are unaffected.
+     */
+    axis: null,            // { x, y } with hypot <= 1 while the stick is held, else null
   };
   round.players.set(deviceId, p);
   p.lastPrintX = p.x;
@@ -204,11 +213,32 @@ export function setInput(round, deviceId, key, value) {
   p.input[key] = !!value;
 }
 
+/**
+ * Analog movement from a stick controller. Clamped here rather than trusted, because this
+ * arrives straight off the wire: a magnitude above 1 would otherwise be a speed hack, and a
+ * non-finite one would poison p.x/p.y into NaN for the rest of the round with no way back.
+ *
+ * A zero-length vector is stored as "no stick" rather than as a zero axis. The distinction
+ * matters on the read side — null means the boolean flags still govern, so the keyboard
+ * controls and a controller that centres its stick both fall back cleanly.
+ */
+export function setAxis(round, deviceId, x, y) {
+  const p = round.players.get(deviceId);
+  if (!p) return;
+  if (!Number.isFinite(x) || !Number.isFinite(y)) { p.axis = null; return; }
+
+  const len = Math.hypot(x, y);
+  if (len < 1e-3) { p.axis = null; return; }
+  const scale = len > 1 ? 1 / len : 1;
+  p.axis = { x: x * scale, y: y * scale };
+}
+
 /** Drop everything a device is holding. Used on reconnect and on a backgrounded phone. */
 export function clearInput(round, deviceId) {
   const p = round.players.get(deviceId);
   if (!p) return;
   p.input.up = p.input.down = p.input.left = p.input.right = false;
+  p.axis = null;
 }
 
 /* ------------------------------------------------------------------ lifecycle */
@@ -362,20 +392,43 @@ function stepPlayer(round, p, dt) {
     return;
   }
 
-  let vx = (p.input.right ? 1 : 0) - (p.input.left ? 1 : 0);
-  let vy = (p.input.down ? 1 : 0) - (p.input.up ? 1 : 0);
-  if (vx === 0 && vy === 0) { p.dx = 0; p.dy = 0; return; }
+  let vx;
+  let vy;
+  let throttle;
 
-  // Normalise so diagonals are not a free speed boost — crossing the field diagonally must
-  // cost the same as crossing it in two moves.
-  const len = Math.hypot(vx, vy);
-  vx /= len;
-  vy /= len;
+  if (p.axis) {
+    // The stick already carries direction *and* magnitude, so it is used as-is. Normalising
+    // it the way the buttons are normalised would quantise every partial push back up to
+    // full speed and throw away the only thing the stick adds over four flags. Diagonals are
+    // still not a speed boost: setAxis clamps the vector to length 1 on the way in.
+    vx = p.axis.x;
+    vy = p.axis.y;
+    throttle = Math.min(1, Math.hypot(vx, vy));
+    if (throttle < 1e-3) { p.dx = 0; p.dy = 0; return; }
+    vx /= throttle;
+    vy /= throttle;
+  } else {
+    vx = (p.input.right ? 1 : 0) - (p.input.left ? 1 : 0);
+    vy = (p.input.down ? 1 : 0) - (p.input.up ? 1 : 0);
+    if (vx === 0 && vy === 0) { p.dx = 0; p.dy = 0; return; }
 
-  const speed = speedOf(p);
+    // Normalise so diagonals are not a free speed boost — crossing the field diagonally must
+    // cost the same as crossing it in two moves.
+    const len = Math.hypot(vx, vy);
+    vx /= len;
+    vy /= len;
+    // A pressed button is always full commitment; only the stick can ask for less.
+    throttle = 1;
+  }
+
+  const speed = speedOf(p) * throttle;
   p.dx = vx * speed;
   p.dy = vy * speed;
-  if (vy !== 0) p.facing = Math.sign(vy);
+  // Deadband rather than `vy !== 0`. With four buttons vy was only ever 0, ±0.707 or ±1, so
+  // any non-zero value was a real up/down commitment. A stick sends a continuum: walking
+  // almost-horizontally still yields a tiny vy, and testing against zero would flip the
+  // sprite up and down on drift alone as the thumb wobbles either side of level.
+  if (Math.abs(vy) > 0.3) p.facing = Math.sign(vy);
 
   // Walk the movement in small steps and test each one, so a fast player cannot tunnel past
   // a mine between frames. At walk speed a single frame can cross a fifth of a tile; a mine

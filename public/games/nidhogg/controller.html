@@ -38,7 +38,7 @@
   #pad.locked { opacity: .35; pointer-events: none; }
 
   .col { display: grid; gap: 8px; min-height: 0; }
-  .col.move { grid-template-rows: 1.2fr 1fr; }
+  .col.move { grid-template-rows: 1fr; }
   .col.act { grid-template-rows: 1.2fr 1fr; }
 
   .key {
@@ -56,10 +56,47 @@
   }
   .key.down { transform: scale(.97); }
 
-  /* Movement: a split cell for left/right, and a run toggle that latches while held. */
+  /* Movement: an analog stick that floats to wherever the left thumb lands. The whole column
+     is the touch surface, so there is nothing to aim at — the base is drawn under the thumb.
+     Angle picks the direction bits, distance past a threshold commits to a run. */
+  .stick {
+    position: relative; border-radius: 16px;
+    border: 1px solid var(--line); background: rgba(10,12,24,.5);
+    overflow: hidden; touch-action: none;
+  }
+  .stick .hint {
+    position: absolute; inset: 0; display: grid; place-items: center; gap: 4px;
+    font-family: var(--font-mono); font-size: 10px; letter-spacing: .12em;
+    text-transform: uppercase; color: var(--text-faint);
+    transition: opacity .12s; pointer-events: none; text-align: center; line-height: 1.7;
+  }
+  .stick.active .hint { opacity: 0; }
+
+  .stick .base, .stick .nub {
+    position: absolute; border-radius: 50%; pointer-events: none;
+    left: 0; top: 0; opacity: 0;
+    transition: opacity .12s;
+    will-change: transform;
+  }
+  .stick.active .base, .stick.active .nub { opacity: 1; }
+  .stick .base {
+    width: 132px; height: 132px; margin: -66px 0 0 -66px;
+    border: 1px solid rgba(53,240,224,.35);
+    background: radial-gradient(circle, rgba(53,240,224,.10), transparent 70%);
+  }
+  .stick .nub {
+    width: 62px; height: 62px; margin: -31px 0 0 -31px;
+    background: rgba(53,240,224,.22);
+    border: 1px solid rgba(53,240,224,.75);
+    box-shadow: 0 0 22px rgba(53,240,224,.35);
+  }
+  /* Running is the state worth reading at a glance, so the nub goes hot rather than louder. */
+  .stick.run .nub {
+    background: rgba(255,194,71,.26); border-color: var(--amber);
+    box-shadow: 0 0 26px rgba(255,194,71,.45);
+  }
+
   .dpad { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-  .key.dir.down { background: rgba(53,240,224,.22); box-shadow: inset 0 0 22px rgba(53,240,224,.3); }
-  .key.jump.down, .key.duck.down { background: rgba(53,240,224,.18); }
 
   /* Guard strip: three stacked zones. Sliding a thumb up and down the strip changes height
      without lifting, which is what makes fencing possible on glass. */
@@ -113,13 +150,10 @@
 
 <div id="pad" class="locked">
   <div class="col move">
-    <div class="dpad">
-      <div class="key dir" data-hold="left">◀</div>
-      <div class="key dir" data-hold="right">▶</div>
-    </div>
-    <div class="dpad">
-      <div class="key jump" data-press="jump">JUMP<span class="sub">wall too</span></div>
-      <div class="key duck" data-hold="down">DUCK<span class="sub">hold+move=crawl</span></div>
+    <div class="stick" id="stick">
+      <div class="hint">Move<br />push far to run<br />up to jump · down to duck</div>
+      <div class="base" id="stickBase"></div>
+      <div class="nub" id="stickNub"></div>
     </div>
   </div>
 
@@ -181,6 +215,103 @@
     freeconsole.vibrate(6);
   }
 
+  /* ------------------------------------------------------------ analog stick */
+
+  /**
+   * A floating stick: the base is placed wherever the thumb first lands inside the left
+   * column, so there is no target to hit while looking at the TV. Direction bits come from
+   * the angle, so diagonals hold left+up together and the wall climb stays reachable.
+   *
+   * The screen only understands booleans, so the analog part lives entirely here: distance
+   * decides walk vs run, angle decides which bits are set, and only changes go on the wire.
+   */
+  var stick = document.getElementById("stick");
+  var stickBase = document.getElementById("stickBase");
+  var stickNub = document.getElementById("stickNub");
+
+  var DEAD = 12;        // px of slack before any direction registers
+  var RANGE = 58;       // px at which the nub is fully deflected
+  var RUN_AT = 38;      // px past which a horizontal push becomes a run
+  var VERT_AT = 0.55;   // |y| share of the vector before up/down engages
+
+  var stickId = null;   // pointerId that owns the stick, or null
+  var stickOx = 0, stickOy = 0;
+  var jumpLatched = false;
+
+  function placeStick(x, y) {
+    stickBase.style.transform = "translate(" + x + "px," + y + "px)";
+    stickNub.style.transform = "translate(" + x + "px," + y + "px)";
+  }
+
+  function stickStart(e) {
+    var r = stick.getBoundingClientRect();
+    stickId = e.pointerId;
+    stickOx = e.clientX - r.left;
+    stickOy = e.clientY - r.top;
+    jumpLatched = false;
+    stick.classList.add("active");
+    placeStick(stickOx, stickOy);
+    stickMove(e);
+  }
+
+  function stickMove(e) {
+    var r = stick.getBoundingClientRect();
+    var dx = (e.clientX - r.left) - stickOx;
+    var dy = (e.clientY - r.top) - stickOy;
+    var dist = Math.sqrt(dx * dx + dy * dy);
+
+    // Clamp the nub to the ring so the visual matches what the sim is being told.
+    var vis = dist > RANGE ? RANGE / dist : 1;
+    stickNub.style.transform =
+      "translate(" + (stickOx + dx * vis) + "px," + (stickOy + dy * vis) + "px)";
+
+    if (dist < DEAD) {
+      sendHold("left", false); sendHold("right", false);
+      sendHold("up", false); sendHold("down", false);
+      sendHold("run", false);
+      stick.classList.remove("run");
+      jumpLatched = false;
+      return;
+    }
+
+    var nx = dx / dist, ny = dy / dist;
+
+    // Vertical only claims the stick near the poles, so a shallow diagonal still runs.
+    var up = ny < -VERT_AT, down = ny > VERT_AT;
+    // Horizontal keeps working on a diagonal, which is how you climb a wall while pressing
+    // into it — the sim needs left/right and up held at once.
+    var left = nx < -0.35, right = nx > 0.35;
+
+    sendHold("left", left);
+    sendHold("right", right);
+    sendHold("up", up);
+    sendHold("down", down);
+
+    var running = (left || right) && !down && dist >= RUN_AT;
+    sendHold("run", running);
+    stick.classList.toggle("run", running);
+
+    // Jump is a one-shot, but the stick is a continuous control: latch on the way up and
+    // only re-arm once the thumb comes back down, so a held-up stick climbs instead of
+    // machine-gunning jumps.
+    if (up && !jumpLatched) {
+      jumpLatched = true;
+      sendPress("jump");
+      freeconsole.vibrate(8);
+    } else if (!up) {
+      jumpLatched = false;
+    }
+  }
+
+  function stickEnd() {
+    stickId = null;
+    stick.classList.remove("active", "run");
+    jumpLatched = false;
+    sendHold("left", false); sendHold("right", false);
+    sendHold("up", false); sendHold("down", false);
+    sendHold("run", false);
+  }
+
   /**
    * Pointer routing.
    *
@@ -214,9 +345,6 @@
     el.classList.add("down");
     if (el.dataset.hold) {
       sendHold(el.dataset.hold, true);
-      // Holding a direction is a walk; the screen promotes it to a run once the stick is
-      // pushed, so a direction key doubles as run when held past a short threshold.
-      if (el.dataset.hold === "left" || el.dataset.hold === "right") armRun(pointerId);
     } else if (el.dataset.press) {
       sendPress(el.dataset.press);
       freeconsole.vibrate(10);
@@ -225,39 +353,19 @@
     }
   }
 
-  /**
-   * Run is implicit: hold a direction for a beat and the fencer commits to a run, which is
-   * also what turns a stab into a lunge. Making it a separate button would cost a thumb
-   * nobody has spare.
-   */
-  var runTimers = Object.create(null);
-  function armRun(pointerId) {
-    clearTimeout(runTimers[pointerId]);
-    runTimers[pointerId] = setTimeout(function () {
-      var el = active[pointerId];
-      if (el && el.dataset && (el.dataset.hold === "left" || el.dataset.hold === "right")) {
-        sendHold("run", true);
-      }
-    }, 180);
-  }
-  function disarmRun(pointerId) {
-    clearTimeout(runTimers[pointerId]);
-    // Only drop run when no pointer is still holding a direction.
-    var stillMoving = false;
-    for (var id in active) {
-      var el = active[id];
-      if (el && el.dataset && (el.dataset.hold === "left" || el.dataset.hold === "right")) stillMoving = true;
-    }
-    if (!stillMoving) sendHold("run", false);
-  }
-
   document.addEventListener("pointerdown", function (e) {
     if (over) { restart(); return; }
     e.preventDefault();
+    // The stick claims its pointer for good; it must never fall through to key routing.
+    if (stickId === null && !pad.classList.contains("locked") && stick.contains(e.target)) {
+      stickStart(e);
+      return;
+    }
     engage(e.pointerId, keyAt(e.clientX, e.clientY));
   }, { passive: false });
 
   document.addEventListener("pointermove", function (e) {
+    if (e.pointerId === stickId) { e.preventDefault(); stickMove(e); return; }
     if (!(e.pointerId in active)) return;
     e.preventDefault();
     var el = keyAt(e.clientX, e.clientY);
@@ -267,13 +375,13 @@
   }, { passive: false });
 
   function release(e) {
+    if (e.pointerId === stickId) { stickEnd(); return; }
     var el = active[e.pointerId];
     if (el) {
       if (el.dataset.hold) sendHold(el.dataset.hold, false);
       el.classList.remove("down");
     }
     delete active[e.pointerId];
-    disarmRun(e.pointerId);
   }
   document.addEventListener("pointerup", release);
   document.addEventListener("pointercancel", release);
@@ -281,6 +389,7 @@
   // A backgrounded phone must not leave a key stuck down on the screen.
   document.addEventListener("visibilitychange", function () {
     if (document.hidden) {
+      stickEnd();
       for (var k in held) if (held[k]) sendHold(k, false);
       for (var id in active) delete active[id];
       var downs = document.querySelectorAll(".key.down, .gkey.down");

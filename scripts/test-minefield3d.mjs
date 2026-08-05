@@ -26,7 +26,7 @@ for (const f of ["sim.js", "levels.js"]) {
 }
 
 const sim = await import(pathToFileURL(join(OUT, "sim.js")).href);
-const { LEVELS } = await import(pathToFileURL(join(OUT, "levels.js")).href);
+const { LEVELS, ARENAS } = await import(pathToFileURL(join(OUT, "levels.js")).href);
 
 let pass = 0, fail = 0;
 const ok = (name, cond, extra = "") => {
@@ -618,6 +618,168 @@ console.log("\nbalance");
   }
   ok("difficulty rises across the campaign", rates[rates.length - 1] < rates[0],
      "(" + Math.round(100 * rates[0]) + "% -> " + Math.round(100 * rates[rates.length - 1]) + "%)");
+}
+
+/* ---- 14. survival mode ---- */
+console.log("\nsurvival: arena and machines");
+{
+  const beginS = (arenaIndex, seed, n = 1) => {
+    const r = sim.createRound(arenaIndex, seed, sim.MODE_SURVIVAL);
+    for (let i = 1; i <= n; i++) sim.addPlayer(r, i);
+    sim.startRound(r);
+    return r;
+  };
+
+  const r0 = beginS(0, 5);
+  ok("the round knows it is survival", r0.mode === sim.MODE_SURVIVAL);
+  ok("escape is still the default mode", sim.createRound(0, 5).mode === sim.MODE_ESCAPE);
+  ok("survival uses the arena table, not the level table",
+     r0.level.name === ARENAS[0].name, "(" + r0.level.name + ")");
+
+  ok("the opening pack is on the floor",
+     r0.roombas.length === r0.level.startRoombas,
+     "(" + r0.roombas.length + " of " + r0.level.startRoombas + ")");
+  ok("every machine has a distinct id",
+     new Set(r0.roombas.map((m) => m.id)).size === r0.roombas.length);
+
+  // The spawn circle must be clear, or somebody dies before touching the stick.
+  let spawnMines = 0;
+  for (let s = 1; s <= 60; s++) {
+    const r = sim.createRound(0, s, sim.MODE_SURVIVAL);
+    const L = r.level;
+    for (let z = 0; z < L.rows; z++) {
+      for (let x = 0; x < L.cols; x++) {
+        if (!sim.mineAt(r, x, z)) continue;
+        const dx = x + 0.5 - L.cols / 2;
+        const dz = z + 0.5 - L.rows / 2;
+        if (dx * dx + dz * dz < L.safeRadius * L.safeRadius) spawnMines++;
+      }
+    }
+  }
+  ok("the spawn circle is never mined", spawnMines === 0, "(" + spawnMines + " found)");
+
+  // Players start inside that circle.
+  const r1 = beginS(0, 9, 4);
+  let outside = 0;
+  for (const p of r1.players.values()) {
+    const dx = p.x - r1.level.cols / 2;
+    const dz = p.z - r1.level.rows / 2;
+    if (Math.hypot(dx, dz) > r1.level.safeRadius) outside++;
+  }
+  ok("everyone spawns inside the clear circle", outside === 0, "(" + outside + " outside)");
+
+  // There is no way out. This is the one that would silently ruin the mode: moveTo's gate
+  // check reads exitFrom/exitTo, and leaving them at 0 makes the whole z=0 edge an exit.
+  const r2 = beginS(0, 11, 1);
+  const solo = r2.players.get(1);
+  run(r2, 6, () => sim.setAxis(r2, 1, 0, -1));   // walk hard at the z=0 wall
+  ok("there is no gate to escape through", solo.state !== sim.ESCAPED, "(" + solo.state + ")");
+  ok("nobody is recorded as escaping", r2.escapedOrder.length === 0);
+  ok("the gate is shut in survival", r2.exitOpen === false);
+
+  // Machines stay inside the room.
+  const r3 = beginS(1, 13, 3);
+  run(r3, 45);
+  let escapedRoom = 0;
+  for (const m of r3.roombas) {
+    if (m.x < 0 || m.x > r3.level.cols || m.z < 0 || m.z > r3.level.rows) escapedRoom++;
+  }
+  ok("machines never leave the room", escapedRoom === 0, "(" + escapedRoom + " outside)");
+
+  // Waves arrive, and stop at the cap.
+  //
+  // The players have to be kept alive by hand here. Standing still in an arena is fatal well
+  // inside the wave interval — an idle two-player round on this arena ends at about 10s
+  // against a 16s clock — so a naive run() would assert on a round that was already over and
+  // report "no reinforcements" for a machine that never got the chance to arrive.
+  const r4 = beginS(1, 17, 2);
+  const before = r4.roombas.length;
+  for (let i = 0; i < Math.round((r4.level.waveEvery + 1) / DT); i++) {
+    for (const p of r4.players.values()) { p.legs = 2; p.state = sim.ALIVE; }
+    r4.phase = "running";
+    sim.step(r4, DT);
+  }
+  ok("reinforcements arrive on the wave clock", r4.roombas.length > before,
+     "(" + before + " -> " + r4.roombas.length + ")");
+  ok("the wave counter advances", r4.wave > 0, "(wave " + r4.wave + ")");
+
+  const r5 = beginS(1, 19, 1);
+  // Nobody is driving, so the lone player usually dies; force the round to keep running so
+  // the cap itself is what is under test rather than the round ending first.
+  for (let i = 0; i < 60 * 60 * 4; i++) {
+    for (const p of r5.players.values()) { p.legs = 2; p.state = sim.ALIVE; }
+    r5.phase = "running";
+    sim.step(r5, DT);
+  }
+  ok("the machine count is capped", r5.roombas.length <= r5.level.maxRoombas,
+     "(" + r5.roombas.length + " vs cap " + r5.level.maxRoombas + ")");
+
+  // A saw takes a leg rather than a life, and cannot strip both in one brush.
+  const r6 = beginS(0, 23, 1);
+  const victim = r6.players.get(1);
+  const saw = r6.roombas[0];
+  saw.x = victim.x;
+  saw.z = victim.z;
+  sim.step(r6, DT);
+  ok("a blade takes a leg", victim.legs === 1, "(legs " + victim.legs + ")");
+  // Keep it parked on top of them for half a second — well inside the cooldown.
+  for (let i = 0; i < 30; i++) { saw.x = victim.x; saw.z = victim.z; sim.step(r6, DT); }
+  ok("one brush costs one leg, not two", victim.legs === 1, "(legs " + victim.legs + ")");
+  ok("a saw hit is reported", r6.events.some((e) => e.type === "saw") ||
+     victim.legs === 1);
+
+  // A machine rolling over a mine sets it off and is stalled by it.
+  const r7 = beginS(0, 29, 1);
+  const m7 = r7.roombas[0];
+  const mx = Math.floor(m7.x);
+  const mz = Math.floor(m7.z);
+  r7.mines[mz * r7.level.cols + mx] = 1;
+  m7.x = mx + 0.5;
+  m7.z = mz + 0.5;
+  sim.step(r7, DT);
+  ok("a machine detonates the mine it rolls over",
+     sim.mineAt(r7, mx, mz) === 0 && sim.craterAt(r7, mx, mz) === 1);
+  ok("and is stalled by the blast", m7.stagger > 0, "(stagger " + m7.stagger.toFixed(2) + ")");
+
+  // Losing legs must remain survivable — the whole reason the chase speed backs off.
+  ok("a crawler is not simply outrun", ARENAS.every((a) => a.roombaChase > sim.SPEED_CRAWL),
+     "(the cap in stepRoombas is what protects them, not the arena value)");
+
+  console.log("\nsurvival: rounds resolve");
+  // The mode must end on its own. A survival round that cannot finish is worse than a hard
+  // one — the TV just sits there.
+  for (let ai = 0; ai < ARENAS.length; ai++) {
+    let ended = 0;
+    let totalT = 0;
+    const N = 12;
+    for (let s = 1; s <= N; s++) {
+      const r = beginS(ai, s * 7919, 4);
+      let guard = 0;
+      while (r.phase === "running" && guard++ < 60 * 60 * 5) sim.step(r, DT);
+      if (r.phase === "over") { ended++; totalT += r.t; }
+    }
+    console.log("         " + ARENAS[ai].name.padEnd(14) +
+      "ends " + ended + "/" + N + "   idle median ≈" + (totalT / Math.max(1, ended)).toFixed(1) + "s");
+    ok(ARENAS[ai].name + " always resolves", ended === N, "(" + ended + "/" + N + ")");
+  }
+
+  // Someone always wins, even when everybody dies — the last one to go down.
+  const r8 = beginS(0, 31, 3);
+  let guard = 0;
+  while (r8.phase === "running" && guard++ < 60 * 60 * 5) sim.step(r8, DT);
+  ok("a survival round names a winner", r8.winner !== null, "(" + r8.winner + ")");
+  const ranking = sim.survivalRanking(r8);
+  ok("the ranking covers everyone who played", ranking.length === 3, "(" + ranking.length + ")");
+  ok("the ranking is ordered by time survived",
+     ranking.every((e, i) => i === 0 || ranking[i - 1].time >= e.time || ranking[i - 1].alive));
+  ok("the winner tops the ranking", ranking[0].id === r8.winner);
+
+  // Spectators are excluded, exactly as they are in escape.
+  const r9 = beginS(0, 37, 2);
+  sim.addPlayer(r9, 99);
+  r9.players.get(99).state = sim.WAITING;
+  ok("spectators are not ranked",
+     sim.survivalRanking(r9).every((e) => e.id !== 99));
 }
 
 console.log("\n" + pass + " passed, " + fail + " failed");

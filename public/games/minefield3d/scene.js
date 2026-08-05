@@ -38,7 +38,7 @@ const COL = {
  * into the dark. That framing is the whole reason to do this in 3D: in the top-down version
  * you could see the shape of the whole field at once, and here you cannot.
  */
-export function createScene(canvas, level, Q) {
+export function createScene(canvas, level, Q, survival = false) {
   const renderer = new THREE.WebGLRenderer({
     canvas,
     antialias: Q.antialias,
@@ -54,7 +54,16 @@ export function createScene(canvas, level, Q) {
   // Fog is doing real work here, not atmosphere for its own sake: it is what makes the far
   // end of the aisle unknowable even when a distant player's lamp lights it, so the sonar
   // radius stays the thing that matters.
-  if (Q.fog) scene.fog = new THREE.Fog(0x03040a, level.rows * 0.35, level.rows * 0.95);
+  //
+  // Survival pushes it back. That camera sits above the whole room rather than down a
+  // corridor, so aisle-tuned fog closes over the far wall and hides the machines crossing
+  // toward you — and a saw you cannot see coming is the one thing this mode must never have.
+  if (Q.fog) {
+    const far = Math.max(level.cols, level.rows);
+    scene.fog = survival
+      ? new THREE.Fog(0x03040a, far * 0.9, far * 2.1)
+      : new THREE.Fog(0x03040a, level.rows * 0.35, level.rows * 0.95);
+  }
 
   const camera = new THREE.PerspectiveCamera(52, 16 / 9, 0.1, 400);
 
@@ -90,11 +99,18 @@ export function createScene(canvas, level, Q) {
   world.add(floor.mesh);
   if (Q.shadows) floor.mesh.receiveShadow = true;
 
-  world.add(buildWalls(level));
+  // Survival is a sealed room: four walls, no doorway. The gate is still constructed so every
+  // caller of setGateOpen keeps working, but it is left out of the scene entirely — a lit exit
+  // in a mode with no exit is the single most misleading thing the screen could show.
   const gate = buildGate(level);
-  world.add(gate.group);
+  if (survival) {
+    world.add(buildArenaWalls(level));
+  } else {
+    world.add(buildWalls(level));
+    world.add(gate.group);
+  }
 
-  return { renderer, scene, camera, world, floor, gate, level, Q };
+  return { renderer, scene, camera, world, floor, gate, level, Q, survival };
 }
 
 /**
@@ -373,6 +389,88 @@ function buildWalls(level) {
   group.add(lip);
 
   return group;
+}
+
+/**
+ * The survival arena: four walls, no way out.
+ *
+ * All four are built the same way the aisle's back wall is — as glass rather than as solid
+ * panel. In the aisle only the wall behind the spawn had to be see-through; here the camera
+ * orbits nothing and sits above the room looking down at it, so whichever wall is nearest the
+ * camera crosses the bottom of the shot. Solid, it would hide exactly the strip of floor the
+ * player is most likely to be backed into.
+ */
+function buildArenaWalls(level) {
+  const group = new THREE.Group();
+
+  const h = 2.6;
+  const t = 0.4;
+
+  const glassMat = new THREE.MeshBasicMaterial({
+    color: 0x1a2740, transparent: true, opacity: 0.16,
+    depthWrite: false, side: THREE.DoubleSide,
+  });
+  const lipMat = new THREE.MeshBasicMaterial({
+    color: 0x2a4266, transparent: true, opacity: 0.55, depthWrite: false,
+  });
+
+  // A bright line where each wall meets the floor. This is what actually communicates the
+  // boundary: the glass reads as haze from above, but the floor line is unambiguous, and
+  // knowing exactly where the wall is is the difference between circling and being cornered.
+  const baseMat = new THREE.MeshBasicMaterial({
+    color: 0x35f0e0, transparent: true, opacity: 0.3,
+    blending: THREE.AdditiveBlending, depthWrite: false,
+  });
+
+  const sides = [
+    { w: level.cols + t * 2, d: t, x: level.cols / 2, z: -t / 2 },
+    { w: level.cols + t * 2, d: t, x: level.cols / 2, z: level.rows + t / 2 },
+    { w: t, d: level.rows + t * 2, x: -t / 2, z: level.rows / 2 },
+    { w: t, d: level.rows + t * 2, x: level.cols + t / 2, z: level.rows / 2 },
+  ];
+
+  for (const s of sides) {
+    const wall = new THREE.Mesh(new THREE.BoxGeometry(s.w, h, s.d), glassMat);
+    wall.position.set(s.x, h / 2, s.z);
+    group.add(wall);
+
+    const lip = new THREE.Mesh(new THREE.BoxGeometry(s.w, 0.02, s.d * 0.5), lipMat);
+    lip.position.set(s.x, h, s.z);
+    group.add(lip);
+
+    const base = new THREE.Mesh(new THREE.BoxGeometry(s.w, 0.015, s.d * 0.6), baseMat);
+    base.position.set(s.x, 0.03, s.z);
+    group.add(base);
+  }
+
+  return group;
+}
+
+/**
+ * Frame the whole arena from above.
+ *
+ * Deliberately a fixed shot, unlike the aisle's follow-cam. The mode is about reading the
+ * positions of every machine at once and picking a gap; a camera that chases the pack would
+ * swing whenever the pack moved and make the room impossible to hold in your head. It sits
+ * still, high, tilted just enough that the avatars have a silhouette instead of being discs.
+ */
+export function updateArenaCamera(ctx, dt) {
+  const { camera, level } = ctx;
+
+  const span = Math.max(level.cols, level.rows);
+  const wantX = level.cols / 2;
+  const wantY = span * 0.95;
+  // Pulled back off the near edge so the tilt is a real angle rather than straight down.
+  const wantZ = level.rows + span * 0.42;
+
+  // Still eased rather than snapped, so a level change or a quality rebuild slides into place
+  // instead of cutting.
+  const k = 1 - Math.exp(-dt * 2.2);
+  camera.position.x += (wantX - camera.position.x) * k;
+  camera.position.y += (wantY - camera.position.y) * k;
+  camera.position.z += (wantZ - camera.position.z) * k;
+
+  camera.lookAt(level.cols / 2, 0, level.rows / 2);
 }
 
 /* --------------------------------------------------------------------- gate */
@@ -1157,6 +1255,122 @@ export function createKillerMesh(Q, level) {
   group.add(halo);
 
   return { group, body, face, halo, aura };
+}
+
+/* ----------------------------------------------------------------- roombas */
+
+/**
+ * A saw roomba: a squat disc chassis with a blade spinning on top of it.
+ *
+ * The opposite design brief to the crusher. That thing is a wall and must read as impersonal;
+ * this one picks a person and drives at them, so it needs a front — the eye and the two lamps
+ * are there purely so you can tell at a glance which way it is pointing, which is the single
+ * piece of information the counter-play depends on. You beat a roomba by cutting across its
+ * nose, and you cannot do that if you cannot see the nose.
+ *
+ * The blade is a flat toothed disc rather than real geometry per tooth: at the distance this
+ * camera sits, spinning eight boxes and spinning one notched cylinder look identical, and one
+ * of them is a single draw call.
+ */
+export function createRoombaMesh(Q, colorHex = 0xff2e88) {
+  const group = new THREE.Group();
+
+  // Chassis.
+  const bodyMat = new THREE.MeshStandardMaterial({
+    color: 0x161b28, roughness: 0.7, metalness: 0.6,
+  });
+  const body = new THREE.Mesh(new THREE.CylinderGeometry(0.46, 0.5, 0.3, Q.groundDetail ? 20 : 12), bodyMat);
+  body.position.y = 0.17;
+  if (Q.shadows) body.castShadow = true;
+  group.add(body);
+
+  // A rim in the hazard colour, so the machine is legible as a threat even unlit.
+  const rimMat = new THREE.MeshBasicMaterial({ color: colorHex });
+  const rim = new THREE.Mesh(new THREE.TorusGeometry(0.47, 0.035, 6, Q.groundDetail ? 20 : 12), rimMat);
+  rim.rotation.x = -Math.PI / 2;
+  rim.position.y = 0.31;
+  group.add(rim);
+
+  // The blade. Kept low and wide — it has to read as the dangerous part from directly above,
+  // which is the angle this camera mostly sees it from.
+  const bladeMat = new THREE.MeshStandardMaterial({
+    color: 0xc8d4e8, roughness: 0.25, metalness: 0.95,
+    emissive: 0x223044, emissiveIntensity: 0.6,
+  });
+  const blade = new THREE.Group();
+  const disc = new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.34, 0.035, Q.groundDetail ? 18 : 10), bladeMat);
+  blade.add(disc);
+
+  const teeth = Q.groundDetail ? 8 : 5;
+  for (let i = 0; i < teeth; i++) {
+    const a = (i / teeth) * Math.PI * 2;
+    const tooth = new THREE.Mesh(new THREE.BoxGeometry(0.17, 0.03, 0.1), bladeMat);
+    tooth.position.set(Math.cos(a) * 0.38, 0, Math.sin(a) * 0.38);
+    tooth.rotation.y = -a;
+    blade.add(tooth);
+  }
+  blade.position.y = 0.4;
+  if (Q.shadows) disc.castShadow = true;
+  group.add(blade);
+
+  // The face: one eye pointing along -z, which is the group's forward once it is rotated by
+  // the sim's heading.
+  const eyeMat = new THREE.MeshBasicMaterial({ color: colorHex });
+  const eye = new THREE.Mesh(new THREE.SphereGeometry(0.075, 8, 6), eyeMat);
+  eye.position.set(0, 0.22, -0.42);
+  group.add(eye);
+
+  // Two headlamps thrown on the floor ahead. These are the tell for "it has seen you" — they
+  // brighten on lock — and they double as the only moving light source in the room.
+  const beamMat = new THREE.MeshBasicMaterial({
+    color: colorHex, transparent: true, opacity: 0.1,
+    blending: THREE.AdditiveBlending, depthWrite: false,
+  });
+  const beam = new THREE.Mesh(new THREE.PlaneGeometry(1.1, 2.6), beamMat);
+  beam.rotation.x = -Math.PI / 2;
+  beam.position.set(0, 0.03, -1.5);
+  group.add(beam);
+
+  // A pool of light under the machine so it is never invisible on unlit floor. Without it a
+  // saw outside everyone's sonar is a silent, unreadable killer.
+  const glowMat = new THREE.MeshBasicMaterial({
+    color: colorHex, transparent: true, opacity: 0.22,
+    blending: THREE.AdditiveBlending, depthWrite: false,
+  });
+  const glow = new THREE.Mesh(new THREE.CircleGeometry(0.8, 16), glowMat);
+  glow.rotation.x = -Math.PI / 2;
+  glow.position.y = 0.02;
+  group.add(glow);
+
+  // Only the higher tiers get a real light per machine — with a dozen on the floor this is the
+  // per-unit cost that actually scales.
+  let lamp = null;
+  if (Q.playerGlow && Q.groundDetail) {
+    lamp = new THREE.PointLight(colorHex, 1.6, 4.5, 2);
+    lamp.position.set(0, 0.5, -0.3);
+    group.add(lamp);
+  }
+
+  return { group, body, blade, rim, eye, beam, beamMat, glow, glowMat, lamp };
+}
+
+/** Pose one machine from its sim state. */
+export function updateRoombaMesh(mesh, r, dt) {
+  mesh.group.position.set(r.x, 0, r.z);
+  mesh.group.rotation.y = r.heading;
+  mesh.blade.rotation.y = r.spin;
+
+  // Locked on: lamps up, so a player can tell which of the machines in the room is theirs.
+  const hunting = !!r.target && r.stagger <= 0;
+  mesh.beamMat.opacity += ((hunting ? 0.3 : 0.08) - mesh.beamMat.opacity) * Math.min(1, dt * 6);
+  mesh.glowMat.opacity += ((hunting ? 0.34 : 0.2) - mesh.glowMat.opacity) * Math.min(1, dt * 6);
+  if (mesh.lamp) mesh.lamp.intensity = hunting ? 2.6 : 1.4;
+
+  // Stalled by a mine: sagging and tilted, so the window to move is unmistakable from across
+  // the room rather than something you have to infer from it not advancing.
+  const hurt = r.stagger > 0;
+  mesh.group.position.y = hurt ? -0.06 : 0;
+  mesh.group.rotation.z = hurt ? Math.sin(r.spin * 2) * 0.12 : 0;
 }
 
 /* ------------------------------------------------------------------- sonar */

@@ -123,7 +123,7 @@
     font-family: var(--font-mono); font-size: 9px; letter-spacing: .14em;
     text-transform: uppercase; color: var(--text-faint);
   }
-  #qbtns { display: flex; gap: 6px; }
+  #qbtns, #mbtns { display: flex; gap: 6px; }
   .q {
     padding: 4px 10px; border-radius: 999px;
     border: 1px solid var(--line); background: rgba(10,12,24,.7);
@@ -149,6 +149,8 @@
 </div>
 
 <div id="admin">
+  <span class="lbl">Mode</span>
+  <div id="mbtns"></div>
   <span class="lbl">Graphics</span>
   <div id="qbtns"></div>
 </div>
@@ -175,9 +177,12 @@
   var pulsetext = document.getElementById("pulsetext");
   var admin = document.getElementById("admin");
   var qbtns = document.getElementById("qbtns");
+  var mbtns = document.getElementById("mbtns");
 
   var over = false;
   var myState = "alive";
+  /** Which mode the screen is running. Changes what the status lines and the end card say. */
+  var survival = false;
 
   // Paint the pad in this device's own colour, so a player's lamp on the TV and their phone
   // are unmistakably the same light.
@@ -431,8 +436,8 @@
     }
     if (state === "dead") {
       conditionEl.classList.add("gone");
-      conditionEl.textContent = "Left in the aisle";
-      subEl.textContent = "your light went out";
+      conditionEl.textContent = survival ? "Cut down" : "Left in the aisle";
+      subEl.textContent = survival ? "the saws got you" : "your light went out";
       return;
     }
     if (state === "waiting") {
@@ -445,8 +450,8 @@
     }
     if (legs >= 2) {
       conditionEl.classList.add("ok");
-      conditionEl.textContent = "Walking";
-      subEl.textContent = "two legs";
+      conditionEl.textContent = survival ? "Running" : "Walking";
+      subEl.textContent = survival ? "keep moving" : "two legs";
     } else if (legs === 1) {
       conditionEl.classList.add("hurt");
       conditionEl.textContent = "Limping";
@@ -475,13 +480,48 @@
     }
   }
 
+  var MODE_LABELS = { escape: "escape", survival: "survival" };
+
+  /**
+   * Mode buttons, master controller only — the same shape as the quality row.
+   *
+   * They carry the `q` class as well as `m` on purpose: the pad's pointerdown handler skips
+   * anything with class `q`, and without it a tap on a mode button also plants a joystick.
+   */
+  function renderModes(m) {
+    if (!m || !isMasterController()) return;
+
+    if (mbtns.childElementCount !== m.choices.length) {
+      mbtns.innerHTML = "";
+      m.choices.forEach(function (choice) {
+        var b = document.createElement("button");
+        b.className = "q m";
+        b.dataset.mode = choice;
+        b.textContent = MODE_LABELS[choice] || choice;
+        b.addEventListener("click", function () {
+          freeconsole.message(FreeConsole.SCREEN, { t: "mode", mode: choice });
+        });
+        mbtns.appendChild(b);
+      });
+    }
+    for (var i = 0; i < mbtns.children.length; i++) {
+      var el = mbtns.children[i];
+      el.classList.toggle("on", el.dataset.mode === m.current);
+    }
+  }
+
+  function isMasterController() {
+    try {
+      return freeconsole.getMasterControllerDeviceId() === freeconsole.getDeviceId();
+    } catch (err) {
+      return false;   // no shell — stay hidden
+    }
+  }
+
   /** Quality buttons appear only on the master controller. */
   function renderQuality(q) {
     if (!q) return;
-    var isMaster = false;
-    try {
-      isMaster = freeconsole.getMasterControllerDeviceId() === freeconsole.getDeviceId();
-    } catch (err) { /* no shell — stay hidden */ }
+    var isMaster = isMasterController();
     admin.classList.toggle("show", isMaster);
     if (!isMaster) return;
 
@@ -534,10 +574,13 @@
       period = data.sonarPeriod;
       nextPingAt = 0;
     }
+    if (typeof data.mode === "string") survival = data.mode === "survival";
     if (typeof data.exitLeft === "number" && typeof data.exitCapacity === "number") {
+      // Capacity 0 is how survival says "there is no gate" — renderGate then empties the row.
       renderGate(data.exitLeft, data.exitCapacity, data.exitOpen);
     }
     renderQuality(data.quality);
+    renderModes(data.modes);
 
     var state = data.states && data.states[me];
     var legs = data.legs && data.legs[me];
@@ -571,12 +614,18 @@
       pad.classList.add("locked");
       releaseAll();
 
-      var out = state === "escaped";
+      // In survival there is no gate to get through, so "made it" means still being alive
+      // when the round ended — the last one standing.
+      var out = survival ? state === "alive" : state === "escaped";
       document.getElementById("bannerBig").className = "big" + (out ? "" : " bad");
-      document.getElementById("bannerBig").textContent = out ? "You got out" : "You did not";
-      document.getElementById("bannerSub").textContent = out
-        ? "The gate closed behind you. Tap for the next aisle."
-        : "The aisle keeps you. Tap to go again.";
+      document.getElementById("bannerBig").textContent = survival
+        ? (out ? "Last one standing" : "Cut down")
+        : (out ? "You got out" : "You did not");
+      document.getElementById("bannerSub").textContent = survival
+        ? (out ? "You outlasted the floor. Tap for a worse room."
+               : "The saws got you. Tap to go back in.")
+        : (out ? "The gate closed behind you. Tap for the next aisle."
+               : "The aisle keeps you. Tap to go again.");
       banner.classList.add("show");
       freeconsole.vibrate(out ? 40 : 15);
     }

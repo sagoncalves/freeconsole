@@ -428,16 +428,246 @@ function drawSwords() {
 }
 
 /**
+ * Pose solver.
+ *
+ * Returns joint positions in world units for one player: a stick figure with a neck, an
+ * elbow in each arm and a knee in each leg. It is a pure function of what the sim already
+ * decided - state, gait phase, facing, body height, guard - so it holds no state of its own
+ * and two screens rendering the same match would draw the same frame.
+ *
+ * Everything is expressed as a fraction of `p.height`, which is what makes ducking and
+ * crawling work without a second set of numbers: the skeleton compresses with the hurtbox
+ * it lives inside, so the drawing never disagrees with the box that gets hit.
+ */
+function poseOf(p) {
+  const f = p.facing;
+  const h = p.height;
+  const cx = p.x + BODY_W / 2;
+
+  // Vertical anchors. The hip rides at 52% of the body, which leaves legs slightly longer
+  // than the torso - the proportion that reads as "person" fastest at TV distance.
+  const headR = h * 0.16;
+  const neckY = p.y + h * 0.20;
+  const hipY = p.y + h * 0.52;
+  const thigh = (p.y + h - hipY) * 0.52;
+  const shin = (p.y + h - hipY) * 0.48;
+  const upperArm = h * 0.20;
+  const foreArm = h * 0.19;
+
+  // Gait: one leg leads while the other trails, half a cycle apart. Knees only ever bend
+  // backwards, which is the detail that stops a walk cycle looking like an insect.
+  const g = p.gait;
+  const swing = Math.sin(g);
+  const swing2 = Math.sin(g + Math.PI);
+  const airborne = !p.onGround;
+  const st = p.state;
+
+  /**
+   * Progress through the current committed action, 0 at the first frame and 1 at the last.
+   * `timerMax` is recorded by the sim because the same action runs at different lengths
+   * depending on how it was entered, so there is no constant here to divide by.
+   */
+  const t = p.timerMax > 0 ? Math.min(1, Math.max(0, 1 - p.timer / p.timerMax)) : 0;
+
+  /**
+   * Strike curve: snap out, hold near full extension, then withdraw a little more slowly.
+   * The fast leading edge is what makes an attack read as a strike rather than a stretch,
+   * and the hold is what makes the active frames legible to the person being attacked.
+   */
+  function strike(out, hold, back) {
+    if (t < out) return ease(t / out);
+    if (t < hold) return 1;
+    return 1 - ease((t - hold) / Math.max(1e-4, back - hold)) * 0.85;
+  }
+  /** Smoothstep. Cheap, and the only easing this needs. */
+  function ease(u) { const c = Math.min(1, Math.max(0, u)); return c * c * (3 - 2 * c); }
+  /** Anticipation: dip backwards before committing forwards. */
+  function windup(depth, until) { return t < until ? -depth * Math.sin((t / until) * Math.PI) : 0; }
+
+  // Stride amplitude scales with speed so a walk is a shuffle and a run is a stride.
+  let amp = Math.min(1, Math.abs(p.vx) / 300);
+  let lean = 0;          // torso pitch, radians, positive leans forward
+  let crouch = 0;        // extra hip drop as a fraction of thigh length
+  let armFwd = 0.55;     // how far the sword arm reaches ahead, 0..1
+  let offArm = -0.25;    // trailing arm, negative swings it behind
+  let kick = 0;          // 0..1 extension of the kicking leg
+  let spin = 0;          // whole-body rotation, radians, for the roll
+
+  if (st === "run") { lean = 0.22; armFwd = 0.5; }
+  else if (st === "walk") { lean = 0.10; }
+  else if (st === "duck") { crouch = 0.55; lean = 0.30; amp = 0; }
+  else if (st === "crawl") { crouch = 0.8; lean = 0.55; amp = Math.min(1, Math.abs(p.vx) / 90) * 0.5; }
+  else if (st === "lunge") {
+    // The signature move, so it gets the most anticipation: a visible coil, then everything
+    // extends at once - front leg, torso and blade - and stays extended for the active frames.
+    const e = strike(0.35, 0.75, 1);
+    const w = windup(0.5, 0.35);
+    lean = 0.15 + e * 0.42 + w * 0.5;
+    armFwd = 0.55 + e * 0.9 + w * 0.55;
+    offArm = -0.25 - e * 0.5;
+    crouch = e * 0.28;
+    amp = 0;
+  } else if (st === "thrust" || st === "airstab") {
+    const e = strike(0.3, 0.62, 1);
+    lean = 0.1 + e * 0.16 + windup(0.35, 0.3) * 0.3;
+    armFwd = 0.55 + e * 0.68 + windup(0.35, 0.3);
+    offArm = -0.25 - e * 0.2;
+    amp = 0;
+  } else if (st === "punch") {
+    const e = strike(0.28, 0.55, 1);
+    lean = 0.08 + e * 0.16;
+    armFwd = 0.35 + e * 0.85 + windup(0.4, 0.28);
+    offArm = -0.2 - e * 0.35;
+    amp = 0;
+  } else if (st === "kick") {
+    // The leg leads and the torso counter-rotates away, which is what sells the weight.
+    kick = strike(0.32, 0.6, 1);
+    lean = 0.05 - kick * 0.3;
+    armFwd = 0.5 - kick * 0.2;
+    offArm = -0.2 - kick * 0.3;
+    amp = 0;
+  } else if (st === "divekick") {
+    // Already committed and falling: a quick chamber-and-extend over the first third of the
+    // dive, then held out for the rest of the descent. Fast, but it still has to unfold -
+    // a leg that is simply already extended reads as a pose, not a kick.
+    kick = ease(Math.min(1, t * 3));
+    lean = -0.1 - kick * 0.15;
+    armFwd = 0.35;
+    amp = 0;
+  } else if (st === "throw") {
+    // The arm is already empty by the time this state exists, so this is pure follow-through.
+    const e = strike(0.25, 0.5, 1);
+    lean = 0.05 + e * 0.2;
+    armFwd = 0.5 + e * 0.85;
+    offArm = -0.2 - e * 0.45;
+    amp = 0;
+  } else if (st === "roll") {
+    // A full tuck that rotates once through the roll and lands back upright.
+    spin = f * ease(t) * Math.PI * 2;
+    crouch = 0.9;
+    lean = 0.9;
+    armFwd = 0.15;
+    offArm = 0.1;
+    amp = 0;
+  } else if (st === "recover") {
+    // Unwind from the strike back to a stance, so recovery is visible as a real pose and
+    // not an instant snap - this is the punish window, and it should look like one.
+    const u = 1 - ease(t);
+    lean = 0.28 * u;
+    armFwd = 0.55 + 0.5 * u;
+    crouch = 0.18 * u;
+    amp = 0;
+  } else if (st === "land") {
+    // A short absorb on touchdown, which also covers the landing recovery frames.
+    crouch = (1 - ease(t)) * 0.4;
+    lean = 0.12;
+    amp = 0;
+  } else if (st === "knockdown") {
+    // Fall flat quickly, lie there, then start gathering up as the timer runs out.
+    const down = ease(Math.min(1, t * 3.2));
+    const rise = t > 0.75 ? ease((t - 0.75) / 0.25) : 0;
+    lean = (1.35 * down) * (1 - rise * 0.45);
+    crouch = (0.95 * down) * (1 - rise * 0.3);
+    armFwd = 0.2;
+    offArm = 0.3;
+    amp = 0;
+  } else if (st === "dead") { lean = 1.35; crouch = 0.95; amp = 0; }
+  else if (st === "wallslide" || st === "wallclimb") { lean = -0.1; amp = 0; }
+
+  const hy = hipY + thigh * crouch;
+  const hx = cx - f * Math.sin(lean) * (hy - neckY) * 0.25;
+
+  // Shoulders sit at the top of the torso, which pitches with `lean`.
+  const torsoLen = hy - neckY;
+  const sx = hx + f * Math.sin(lean) * torsoLen;
+  const sy = neckY;
+  const headX = sx + f * Math.sin(lean) * headR * 0.6;
+  const headY = sy - headR * 0.9;
+
+  /** Two-segment limb: place the joint by bending a fixed amount toward `bendDir`. */
+  function limb(ox, oy, ang, l1, l2, bend) {
+    const jx = ox + Math.sin(ang) * l1;
+    const jy = oy + Math.cos(ang) * l1;
+    const a2 = ang + bend;
+    return { jx, jy, ex: jx + Math.sin(a2) * l2, ey: jy + Math.cos(a2) * l2 };
+  }
+
+  // --- legs ---------------------------------------------------------------
+  // Angle 0 points straight down; positive swings the foot toward `facing`.
+  let legA, legB;
+  if (airborne && st !== "wallslide" && st !== "wallclimb") {
+    // Tuck the leading knee and trail the other - a jump silhouette, not a stride.
+    const tuck = p.vy < 0 ? 0.9 : 0.5;
+    legA = limb(hx, hy, f * 0.5, thigh, shin, -f * tuck);
+    legB = limb(hx, hy, -f * 0.35, thigh, shin, -f * 0.35);
+  } else if (st === "kick" || st === "divekick") {
+    // Chambered knee first, then the shin snaps out - a kick that unfolds instead of
+    // appearing already extended.
+    const chamber = -f * (0.9 - kick * 0.78);
+    legA = limb(hx, hy, f * (0.35 + kick * 1.15), thigh, shin, chamber);
+    legB = limb(hx, hy, -f * (0.2 + kick * 0.15), thigh, shin, -f * 0.5);
+  } else if (st === "lunge") {
+    // Front leg drives out along the lunge while the back leg straightens into the push.
+    const ext = (armFwd - 0.55) / 0.9;
+    legA = limb(hx, hy, f * (0.15 + ext * 0.95), thigh, shin, -f * Math.max(0.08, 0.5 - ext * 0.42));
+    legB = limb(hx, hy, -f * (0.15 + ext * 0.5), thigh, shin, -f * 0.12);
+  } else {
+    const a1 = f * swing * 0.75 * amp;
+    const a2 = f * swing2 * 0.75 * amp;
+    // The knee bends most as the leg passes under the body and straightens at full stride.
+    const k1 = -f * (0.25 + Math.max(0, -swing) * 0.85) * Math.max(amp, 0.18);
+    const k2 = -f * (0.25 + Math.max(0, -swing2) * 0.85) * Math.max(amp, 0.18);
+    legA = limb(hx, hy, a1 + f * crouch * 0.6, thigh, shin, k1 - f * crouch * 1.3);
+    legB = limb(hx, hy, a2 + f * crouch * 0.6, thigh, shin, k2 - f * crouch * 1.3);
+  }
+
+  // --- arms ---------------------------------------------------------------
+  // The sword arm points at the guard height the sim is actually using, so the drawing and
+  // the hitbox agree: the hand ends up where `swordBox` starts the blade.
+  const bladeY = p.y + GUARD_Y[p.guard];
+  const reachY = bladeY - sy;
+  const reachX = f * BODY_W * 0.5 * armFwd + f * upperArm * armFwd;
+  const swordAng = Math.atan2(reachX, reachY);
+  const armSwing = f * swing2 * 0.5 * amp * (armFwd > 0.9 ? 0 : 1);
+
+  const armMain = limb(sx, sy, swordAng + armSwing * 0.35, upperArm, foreArm,
+                       -f * Math.max(0, 0.55 - armFwd * 0.5));
+  const armOff = limb(sx, sy, f * (offArm - swing * 0.55 * amp) + Math.PI * 0.02,
+                      upperArm, foreArm, f * 0.5);
+
+  const pose = { headX, headY, headR, sx, sy, hx, hy, legA, legB, armMain, armOff };
+
+  // A roll is the one move where the whole body leaves upright, so it is applied as a
+  // rotation of the finished skeleton about the body's centre rather than as joint angles.
+  if (spin !== 0) rotatePose(pose, cx, p.y + h / 2, spin);
+  return pose;
+}
+
+/** Rotate every joint in a solved pose about a pivot. Used only by the roll. */
+function rotatePose(q, px, py, ang) {
+  const cos = Math.cos(ang), sin = Math.sin(ang);
+  const rot = (x, y) => {
+    const dx = x - px, dy = y - py;
+    return [px + dx * cos - dy * sin, py + dx * sin + dy * cos];
+  };
+  [q.headX, q.headY] = rot(q.headX, q.headY);
+  [q.sx, q.sy] = rot(q.sx, q.sy);
+  [q.hx, q.hy] = rot(q.hx, q.hy);
+  for (const l of [q.legA, q.legB, q.armMain, q.armOff]) {
+    [l.jx, l.jy] = rot(l.jx, l.jy);
+    [l.ex, l.ey] = rot(l.ex, l.ey);
+  }
+}
+
+/**
  * Players are flat silhouettes in their platform colour: no shading, no blending, a handful
  * of poses (spec 28). Readability at TV distance beats detail, so the pose changes shape
- * rather than adding lines.
+ * rather than adding lines - the figure is jointed, but it stays a solid single-colour
+ * silhouette with no interior detail to squint at.
  */
 function drawPlayer(p) {
   const color = colorOf(p.id);
   const x = tx(p.x);
-  const y = ty(p.y);
-  const w = BODY_W * scale;
-  const h = p.height * scale;
 
   if (p.dead) {
     // A body on the floor, flat and dim, until the respawn takes it away.
@@ -446,18 +676,51 @@ function drawPlayer(p) {
     return;
   }
 
+  const q = poseOf(p);
+
   ctx.save();
+  ctx.strokeStyle = color;
   ctx.fillStyle = color;
   ctx.shadowColor = color;
   ctx.shadowBlur = 16 * scale;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
 
-  // Body.
-  ctx.fillRect(x, y, w, h);
+  // Limbs are thinner than the torso so the body still reads as the mass that gets hit.
+  const limbW = Math.max(2, BODY_W * 0.30 * scale);
+  const torsoW = Math.max(3, BODY_W * 0.52 * scale);
 
-  // Head, tucked toward the facing side so the silhouette has a direction at a glance.
-  const headSize = 13 * scale;
-  const headX = p.facing > 0 ? x + w - headSize * 0.85 : x - headSize * 0.15;
-  ctx.fillRect(headX, y - headSize * 0.5, headSize, headSize);
+  function bone(a, ox, oy) {
+    ctx.beginPath();
+    ctx.moveTo(tx(ox), ty(oy));
+    ctx.lineTo(tx(a.jx), ty(a.jy));
+    ctx.lineTo(tx(a.ex), ty(a.ey));
+    ctx.stroke();
+  }
+
+  // Far-side limbs first, dimmed, so the figure has a front and a back at a glance.
+  ctx.globalAlpha = 0.55;
+  ctx.lineWidth = limbW;
+  bone(q.legB, q.hx, q.hy);
+  bone(q.armOff, q.sx, q.sy);
+  ctx.globalAlpha = 1;
+
+  // Torso.
+  ctx.lineWidth = torsoW;
+  ctx.beginPath();
+  ctx.moveTo(tx(q.sx), ty(q.sy));
+  ctx.lineTo(tx(q.hx), ty(q.hy));
+  ctx.stroke();
+
+  // Near-side limbs.
+  ctx.lineWidth = limbW;
+  bone(q.legA, q.hx, q.hy);
+  bone(q.armMain, q.sx, q.sy);
+
+  // Head.
+  ctx.beginPath();
+  ctx.arc(tx(q.headX), ty(q.headY), q.headR * scale, 0, Math.PI * 2);
+  ctx.fill();
   ctx.restore();
 
   // Guard indicator: a bar in front of the chest at the sword's height, so the opponent can
@@ -477,7 +740,7 @@ function drawPlayer(p) {
     ctx.strokeStyle = "rgba(234,242,255,.5)";
     ctx.lineWidth = Math.max(1, 2 * scale);
     ctx.beginPath();
-    ctx.arc(x + w / 2, y - 22 * scale, 5 * scale, 0, Math.PI * 2);
+    ctx.arc(tx(q.headX), ty(q.headY - q.headR) - 12 * scale, 5 * scale, 0, Math.PI * 2);
     ctx.stroke();
   }
 }

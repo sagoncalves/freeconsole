@@ -14,12 +14,59 @@
  * end, closest to the camera) and walk toward the gate at z = 0. x is the narrow axis.
  */
 
-import { getLevel } from "/games/minefield3d/levels.js?v=2";
+import { getLevel, getArena } from "/games/minefield3d/levels.js?v=4";
 
 /* ------------------------------------------------------------------ constants */
 
 const MINE_TRIGGER_R = 0.36;
 const KILLER_CATCH_R = 0.55;
+
+/* --------------------------------------------------------------------- modes */
+
+/** The original game: cross a mined aisle to a gate, with a press grinding up behind you. */
+export const MODE_ESCAPE = "escape";
+
+/**
+ * Survival: an open room, no gate, and saw-armed roombas that hunt you until you are gone.
+ *
+ * Held as a field on the round rather than as a second sim module because everything
+ * underneath is genuinely shared — the mines, the per-player sonar, the legs economy, the
+ * footprints. What changes is only what is trying to kill you and what counts as winning, so
+ * the mode branches at exactly three places (createRound, startRound, step) and every other
+ * function in this file is mode-blind.
+ */
+export const MODE_SURVIVAL = "survival";
+
+export const MODES = [MODE_ESCAPE, MODE_SURVIVAL];
+
+/* ------------------------------------------------------------------ roombas */
+
+/**
+ * How close a blade has to get before it takes a leg. Slightly larger than the mine's trigger
+ * so a saw is meaningfully harder to skirt than a mine — you can shave past a mine you have
+ * seen, but a machine that is actively turning toward you should not be beatable by pixels.
+ */
+const SAW_HIT_R = 0.62;
+
+/**
+ * Seconds a roomba cannot hurt the same player again, so one brush costs one leg, not three.
+ *
+ * Measured, not guessed: at 1.15s a headless run of forty four-player rounds took 415 legs to
+ * land 141 deaths — about three hits per player per round, on a body that only has two legs to
+ * give. The saws were touching people almost continuously, which made losing a leg
+ * indistinguishable from dying and left the whole legs economy decorative. Long enough here
+ * that a hit is an event you get to react to.
+ */
+const SAW_COOLDOWN = 2.4;
+
+/** Seconds a roomba is stalled after eating a mine. The reward for kiting one across the field. */
+const ROOMBA_STAGGER = 1.6;
+
+/** How sharply a roomba can turn, in radians per second. This is the whole counter-play. */
+const ROOMBA_TURN = 2.4;
+
+/** Radius used for wall bounces and mine contact. */
+const ROOMBA_R = 0.5;
 
 /** Movement, in tiles per second. Losing legs is a heavy tax — that is the whole tension. */
 export const SPEED_WALK = 3.0;
@@ -63,10 +110,12 @@ function makeRng(seed) {
 
 /* -------------------------------------------------------------------- rounds */
 
-export function createRound(levelIndex, seed) {
-  const level = getLevel(levelIndex);
+export function createRound(levelIndex, seed, mode = MODE_ESCAPE) {
+  const survival = mode === MODE_SURVIVAL;
+  const level = survival ? getArena(levelIndex) : getLevel(levelIndex);
   const round = {
     level,
+    mode: survival ? MODE_SURVIVAL : MODE_ESCAPE,
     levelIndex: levelIndex | 0,
     seed: seed >>> 0,
     phase: "briefing",
@@ -86,6 +135,18 @@ export function createRound(levelIndex, seed) {
     killerX: 0,
     escapedOrder: [],
     winner: null,
+
+    /* survival only — inert in escape, so every reader can check them unconditionally */
+
+    /** Live machines. Rebuilt each startRound; the renderer keys its meshes off `id`. */
+    roombas: [],
+    nextRoombaId: 1,
+    /** Which wave is due next, and when. */
+    wave: 0,
+    nextWaveAt: 0,
+    /** Seconds the last player standing lasted, and the order people went down in. */
+    lastStand: 0,
+    downOrder: [],
   };
 
   generateField(round);
@@ -98,6 +159,11 @@ function generateField(round) {
   round.exploded = new Uint8Array(level.cols * level.rows);
 
   const rng = makeRng(round.seed);
+
+  if (round.mode === MODE_SURVIVAL) {
+    generateArenaField(round, rng);
+    return;
+  }
 
   const halfGate = Math.floor(level.exitWidth / 2);
   const centre = Math.floor(level.cols / 2);
@@ -113,6 +179,37 @@ function generateField(round) {
   }
 
   carveEscapeRoute(round, rng);
+}
+
+/**
+ * Mine the arena, leaving a clear circle in the middle.
+ *
+ * There is no route to carve here — the whole point is that there is nowhere in particular to
+ * get to, so a guaranteed path would be guaranteeing nothing. What must be guaranteed instead
+ * is the opening: players spawn in a ring at the centre and the saws come at them immediately,
+ * so a mine under the spawn ring would kill somebody before they had touched the stick.
+ */
+function generateArenaField(round, rng) {
+  const { level } = round;
+  const cx = level.cols / 2;
+  const cz = level.rows / 2;
+  const safe = level.safeRadius * level.safeRadius;
+
+  for (let z = 0; z < level.rows; z++) {
+    for (let x = 0; x < level.cols; x++) {
+      const dx = x + 0.5 - cx;
+      const dz = z + 0.5 - cz;
+      if (dx * dx + dz * dz < safe) continue;
+      if (rng() < level.mineDensity) round.mines[z * level.cols + x] = 1;
+    }
+  }
+
+  // There is no gate in survival. Point the span off the board so nothing can stumble into an
+  // escape: moveTo's gate check reads exitFrom/exitTo, and leaving them at 0 would make the
+  // whole z = 0 edge an exit.
+  round.exitFrom = -1;
+  round.exitTo = -1;
+  round.exitOpen = false;
 }
 
 /**
@@ -167,6 +264,11 @@ export function addPlayer(round, deviceId) {
     lastPrintZ: 0,
     distance: 0,
     escapedAt: 0,
+
+    /** Survival: when a saw last bit this player, so one brush cannot strip both legs. */
+    sawHitAt: -99,
+    /** Survival: seconds this player lasted. Frozen at the moment they go down. */
+    survivedFor: 0,
 
     /**
      * This player's own emitter. Each carries its own phase, so pings are staggered around
@@ -234,38 +336,70 @@ export function clearInput(round, deviceId) {
 /* ------------------------------------------------------------------ lifecycle */
 
 export function startRound(round) {
+  const survival = round.mode === MODE_SURVIVAL;
+
   round.phase = "running";
   round.t = 0;
   round.killerZ = round.level.rows + 1.2;
   round.killerX = round.level.cols / 2;
   round.exitUsed = 0;
-  round.exitOpen = true;
+  // Survival has no gate; leaving it open would light a doorway that leads nowhere.
+  round.exitOpen = !survival;
   round.escapedOrder.length = 0;
   round.winner = null;
   round.prints.length = 0;
 
+  round.roombas.length = 0;
+  round.nextRoombaId = 1;
+  round.wave = 0;
+  round.lastStand = 0;
+  round.downOrder.length = 0;
+  round.nextWaveAt = survival ? round.level.waveEvery : Infinity;
+
   const ids = [...round.players.keys()].sort((a, b) => a - b);
   ids.forEach((id, i) => resetPlayer(round, round.players.get(id), i, ids.length));
+
+  if (survival) {
+    // The opening pack. Spawned on the rim looking inward, so the first thing anybody sees is
+    // the room closing on them — a saw that has to cross the floor to reach you reads as
+    // hunting, where one that starts adjacent just reads as unfair.
+    for (let i = 0; i < round.level.startRoombas; i++) spawnRoomba(round, i);
+  }
+
   round.events.push({ type: "start" });
 }
 
 function resetPlayer(round, p, index, total) {
-  // Spread the line across the aisle's width. In a narrow aisle everyone is close to
-  // everyone, which is the point: your neighbour's light is nearly as useful as your own.
-  const margin = 1.2;
-  const usable = round.level.cols - margin * 2;
-  p.x = total <= 1 ? margin + usable * 0.35
-    : margin + (usable * index) / (total - 1);
-  p.z = round.level.rows - 0.5;
+  if (round.mode === MODE_SURVIVAL) {
+    // A ring at the centre of the room, inside the guaranteed-clear circle. Everyone starts
+    // equidistant from every wall because no direction is better than another here — the
+    // aisle's staggered line would hand whoever spawned nearest open floor a real advantage.
+    const r = Math.min(1.5, round.level.safeRadius - 1.1);
+    const a = total <= 1 ? 0 : (index / total) * Math.PI * 2;
+    p.x = round.level.cols / 2 + Math.cos(a) * r;
+    p.z = round.level.rows / 2 + Math.sin(a) * r;
+    // Facing outward, at whatever is coming.
+    p.heading = Math.atan2(Math.cos(a), Math.sin(a));
+  } else {
+    // Spread the line across the aisle's width. In a narrow aisle everyone is close to
+    // everyone, which is the point: your neighbour's light is nearly as useful as your own.
+    const margin = 1.2;
+    const usable = round.level.cols - margin * 2;
+    p.x = total <= 1 ? margin + usable * 0.35
+      : margin + (usable * index) / (total - 1);
+    p.z = round.level.rows - 0.5;
+    p.heading = Math.PI;
+  }
   p.legs = 2;
   p.state = ALIVE;
   p.stun = 0;
   p.distance = 0;
-  p.heading = Math.PI;
   p.lastPrintX = p.x;
   p.lastPrintZ = p.z;
   p.ping = null;
   p.pingCount = 0;
+  p.sawHitAt = -99;
+  p.survivedFor = 0;
 
   // Stagger the first ping across the roster so the aisle does not strobe in unison. Each
   // player then runs free on their own period.
@@ -288,7 +422,19 @@ export function step(round, dt) {
   round.t += dt;
 
   for (const p of round.players.values()) stepPing(round, p, dt);
-  stepKiller(round, dt);
+
+  // The one branch in the loop. Escape has a press behind you; survival has machines on the
+  // floor with you. Everything else — sonar, movement, mines, prints — is identical.
+  if (round.mode === MODE_SURVIVAL) {
+    stepWaves(round);
+    stepRoombas(round, dt);
+    for (const p of round.players.values()) {
+      if (p.state === ALIVE) p.survivedFor = round.t;
+    }
+  } else {
+    stepKiller(round, dt);
+  }
+
   for (const p of round.players.values()) stepPlayer(round, p, dt);
 
   agePrints(round, dt);
@@ -394,6 +540,249 @@ function stepKiller(round, dt) {
     if (p.state !== ALIVE) continue;
     if (p.z >= round.killerZ - KILLER_CATCH_R) kill(round, p, "crusher");
   }
+}
+
+/* --------------------------------------------------------- survival: roombas */
+
+/**
+ * Put another saw on the floor, at the rim, facing in.
+ *
+ * They always enter from an edge rather than appearing wherever there is room. A machine that
+ * materialises next to you is a dice roll; one that drives in from the wall is a thing you
+ * saw coming and chose to ignore, which is the only kind of death this mode should hand out.
+ */
+function spawnRoomba(round, index) {
+  const { level } = round;
+  if (round.roombas.length >= level.maxRoombas) return null;
+
+  // Walk the perimeter rather than picking at random, so a wave of three never arrives from
+  // the same corner and pins everyone against one wall.
+  const per = (index * 0.37 + Math.random() * 0.18) % 1;
+  const side = Math.floor(per * 4);
+  const along = (per * 4) % 1;
+  const inset = 0.9;
+
+  let x;
+  let z;
+  if (side === 0)      { x = inset + along * (level.cols - inset * 2); z = inset; }
+  else if (side === 1) { x = level.cols - inset; z = inset + along * (level.rows - inset * 2); }
+  else if (side === 2) { x = inset + along * (level.cols - inset * 2); z = level.rows - inset; }
+  else                 { x = inset; z = inset + along * (level.rows - inset * 2); }
+
+  const r = {
+    id: round.nextRoombaId++,
+    x,
+    z,
+    // Aimed at the middle of the room, which is where the players start and where they tend
+    // to be pushed back to.
+    heading: Math.atan2(level.cols / 2 - x, level.rows / 2 - z),
+    target: null,
+    stagger: 0,
+    spin: Math.random() * Math.PI * 2,
+    bornAt: round.t,
+    // A little variation per unit so a pack never moves as one body.
+    tempo: 0.88 + Math.random() * 0.28,
+    wanderAt: round.t + 1.5 + Math.random() * 2,
+  };
+  round.roombas.push(r);
+  round.events.push({ type: "roomba-spawn", id: r.id, x: r.x, z: r.z });
+  return r;
+}
+
+/** Reinforcements, on a fixed clock, until the arena's cap. */
+function stepWaves(round) {
+  if (round.t < round.nextWaveAt) return;
+  round.wave++;
+  round.nextWaveAt = round.t + round.level.waveEvery;
+
+  // Waves grow. A flat drip means the tenth minute plays exactly like the first, and this mode
+  // has to end — the escalation is what turns "survive" into a score rather than a stalemate.
+  const n = Math.min(1 + Math.floor(round.wave / 2), 3);
+  let added = 0;
+  for (let i = 0; i < n; i++) if (spawnRoomba(round, round.wave * 3 + i)) added++;
+  if (added > 0) round.events.push({ type: "wave", wave: round.wave, added });
+}
+
+/**
+ * Drive every machine one tick.
+ *
+ * The behaviour is deliberately simple and completely legible: pick the nearest living player
+ * inside the sense radius, turn toward them at a fixed rate, drive forward. All the difficulty
+ * comes from the turn rate being finite — a saw at full chase overshoots anyone who cuts
+ * across its nose, so the counter-play is to stay close and keep turning rather than to run,
+ * which is exactly the wrong instinct and the reason the mode is interesting.
+ */
+function stepRoombas(round, dt) {
+  const { level } = round;
+
+  for (const r of round.roombas) {
+    // The blade keeps spinning even while the chassis is stalled — it is the thing that is
+    // dangerous, and a saw that visibly stops looks safe when it is not.
+    r.spin += dt * (r.stagger > 0 ? 6 : 13) * r.tempo;
+
+    if (r.stagger > 0) {
+      r.stagger -= dt;
+      continue;
+    }
+
+    // Reacquire every tick: a machine that keeps chasing someone who has died, or who has run
+    // out of its range, leaves the rest of the room unattended.
+    r.target = nearestTarget(round, r);
+
+    let wantHeading;
+    let speed;
+    if (r.target) {
+      wantHeading = Math.atan2(r.target.x - r.x, r.target.z - r.z);
+      speed = level.roombaChase * r.tempo;
+
+      // A machine chasing someone on the floor eases off.
+      //
+      // Without this the mode has no legs economy at all: a crawler moves at 0.75 tiles/s and
+      // a saw at full chase does well over 2, so the first leg you lose is simply death with
+      // extra steps and every arena measured the same — ~3 hits landed per player, on a body
+      // with two legs. Backing off to something a crawler can still work with turns a lost leg
+      // into a bad position you might survive, which is the whole point of having legs.
+      if (r.target.legs === 0) speed = Math.min(speed, SPEED_CRAWL * 1.12);
+      else if (r.target.legs === 1) speed = Math.min(speed, SPEED_LIMP * 1.05);
+    } else {
+      // Nobody in reach: patrol. It re-picks a direction every few seconds instead of holding
+      // one forever, so an idle saw sweeps the room rather than parking in a corner.
+      if (round.t >= r.wanderAt) {
+        r.wanderAt = round.t + 2 + Math.random() * 3;
+        r.heading += (Math.random() - 0.5) * 2.2;
+      }
+      wantHeading = r.heading;
+      speed = level.roombaSpeed * r.tempo;
+    }
+
+    r.heading = turnToward(r.heading, wantHeading, ROOMBA_TURN * dt);
+
+    const vx = Math.sin(r.heading);
+    const vz = Math.cos(r.heading);
+    let nx = r.x + vx * speed * dt;
+    let nz = r.z + vz * speed * dt;
+
+    // Bounce off the walls. Reflecting the heading rather than merely clamping matters: a
+    // clamped machine grinds along the wall indefinitely and stops being a threat, and the
+    // wall is exactly where a cornered player is.
+    const lo = ROOMBA_R;
+    const hiX = level.cols - ROOMBA_R;
+    const hiZ = level.rows - ROOMBA_R;
+    let bounced = false;
+    if (nx < lo || nx > hiX) {
+      nx = Math.max(lo, Math.min(hiX, nx));
+      r.heading = -r.heading;
+      bounced = true;
+    }
+    if (nz < lo || nz > hiZ) {
+      nz = Math.max(lo, Math.min(hiZ, nz));
+      r.heading = Math.PI - r.heading;
+      bounced = true;
+    }
+    if (bounced) r.wanderAt = round.t + 1.2;
+
+    r.x = nx;
+    r.z = nz;
+
+    roombaMine(round, r);
+    sawPlayers(round, r);
+  }
+}
+
+/** The nearest living player within this machine's sense radius, or null. */
+function nearestTarget(round, r) {
+  const reach = round.level.roombaSense;
+  let best = null;
+  let bestD = reach * reach;
+  for (const p of round.players.values()) {
+    if (p.state !== ALIVE) continue;
+    const dx = p.x - r.x;
+    const dz = p.z - r.z;
+    const d = dx * dx + dz * dz;
+    if (d < bestD) { bestD = d; best = p; }
+  }
+  return best;
+}
+
+/** Rotate `from` toward `to` by at most `max` radians, the short way around. */
+function turnToward(from, to, max) {
+  let diff = (to - from) % (Math.PI * 2);
+  if (diff > Math.PI) diff -= Math.PI * 2;
+  if (diff < -Math.PI) diff += Math.PI * 2;
+  return from + Math.max(-max, Math.min(max, diff));
+}
+
+/**
+ * A machine rolling over a mine sets it off, and is stalled by the blast.
+ *
+ * This is the mode's central bargain. The saws are the only thing that can clear the floor,
+ * so the ground you want to be standing on later is ground you have to lead one of them
+ * across now — and the stall is the reward for doing it, a second and a half of free room
+ * bought by putting yourself in front of a saw on purpose.
+ */
+function roombaMine(round, r) {
+  const { cols } = round.level;
+  const tx = Math.floor(r.x);
+  const tz = Math.floor(r.z);
+  if (tx < 0 || tz < 0 || tx >= round.level.cols || tz >= round.level.rows) return;
+
+  const i = tz * cols + tx;
+  if (round.mines[i] !== 1) return;
+  if (Math.hypot(r.x - (tx + 0.5), r.z - (tz + 0.5)) > MINE_TRIGGER_R + ROOMBA_R) return;
+
+  round.mines[i] = 0;
+  round.exploded[i] = 1;
+  r.stagger = ROOMBA_STAGGER;
+  // Thrown back the way it came, so the blast visibly costs it ground.
+  r.x -= Math.sin(r.heading) * 0.7;
+  r.z -= Math.cos(r.heading) * 0.7;
+  r.heading += Math.PI + (Math.random() - 0.5) * 0.8;
+  r.target = null;
+
+  round.events.push({
+    type: "blast", x: tx + 0.5, z: tz + 0.5, id: null, legsLost: 0, legs: 2, roomba: r.id,
+  });
+}
+
+/** Anything alive touching the blade loses a leg — once per cooldown, per machine. */
+function sawPlayers(round, r) {
+  for (const p of round.players.values()) {
+    if (p.state !== ALIVE) continue;
+    if (round.t - p.sawHitAt < SAW_COOLDOWN) continue;
+    if (Math.hypot(p.x - r.x, p.z - r.z) > SAW_HIT_R) continue;
+
+    p.sawHitAt = round.t;
+    const before = p.legs;
+    p.legs = Math.max(0, p.legs - 1);
+    round.events.push({
+      type: "saw", id: p.id, roomba: r.id, x: p.x, z: p.z, legs: p.legs,
+    });
+
+    if (before === 0) {
+      down(round, p, "saw");
+      continue;
+    }
+
+    // Knocked clear, so a single contact cannot become a grind against a machine that is
+    // still driving into you. Shorter than a mine's throw — this is a shove, not a blast.
+    p.stun = 0.45;
+    const away = Math.hypot(p.x - r.x, p.z - r.z) || 1;
+    p.x = Math.max(0.32, Math.min(round.level.cols - 0.32, p.x + ((p.x - r.x) / away) * 0.85));
+    p.z = Math.max(0.32, Math.min(round.level.rows - 0.32, p.z + ((p.z - r.z) / away) * 0.85));
+  }
+}
+
+/** Record the order people go down in, so the results can rank by how long each lasted. */
+function down(round, p, cause) {
+  if (p.state !== ALIVE) return;
+  p.survivedFor = round.t;
+  round.downOrder.push(p.id);
+  kill(round, p, cause);
+}
+
+/** How many machines are on the floor. Read by the HUD. */
+export function roombaCount(round) {
+  return round.roombas.length;
 }
 
 function stepPlayer(round, p, dt) {
@@ -521,7 +910,10 @@ function detonate(round, p, tx, tz) {
   });
 
   if (before === 0) {
-    kill(round, p, "mine");
+    // In survival the order people go down in *is* the scoreboard, so a mine death has to be
+    // recorded the same way a saw death is.
+    if (round.mode === MODE_SURVIVAL) down(round, p, "mine");
+    else kill(round, p, "mine");
     return;
   }
 
@@ -586,12 +978,66 @@ function checkOver(round) {
   if (round.players.size === 0) return;
 
   let stillPlaying = 0;
-  for (const p of round.players.values()) if (p.state === ALIVE) stillPlaying++;
+  let lastAlive = null;
+  for (const p of round.players.values()) {
+    if (p.state === ALIVE) { stillPlaying++; lastAlive = p; }
+  }
+
+  if (round.mode === MODE_SURVIVAL) {
+    // Survival ends when there is nobody left to hunt, or one person left to hunt with nobody
+    // to hunt them for. A solo game is the exception: with one player seated there is no "last
+    // one standing" to reach, so it runs until that player is down.
+    const contested = countContenders(round) > 1;
+    if (stillPlaying > (contested ? 1 : 0)) return;
+
+    round.phase = "over";
+    round.lastStand = round.t;
+    if (lastAlive) {
+      // Whoever is still standing when the music stops. Their clock keeps running to the end.
+      lastAlive.survivedFor = round.t;
+      round.winner = lastAlive.id;
+    } else {
+      // Everybody died. The winner is whoever lasted longest — the last name pushed onto
+      // downOrder, since that list is built in the order people went down.
+      round.winner = round.downOrder.length
+        ? round.downOrder[round.downOrder.length - 1] : null;
+    }
+    round.events.push({
+      type: "over",
+      survival: true,
+      winner: round.winner,
+      lastStand: round.lastStand,
+      wave: round.wave,
+    });
+    return;
+  }
+
   if (stillPlaying > 0) return;
 
   round.phase = "over";
   round.winner = round.escapedOrder.length ? round.escapedOrder[0] : null;
   round.events.push({ type: "over", escaped: [...round.escapedOrder], winner: round.winner });
+}
+
+/** Players who actually took part this round — spectators do not count toward "last standing". */
+function countContenders(round) {
+  let n = 0;
+  for (const p of round.players.values()) if (p.state !== WAITING) n++;
+  return n;
+}
+
+/**
+ * Everyone who took part, ranked by how long they lasted. The survivor first, then the fallen
+ * in reverse order of going down.
+ */
+export function survivalRanking(round) {
+  const out = [];
+  for (const p of round.players.values()) {
+    if (p.state === WAITING) continue;
+    out.push({ id: p.id, time: p.survivedFor, alive: p.state === ALIVE });
+  }
+  out.sort((a, b) => (b.alive ? 1 : 0) - (a.alive ? 1 : 0) || b.time - a.time);
+  return out;
 }
 
 export function survivors(round) {
