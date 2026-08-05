@@ -27,6 +27,10 @@ const title = "FreeConsole — diagnostics";
   <button id="fix">Unregister service workers & clear caches</button>
 
   <script type="module">
+    // Wrapped in an async IIFE rather than using top-level await: TLA is ES2022 and fails
+    // to PARSE on old smart-TV browsers, which left this page - the one you open to find
+    // out WHY a TV is broken - silently blank on exactly those TVs.
+    (async () => {
     const out = document.getElementById("out");
     const line = (label, state, detail) => {
       const div = document.createElement("div");
@@ -89,5 +93,6 @@ const title = "FreeConsole — diagnostics";
       }
       location.reload(true);
     });
+    })();
   </script>
 </BaseLayout>
