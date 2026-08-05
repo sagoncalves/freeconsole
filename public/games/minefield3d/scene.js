@@ -502,6 +502,15 @@ export function setGateOpen(ctx, open) {
  */
 let AVATAR_HEIGHT = 2.5;
 
+/**
+ * How far a pitched-over body drifts forward, as a fraction of the avatar's height.
+ *
+ * The model pivots between its feet, so laying it flat rotates the torso out ahead of that
+ * point. Measured at 1.59 world units on a 2.5-unit avatar; expressing it as a ratio keeps
+ * the correction correct at any height.
+ */
+const CRAWL_PIVOT_SHIFT = 1.59 / 2.5;
+
 /** Override the avatar height. Used by the size-comparison harness (?sizes=1). */
 export function setAvatarHeight(h) {
   if (h > 0) AVATAR_HEIGHT = h;
@@ -785,9 +794,16 @@ export function posePlayer(mesh, p, states, dt) {
   group.rotation.y = p.heading;
 
   if (p.state === states.DEAD) {
-    // Flat on the ground, lamp out.
+    // Flat on the ground, lamp out. Toppling sideways swings the body out along x from the
+    // foot pivot, the same way the crawl does along z, so it needs the same correction or
+    // the corpse lies a body-length away from where the player actually fell.
     body.rotation.z = Math.PI / 2;
-    body.position.y = 0.22;
+    body.rotation.x = 0;
+    body.position.set(
+      mesh.isModel ? CRAWL_PIVOT_SHIFT * AVATAR_HEIGHT : 0,
+      mesh.isModel ? 0.1 : 0.22,
+      0
+    );
     body.scale.setScalar(s);
     lamp.intensity = 0;
     if (mesh.glow) mesh.glow.material.opacity = 0.05;
@@ -857,7 +873,7 @@ export function posePlayer(mesh, p, states, dt) {
     if (mesh.wasCrawling) { restoreBones(mesh); mesh.wasCrawling = false; }
     body.rotation.x = 0;
     body.rotation.z = p.legs === 1 ? 0.3 : 0;
-    body.position.y = 0;
+    body.position.set(0, 0, 0);   // clear any pivot correction left by the crawl or death
     body.scale.setScalar(s);
     applyLegs(mesh, p.legs);
     if (p.legs === 1) poseLimp(mesh, moving);
@@ -980,8 +996,19 @@ function poseCrawl(mesh, p, moving, dt) {
   // its forward axis up and behind it — the crawler ends up dragging itself head-first in
   // the direction it came from. +90° lays it on its front still pointing down the aisle.
   body.rotation.x = Math.PI / 2 - 0.12;
-  body.position.y = 0.16;
   body.scale.setScalar(baseScale);
+
+  // Pull the body back onto the player's actual position.
+  //
+  // The model's pivot is between its feet, so pitching it 90° about that point swings the
+  // whole torso forward — measured at 1.59 tiles, nearly two. The sim, the sonar ping and
+  // the mine test all use the player's position, so an uncorrected crawler is drawn well
+  // ahead of the spot their own light is coming from: they appear to walk into mines their
+  // ping just showed as clear, and the ring looks like it trails behind them.
+  //
+  // The shift is derived from the avatar's height rather than hardcoded, so it stays right
+  // if AVATAR_HEIGHT changes.
+  body.position.set(0, 0.16, -CRAWL_PIVOT_SHIFT * AVATAR_HEIGHT);
 
   if (!bones || !rest) return;
 
