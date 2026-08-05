@@ -692,8 +692,21 @@ function poseOf(p) {
   // --- arms ---------------------------------------------------------------
   // The sword arm points at the guard height the sim is actually using, so the drawing and
   // the hitbox agree: the hand ends up where `swordBox` starts the blade.
+  /**
+   * The hand tracks the guard height, but only partway.
+   *
+   * A fencer changing guard does not move the fist to knee height - the hand stays near the
+   * chest and the blade angles down from it. That is also the only thing that fits here: the
+   * arm is ~26px and a low guard sits ~48px away on the diagonal, so aiming the hand at the
+   * blade line directly is not a reachable pose and the arm just maxes out short of it.
+   *
+   * Tracking a fraction of the offset keeps all three guards visibly distinct and leaves the
+   * blade itself - drawn from `swordBox` - to carry the real height. The bar is the hitbox,
+   * so readability of the guard never depended on the hand.
+   */
   const bladeY = p.y + GUARD_Y[p.guard];
-  const reachY = bladeY - sy;
+  const chestY = p.y + h * 0.42;
+  const reachY = (chestY + (bladeY - chestY) * 0.45) - sy;
   const reachX = f * BODY_W * 0.5 * armFwd + f * (upperArm + foreArm) * armFwd;
   const armSwing = f * swing2 * 0.5 * amp * (armFwd > 0.9 ? 0 : 1);
 
@@ -706,7 +719,13 @@ function poseOf(p) {
    * `aimTo` solves the shoulder angle needed for the hand to land on the target once the
    * elbow bend is taken into account, which keeps every guard height honest.
    */
-  const guardBend = -f * (Math.max(0, 0.55 - armFwd * 0.5) + stance * 0.28);
+  // `aimTo` fixes the direction, but the hand still lands at the arm's own length along it -
+  // so a target further away than the arm can reach is met by straightening the elbow rather
+  // than by stretching. Low guard is the case that needs it: the blade is carried down and
+  // forward, which is the longest diagonal the arm is ever asked for.
+  const want = Math.hypot(reachX, reachY);
+  const slack = Math.min(1, want / Math.max(1e-4, upperArm + foreArm));
+  const guardBend = -f * (Math.max(0, 0.55 - armFwd * 0.5) + stance * 0.28) * (1 - slack * 0.85);
   const armMain = limb(sx, sy, aimTo(sx, sy, reachX, reachY, upperArm, foreArm, guardBend)
                        + armSwing * 0.35, upperArm, foreArm, guardBend);
 
