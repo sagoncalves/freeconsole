@@ -114,18 +114,18 @@
 <script src="/sdk.js"></script>
 <script type="module">
 import * as THREE from "/vendor/three.js?v=5";
-import * as sim from "/games/minefield3d/sim.js?v=1";
-import { LEVELS, getLevel } from "/games/minefield3d/levels.js?v=1";
+import * as sim from "/games/minefield3d/sim.js?v=2";
+import { LEVELS, getLevel } from "/games/minefield3d/levels.js?v=2";
 import {
   createScene, updateCamera, updateFloor, setGateOpen, resize,
   buildMineField, updateMineField,
   createPlayerMesh, posePlayer, createKillerMesh, loadAvatar, setAvatar, createBloodSplat,
   setAvatarHeight,
   createPingRing, updatePingRing, createBlast, stepBlast, createPrintMesh,
-} from "/games/minefield3d/scene.js?v=1";
+} from "/games/minefield3d/scene.js?v=2";
 import {
   TIERS, QUALITY_CHOICES, DEFAULT_QUALITY, resolveTier, makeFpsWatchdog,
-} from "/games/minefield3d/quality.js?v=1";
+} from "/games/minefield3d/quality.js?v=2";
 
 const freeconsole = new FreeConsole();
 

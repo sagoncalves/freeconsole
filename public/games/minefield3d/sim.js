@@ -14,7 +14,7 @@
  * end, closest to the camera) and walk toward the gate at z = 0. x is the narrow axis.
  */
 
-import { getLevel } from "/games/minefield3d/levels.js?v=1";
+import { getLevel } from "/games/minefield3d/levels.js?v=2";
 
 /* ------------------------------------------------------------------ constants */
 

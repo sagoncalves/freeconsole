@@ -594,7 +594,7 @@ function cloneSkinned(source) {
 
 let avatarPromise = null;
 
-export function loadAvatar(url = "/games/minefield3d/ninja.glb?v=1") {
+export function loadAvatar(url = "/games/minefield3d/ninja.glb?v=2") {
   if (avatarPromise) return avatarPromise;
   avatarPromise = new Promise((resolve) => {
     if (!THREE.GLTFLoader) { resolve(null); return; }
@@ -905,7 +905,10 @@ function poseCrawl(mesh, p, moving, dt) {
   // Lie the whole body down and drop it to floor height. Rotating the root rather than the
   // hips keeps the skinning clean and costs one matrix.
   body.rotation.z = 0;
-  body.rotation.x = -Math.PI / 2 + 0.12;
+  // Tip FORWARD onto the front, not backward. The model faces -z, so a -90° pitch rotates
+  // its forward axis up and behind it — the crawler ends up dragging itself head-first in
+  // the direction it came from. +90° lays it on its front still pointing down the aisle.
+  body.rotation.x = Math.PI / 2 - 0.12;
   body.position.y = 0.16;
   body.scale.setScalar(baseScale);
 

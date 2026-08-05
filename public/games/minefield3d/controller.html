@@ -241,9 +241,16 @@
   document.addEventListener("pointermove", function (e) {
     if (!active.has(e.pointerId)) return;
     e.preventDefault();
-    // A pointer that is no longer pressed (buttons === 0) had its up swallowed somewhere.
-    // Treat the next move as the release rather than waiting for an up that will not come.
-    engage(e.pointerId, e.buttons === 0 ? null : keyAt(e.clientX, e.clientY));
+    // Do NOT test e.buttons here. It is a mouse-button bitmask; for touch pointers browsers
+    // report 0 on stationary/coalesced moves even while the finger is firmly down, so using
+    // it as a "still pressed" probe kills long presses partway through. Releases come from
+    // pointerup/pointercancel/touchend only.
+    //
+    // A miss (finger in the gutter between arrows, or the layout shifted under a stationary
+    // thumb when the admin row appeared) keeps the arrow it already had. Only landing on a
+    // *different* arrow switches. Lifting is what ends a hold, never a hit-test miss.
+    var el = keyAt(e.clientX, e.clientY);
+    if (el) engage(e.pointerId, el);
   }, { passive: false });
 
   /**
@@ -450,7 +457,11 @@
     if (data.phase === "running") {
       over = false;
       banner.classList.remove("show");
-      pad.classList.toggle("locked", state !== "alive");
+      // Only lock on a state we were actually told. A broadcast that omits this device
+      // (partial payload, or one that lands between a reconnect and being re-seated) leaves
+      // `state` undefined — treating that as "not alive" locks the pad to pointer-events:
+      // none and nothing unlocks it until the next phase, so the pad is dead for the round.
+      if (state !== undefined) pad.classList.toggle("locked", state !== "alive");
       if (typeof legs === "number") {
         if (legs !== lastLegs || state !== "alive") setCondition(legs, state);
         lastLegs = legs;
