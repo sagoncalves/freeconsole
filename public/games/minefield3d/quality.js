@@ -76,7 +76,18 @@ export const TIERS = {
   },
 };
 
-export const DEFAULT_QUALITY = "auto";
+/**
+ * Low by default, not "auto".
+ *
+ * The usual argument for auto-detection is that most people never open the settings — but
+ * that cuts the other way here. This game is played on whatever screen is in the room, and
+ * being wrong toward "too expensive" costs a stuttering TV for the whole session, while being
+ * wrong toward "too cheap" costs some shadows nobody was looking at. Low still carries the
+ * entire game: the sonar, the mines, the crusher and every avatar are all legible on it.
+ *
+ * The master controller can raise it any time, and that choice is remembered per browser.
+ */
+export const DEFAULT_QUALITY = "low";
 
 /** Every value the admin can choose, in the order the UI should show them. */
 export const QUALITY_CHOICES = ["auto", "high", "medium", "low"];

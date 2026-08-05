@@ -122,10 +122,10 @@ import {
   createPlayerMesh, posePlayer, createKillerMesh, loadAvatar, setAvatar, createBloodSplat,
   setAvatarHeight,
   createPingRing, updatePingRing, createBlast, stepBlast, createPrintMesh,
-} from "/games/minefield3d/scene.js?v=2";
+} from "/games/minefield3d/scene.js?v=4";
 import {
   TIERS, QUALITY_CHOICES, DEFAULT_QUALITY, resolveTier, makeFpsWatchdog,
-} from "/games/minefield3d/quality.js?v=2";
+} from "/games/minefield3d/quality.js?v=3";
 
 const freeconsole = new FreeConsole();
 
@@ -166,7 +166,11 @@ const QUALITY_KEY = "minefield3d.quality";
 function loadQualityChoice() {
   try {
     const stored = localStorage.getItem(QUALITY_KEY);
-    if (stored && QUALITY_CHOICES.includes(stored)) return stored;
+    // A stored "auto" is ignored on purpose. It was this game's original default, so every
+    // browser that ever opened it has one saved without anybody having chosen it — honouring
+    // that would mean the new default never reaches the machines it exists for. An explicit
+    // tier is a real decision and is always kept.
+    if (stored && stored !== "auto" && QUALITY_CHOICES.includes(stored)) return stored;
   } catch (err) { /* private mode — fall through */ }
   return DEFAULT_QUALITY;
 }
@@ -851,7 +855,9 @@ if (SIZES) {
       // Run them, so the facing and the animation are judged too — a static T-pose says
       // nothing about either.
       if (mesh.actions && mesh.actions.running) {
-        mesh.actions.running.paused = false;
+        // These rigs are not in the sim, so nothing is blending them: force full run weight.
+        mesh.actions.running.setEffectiveWeight(1);
+        if (mesh.actions.idle) mesh.actions.idle.setEffectiveWeight(0);
         // Offset each one's phase so the line is not a chorus line.
         mesh.actions.running.time = (i * 0.13) % 0.67;
       }

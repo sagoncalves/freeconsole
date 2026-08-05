@@ -491,16 +491,16 @@ export function setGateOpen(ctx, open) {
 /**
  * How tall a player stands, in world units (tiles).
  *
- * Deliberately larger than life relative to the aisle. At a realistic ~1.0 the ninja rendered
- * about 12 pixels tall from the game's camera — too small for the model, the run cycle or a
- * missing leg to be visible at all, which made the whole avatar pure cost.
+ * Deliberately far larger than life: two and a half tiles, in an aisle only nine to eleven
+ * tiles wide. At a realistic ~1.0 the ninja rendered about twelve pixels tall from the game's
+ * camera, which made the model, the run cycle and a missing leg all invisible — the avatar
+ * was pure cost. Toy proportions are what make the character legible at the distance this
+ * camera actually sits at, and legibility is the entire reason to have a model here.
  *
- * It cannot go much past this, though: the camera rides just behind the hindmost player, so
- * anyone near it is seen close up. At 2.0 a straggler filled a third of the screen. This is
- * the value where a player reads clearly down the aisle without swallowing the frame when
- * they are the one being followed.
+ * Chosen by eye from the ?sizes=1 ladder rather than derived, because the right answer
+ * depends on the camera and nothing else predicts it.
  */
-let AVATAR_HEIGHT = 1.35;
+let AVATAR_HEIGHT = 2.5;
 
 /** Override the avatar height. Used by the size-comparison harness (?sizes=1). */
 export function setAvatarHeight(h) {
@@ -594,7 +594,7 @@ function cloneSkinned(source) {
 
 let avatarPromise = null;
 
-export function loadAvatar(url = "/games/minefield3d/ninja.glb?v=2") {
+export function loadAvatar(url = "/games/minefield3d/ninja.glb?v=3") {
   if (avatarPromise) return avatarPromise;
   avatarPromise = new Promise((resolve) => {
     if (!THREE.GLTFLoader) { resolve(null); return; }
@@ -703,9 +703,14 @@ export function createPlayerMesh(colorHex, Q) {
       }
       // Running is the only clip with real motion — the "idle" the exporter emitted is a
       // single frame, so it is used as a static pose rather than played.
-      if (actions.running) {
-        actions.running.play();
-        actions.running.paused = true;
+      // Both locomotion clips run continuously and are blended by weight rather than being
+      // started and stopped. Stopping and restarting a clip snaps it back to frame zero, so
+      // a player who takes a single step gets a visible hitch every time they pause; leaving
+      // both playing and crossfading the weights makes the transition invisible.
+      for (const name of ["idle", "running"]) {
+        if (!actions[name]) continue;
+        actions[name].play();
+        actions[name].setEffectiveWeight(name === "idle" ? 1 : 0);
       }
     }
 
@@ -786,7 +791,11 @@ export function posePlayer(mesh, p, states, dt) {
     body.scale.setScalar(s);
     lamp.intensity = 0;
     if (mesh.glow) mesh.glow.material.opacity = 0.05;
-    if (mesh.actions && mesh.actions.running) mesh.actions.running.paused = true;
+    // A body on the floor plays nothing at all.
+    if (mesh.actions) {
+      if (mesh.actions.idle) mesh.actions.idle.setEffectiveWeight(0);
+      if (mesh.actions.running) mesh.actions.running.setEffectiveWeight(0);
+    }
     return;
   }
 
@@ -806,18 +815,32 @@ export function posePlayer(mesh, p, states, dt) {
 
   // --- the rigged model ---
 
-  // The run clip drives the whole skeleton, so it must be stepped BEFORE any bone is
-  // overridden by hand — otherwise the mixer writes the clip's pose back over the crawl on
-  // the following frame and the limbs jitter between the two.
-  if (mesh.mixer && mesh.actions && mesh.actions.running) {
-    const run = mesh.actions.running;
-    // A crawler is not running. Freezing the clip lets the procedural pose own the body.
-    const useClip = p.legs > 0 && moving;
-    run.paused = !useClip;
-    if (useClip) {
-      run.timeScale = Math.max(0.4, speed / 3.0);
-      mesh.mixer.update(dt || 0);
+  // The clips drive the whole skeleton, so the mixer must be stepped BEFORE any bone is
+  // overridden by hand — otherwise it writes the clip's pose back over the crawl on the
+  // following frame and the limbs jitter between the two.
+  if (mesh.mixer && mesh.actions) {
+    const { idle, running } = mesh.actions;
+
+    // A player with legs is either standing (idle) or moving (running); a crawler is
+    // neither, and hands the body over to poseCrawl entirely.
+    const animated = p.legs > 0;
+
+    // Crossfade rather than switch. The target is binary but the weight is eased toward it,
+    // so setting off from a standstill blends over a few frames instead of popping.
+    const wantRun = animated && moving ? 1 : 0;
+    const k = 1 - Math.exp(-(dt || 0) * 11);
+    mesh.blend = (mesh.blend || 0) + (wantRun - (mesh.blend || 0)) * k;
+
+    if (idle) idle.setEffectiveWeight(animated ? 1 - mesh.blend : 0);
+    if (running) {
+      running.setEffectiveWeight(animated ? mesh.blend : 0);
+      // Tie the stride to how fast this player can actually move, so a limper's legs do not
+      // windmill at full walking speed.
+      running.timeScale = Math.max(0.4, speed / 3.0);
     }
+
+    // Keep stepping while either clip still carries weight, so the fade itself plays out.
+    if (animated) mesh.mixer.update(dt || 0);
   }
 
   mesh.phase = (mesh.phase || 0) + (dt || 0) * (moving ? Math.max(2.2, speed * 3.4) : 0.9);
@@ -825,8 +848,12 @@ export function posePlayer(mesh, p, states, dt) {
   if (p.legs === 0) {
     poseCrawl(mesh, p, moving, dt);
   } else {
-    // Undo anything the crawl left behind. Without this a player who is revived between
-    // rounds keeps the prone rotation and the reaching arms.
+    // Undo anything the crawl left behind.
+    //
+    // Legs are never regained mid-round — the sim only ever subtracts them, and restores
+    // them at startRound — so this fires exactly once per body, when a mesh that crawled
+    // last round is reused by a player who now has legs again. Rare, but without it that
+    // player stands up still folded into the prone pose with their arms reaching.
     if (mesh.wasCrawling) { restoreBones(mesh); mesh.wasCrawling = false; }
     body.rotation.x = 0;
     body.rotation.z = p.legs === 1 ? 0.3 : 0;
@@ -869,6 +896,50 @@ function applyLegs(mesh, legs) {
     left.scale.setScalar(gone);
     right.scale.setScalar(gone);
   }
+}
+
+/**
+ * A legless player who has stopped: propped on both forearms, breathing.
+ *
+ * Deliberately not a slowed-down crawl. The stroke and this pose are different shapes, so a
+ * glance across the aisle tells you whether a crawler is still making ground or has stalled —
+ * which matters, because a stalled crawler is about to be caught by the crusher.
+ */
+function poseCrawlIdle(mesh) {
+  const { bones, rest, body } = mesh;
+  const t = mesh.phase;
+
+  // Slow breathing, independent of the stroke's phase so it never inherits its speed.
+  const breath = Math.sin(t * 0.55);
+
+  // Both arms tucked in under the chest, elbows bent, holding the upper body off the floor.
+  if (bones.LeftArm) {
+    bones.LeftArm.rotation.x = rest.LeftArm.rot.x - 0.55;
+    bones.LeftArm.rotation.z = rest.LeftArm.rot.z + 0.5;
+  }
+  if (bones.RightArm) {
+    bones.RightArm.rotation.x = rest.RightArm.rot.x - 0.55;
+    bones.RightArm.rotation.z = rest.RightArm.rot.z - 0.5;
+  }
+  if (bones.LeftForeArm) bones.LeftForeArm.rotation.x = rest.LeftForeArm.rot.x - 1.15;
+  if (bones.RightForeArm) bones.RightForeArm.rotation.x = rest.RightForeArm.rot.x - 1.15;
+
+  // The chest rises and falls. Small — it has to read at distance without looking like a
+  // twitch, and it is the only thing telling you this body is still alive.
+  if (bones.Spine) bones.Spine.rotation.x = rest.Spine.rot.x + breath * 0.05;
+  if (bones.Spine01) bones.Spine01.rotation.x = rest.Spine01.rot.x + breath * 0.04;
+  if (bones.Spine02) bones.Spine02.rotation.x = rest.Spine02.rot.x + breath * 0.03;
+
+  // Head down, lifting slightly with each breath rather than staring ahead.
+  if (bones.Head) bones.Head.rotation.x = rest.Head.rot.x - 0.28 + breath * 0.06;
+
+  // No side-to-side roll: the roll belongs to the stroke and reintroducing it here would
+  // blur the distinction the pose exists to draw.
+  if (bones.Spine) bones.Spine.rotation.y = rest.Spine.rot.y;
+  if (bones.Spine01) bones.Spine01.rotation.y = rest.Spine01.rot.y;
+  if (bones.Spine02) bones.Spine02.rotation.y = rest.Spine02.rot.y;
+
+  body.position.y = 0.15 + breath * 0.012;
 }
 
 /** Put every hand-driven bone back to its bind pose, so the run clip owns the body again. */
@@ -916,9 +987,15 @@ function poseCrawl(mesh, p, moving, dt) {
 
   applyLegs(mesh, 0);
 
-  // Only advance the stroke while actually moving, so a stationary crawler lies still.
+  // A stationary crawler gets its own pose rather than a shrunken version of the stroke.
+  // Scaling the same cycle down just reads as swimming slowly on the spot; what a person
+  // face-down on the ground actually does is stop, prop themselves on their forearms and
+  // breathe. That contrast is also information — you can tell at a glance across the aisle
+  // whether a crawler is still making progress or has given up.
+  if (!moving) { poseCrawlIdle(mesh); return; }
+
   const t = mesh.phase;
-  const amp = moving ? 1 : 0.15;
+  const amp = 1;
 
   // Arms alternate: one reaches ahead while the other pulls through, a half-cycle apart.
   const reachL = Math.sin(t);
