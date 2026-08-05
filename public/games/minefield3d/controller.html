@@ -256,6 +256,21 @@
     sendAxis(ux * mag, uy * mag);
   }
 
+  /**
+   * Forget what the screen was last told.
+   *
+   * sendAxis dedupes against sentX/sentZ, which is only correct while those still describe
+   * what the screen actually has. Anything that resets the screen's side — a reconnect, a
+   * rejoin, clearInput on the far end — makes them a lie, and the next push that happens to
+   * match the stale value gets suppressed as "no change" and never sent. Clearing them to
+   * NaN rather than 0 means the very next sendAxis always differs (NaN compares false), so
+   * even a re-push of dead centre gets through.
+   */
+  function forgetSent() {
+    sentX = NaN;
+    sentZ = NaN;
+  }
+
   function endStick() {
     stickId = null;
     pad.classList.remove("active");
@@ -270,6 +285,10 @@
 
   /** Every exit route funnels here, so there is one definition of "not steering". */
   function releaseAll() {
+    // Note the ordering: forget *unconditionally*, end the stick only if one is live. The
+    // early return used to skip both, which is exactly how locking the phone with no finger
+    // on the glass left a stale sent-vector behind and killed the first move after unlock.
+    forgetSent();
     if (stickId === null) return;
     endStick();
   }
@@ -344,7 +363,16 @@
     if (document.hidden) {
       releaseAll();
       freeconsole.message(FreeConsole.SCREEN, { t: "release" });
+      return;
     }
+
+    // Coming BACK matters as much as leaving. While the phone was locked the screen may have
+    // re-seated this device (onConnect calls clearInput on a rejoin), so its idea of our axis
+    // is now zero regardless of what we last sent. Anything we still believe we sent is
+    // stale, and the next push that matched it would be deduped into silence — which is the
+    // "controller is dead after unlocking" bug. Forgetting costs one redundant message and
+    // removes the whole class of desync.
+    forgetSent();
   });
 
   /**
@@ -487,6 +515,13 @@
     try {
       document.documentElement.style.setProperty("--me", freeconsole.getPlayerColor());
     } catch (err) { /* keep the default */ }
+
+    // A fresh session is the strongest possible proof that the screen holds nothing for us:
+    // it re-seats this device and clears its input. Drop any stick still believed held and
+    // any memory of what was sent, so the first push after reconnecting always lands. This
+    // covers the reconnects that arrive with no visibilitychange at all — a dropped socket
+    // that comes back while the phone was never locked.
+    releaseAll();
   };
 
   var lastLegs = 2;

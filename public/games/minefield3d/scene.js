@@ -868,7 +868,14 @@ export function posePlayer(mesh, p, states, dt) {
     if (animated) mesh.mixer.update(dt || 0);
   }
 
-  mesh.phase = (mesh.phase || 0) + (dt || 0) * (moving ? Math.max(2.2, speed * 3.4) : 0.9);
+  // A crawler strokes at double rate. Without it the drag reads as laboured to the point of
+  // looking stalled — a legless player covers ground so slowly that a stroke tied to their
+  // speed barely animates, and the pose stops telling you they are still trying. The
+  // multiplier is applied here rather than inside poseCrawl because `phase` is shared: the
+  // limp's hitch reads it too, and scaling it at the source would speed that up as well.
+  const stroke = p.legs === 0 ? 2 : 1;
+  mesh.phase = (mesh.phase || 0)
+    + (dt || 0) * stroke * (moving ? Math.max(2.2, speed * 3.4) : 0.9);
 
   if (p.legs === 0) {
     poseCrawl(mesh, p, moving, dt);
@@ -934,8 +941,11 @@ function poseCrawlIdle(mesh) {
   const { bones, rest, body } = mesh;
   const t = mesh.phase;
 
-  // Slow breathing, independent of the stroke's phase so it never inherits its speed.
-  const breath = Math.sin(t * 0.55);
+  // Slow breathing, independent of the stroke's phase so it never inherits its speed. The
+  // 0.5 undoes the double-rate advance a crawler's phase gets, keeping a resting crawler
+  // breathing at the same pace as before the stroke was sped up — panting would read as
+  // effort, and the whole point of this pose is that it reads as having stopped.
+  const breath = Math.sin(t * 0.55 * 0.5);
 
   // Both arms tucked in under the chest, elbows bent, holding the upper body off the floor.
   if (bones.LeftArm) {
