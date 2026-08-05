@@ -528,6 +528,7 @@ const description =
     const catalog = new Map();   // gameId -> catalog entry
     let session = null;
     let roomCode = null;
+    let catalogReady = null;     // in-flight (or settled) loadCatalog(), so the room can await it
 
     function showError(message) {
       const box = $("error");
@@ -537,19 +538,32 @@ const description =
 
     /* ---------------------------------------------------------------- catalog */
 
-    async function loadCatalog() {
-      let snap;
-      try {
-        snap = await getDocs(collection(firestore, "games"));
-      } catch (err) {
-        $("games").innerHTML = "";
-        showError("Could not load the game catalog: " + err.message);
-        return;
-      }
+    /**
+     * Loads the catalog once and remembers the in-flight promise.
+     *
+     * Everything that needs games must await this rather than assume it has already
+     * finished: the landing page kicks it off on page load, but a slow TV can reach
+     * renderStore() long before Firestore answers, and an empty catalog there is
+     * indistinguishable from a genuinely empty one.
+     *
+     * A failure is not cached - the room retries rather than inheriting a permanently
+     * empty store from one bad request.
+     */
+    function loadCatalog() {
+      if (catalogReady) return catalogReady;
 
-      catalog.clear();
-      snap.forEach((doc) => catalog.set(doc.id, doc.data()));
-      renderLandingGames();
+      catalogReady = (async () => {
+        const snap = await getDocs(collection(firestore, "games"));
+        catalog.clear();
+        snap.forEach((doc) => catalog.set(doc.id, doc.data()));
+      })();
+
+      catalogReady = catalogReady.catch((err) => {
+        catalogReady = null;
+        throw err;
+      });
+
+      return catalogReady;
     }
 
     function renderLandingGames() {
@@ -623,6 +637,13 @@ const description =
 
       try {
         const user = await ensureAuth();
+
+        // The store cannot render tiles it doesn't have, and renderStore() is only ever
+        // driven by room changes - so a catalog that arrives after the first render would
+        // leave this TV showing an empty store for the rest of the session. Wait for it
+        // here, where the failure is still reportable, rather than racing it.
+        await loadCatalog();
+
         const { data } = await httpsCallable(functions, "createRoom")({});
         roomCode = data.roomCode;
 
@@ -736,9 +757,12 @@ const description =
       }
 
       const grid = $("storeGrid");
-      const key = [...catalog.keys()].join(",");
+      // An empty catalog is never cached: it is usually "not loaded yet" rather than
+      // "no games", and caching it under a key of "" is what used to leave a slow TV
+      // stuck on an empty store forever.
+      const key = catalog.size === 0 ? null : [...catalog.keys()].join(",");
 
-      if (key !== storeKey) {
+      if (key === null || key !== storeKey) {
         storeKey = key;
         grid.innerHTML = "";
 
@@ -809,7 +833,10 @@ const description =
       // Only this page has the button; the event fires for every route.
       if (!button) return;
       button.addEventListener("click", startRoom);
-      loadCatalog();
+      loadCatalog().then(renderLandingGames, (err) => {
+        $("games").innerHTML = "";
+        showError("Could not load the game catalog: " + err.message);
+      });
     });
   </script>
 </BaseLayout>

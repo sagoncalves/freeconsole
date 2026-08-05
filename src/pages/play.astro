@@ -466,14 +466,14 @@ const themeColor = "#05060d";
       }
     }
 
+    /**
+     * Loads the catalog. Failures propagate: without it the master gets a picker with
+     * nothing in it and no way to tell that something went wrong.
+     */
     async function loadCatalog() {
-      try {
-        const snap = await getDocs(collection(firestore, "games"));
-        catalog.clear();
-        snap.forEach((d) => catalog.set(d.id, d.data()));
-      } catch (err) {
-        console.error("catalog load failed", err);
-      }
+      const snap = await getDocs(collection(firestore, "games"));
+      catalog.clear();
+      snap.forEach((d) => catalog.set(d.id, d.data()));
     }
 
     function controllerUrlFor(home) {
