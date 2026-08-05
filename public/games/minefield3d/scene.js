@@ -201,11 +201,57 @@ function buildFloor(level, Q) {
  */
 export function updateFloor(ctx, round, sim, now) {
   const { floor, Q } = ctx;
+
+  // Low does not light the floor at all: the aisle stays dark ground and the sonar is read
+  // from the ping ring and the mines it uncovers. Painted flat exactly once — skipping the
+  // work without this would leave whatever the previous tier had uploaded frozen on screen,
+  // which is worse than either state. Checked before the interval gate so a tier switch
+  // takes effect on the next frame rather than after floorHz has elapsed.
+  //
+  // Survival is exempt. Its floor has no sonar written into it — it is a static fill done
+  // once per round, so it is already free, and blacking out an arena would take the room
+  // away to save nothing. This gate is about the per-frame sonar sweep, which only escape has.
+  if (!Q.floorLight && !ctx.survival) {
+    if (floor.darkDone) return;
+    floor.darkDone = true;
+    const g = COL.ground;
+    for (let i = 0; i < floor.count; i++) {
+      floor.colors[i * 3] = g.r;
+      floor.colors[i * 3 + 1] = g.g;
+      floor.colors[i * 3 + 2] = g.b;
+    }
+    floor.geo.attributes.color.needsUpdate = true;
+    return;
+  }
+  // Coming back up a tier has to redo the flat fill below.
+  floor.darkDone = false;
+
   const minInterval = 1000 / Math.max(1, Q.floorHz);
   if (now - floor.lastUpdate < minInterval) return;
   floor.lastUpdate = now;
 
   const { colors, vertexTile, count } = floor;
+
+  // Survival has no sonar and nothing hidden on the ground, so its floor is simply lit — and
+  // lit ONCE, not every frame. Sweeping every tile's reveal is this renderer's largest
+  // per-frame cost, and in an arena it would be computing zero over and over: the machines
+  // are the only thing to look at, and they carry their own light.
+  if (ctx.survival) {
+    if (floor.flatDone) return;
+    floor.flatDone = true;
+    const base = COL.groundLit;
+    for (let i = 0; i < count; i++) {
+      // A gentle gradient rather than a flat fill, so the room still reads as a receding
+      // surface with a near and a far end instead of as one painted rectangle.
+      const tz = vertexTile[i * 2 + 1];
+      const k = 0.55 + 0.45 * (1 - tz / Math.max(1, round.rows - 1));
+      colors[i * 3] = base.r * k;
+      colors[i * 3 + 1] = base.g * k;
+      colors[i * 3 + 2] = base.b * k;
+    }
+    floor.geo.attributes.color.needsUpdate = true;
+    return;
+  }
 
   // Cache one brightness per tile, then write it to that tile's vertices. Without the cache
   // the same tile's reveal is recomputed once per vertex — up to nine times over.

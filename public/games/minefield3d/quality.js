@@ -19,11 +19,20 @@
  *   3. Fill rate — antialiasing and pixel ratio, brutal on a 4K panel.
  *   4. Transient effects — blast sparks, crater decals, fog.
  *
- * One thing deliberately does *not* scale: the red dread wash over the stage. It is a DOM
- * layer whose only animated property is opacity, so the compositor owns it and it costs the
- * GPU essentially nothing even at 4K — but it is the clearest warning the game gives that
- * something is about to kill you, and Low is the tier a TV actually runs. The knob below
- * trades its softness, not its presence.
+ * Low goes further than "cheaper": it removes two whole effects rather than scaling them.
+ *
+ *   - **The dread wash** (`dread`). The red gradient that closes in as something approaches.
+ *     Cheap in principle — a DOM layer animating only opacity, which the compositor owns —
+ *     but a full-screen translucent layer over a 4K panel still costs real fill rate on a TV,
+ *     and it is off on Low by choice.
+ *   - **Floor lighting** (`floorLight`). The sonar's reveal painted into the aisle's vertex
+ *     colours. This is the single largest per-frame cost in the renderer, so dropping it is
+ *     the biggest win available on a weak GPU.
+ *
+ * Turning the floor light off does *not* blind the player: the expanding ping ring and the
+ * mine discs are separate meshes that read `tileReveal` themselves, so a lit mine still
+ * appears exactly when someone's sonar touches it. What is lost is the lit *ground* — the
+ * sense of safe floor between the mines — not the mines.
  */
 
 /** @typedef {"low"|"medium"|"high"} Tier */
@@ -46,6 +55,10 @@ export const TIERS = {
     /** A soft glow sprite under each player, so their own lamp is legible. */
     playerGlow: true,
     groundDetail: true,
+    /** The sonar's reveal painted into the floor's vertex colours. Off on Low. */
+    floorLight: true,
+    /** The red gradient that closes in as a threat does. Off on Low. */
+    dread: true,
     /**
      * How many steps the dread wash's opacity is quantised to. More steps = a smoother
      * ramp and more style writes; each write is compositor-only, so this is cheap
@@ -68,6 +81,8 @@ export const TIERS = {
     craterDecals: true,
     playerGlow: true,
     groundDetail: false,
+    floorLight: true,
+    dread: true,
     dreadSteps: 16,
     targetFps: 0,
   },
@@ -85,9 +100,13 @@ export const TIERS = {
     craterDecals: false,
     playerGlow: true,        // the whole game is unreadable without it
     groundDetail: false,
-    // Coarser steps, and it matters more here: Low caps the render rate at 30, so a fade
-    // that changed every frame would be visibly steppy without the CSS transition carrying
-    // it. Twelve steps over a half-second ease reads as continuous.
+    // The aisle stays dark. This is the renderer's biggest per-frame cost — a sweep of every
+    // tile plus a vertex colour upload — and on a TV it is worth more than the lit ground is.
+    // The ping ring and the mine discs are separate meshes and still light up normally.
+    floorLight: false,
+    // No red wash. A full-screen translucent layer is cheap to animate but not free to fill
+    // on a 4K panel, and this is the tier that exists for panels like that.
+    dread: false,
     dreadSteps: 12,
     targetFps: 30,
   },

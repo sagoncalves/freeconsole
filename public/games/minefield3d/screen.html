@@ -173,18 +173,18 @@
 <script src="/sdk.js"></script>
 <script type="module">
 import * as THREE from "/vendor/three.js?v=5";
-import * as sim from "/games/minefield3d/sim.js?v=6";
-import { LEVELS, getLevel, ARENAS, getArena } from "/games/minefield3d/levels.js?v=5";
+import * as sim from "/games/minefield3d/sim.js?v=8";
+import { LEVELS, getLevel, ARENAS, getArena } from "/games/minefield3d/levels.js?v=6";
 import {
   createScene, updateCamera, updateArenaCamera, updateFloor, setGateOpen, resize,
   buildMineField, updateMineField,
   createPlayerMesh, posePlayer, createKillerMesh, loadAvatar, setAvatar, createBloodSplat,
   setAvatarHeight, createRoombaMesh, updateRoombaMesh, createClang, stepClang,
   createPingRing, updatePingRing, createBlast, stepBlast, createPrintMesh,
-} from "/games/minefield3d/scene.js?v=14";
+} from "/games/minefield3d/scene.js?v=16";
 import {
   TIERS, QUALITY_CHOICES, DEFAULT_QUALITY, resolveTier, makeFpsWatchdog,
-} from "/games/minefield3d/quality.js?v=4";
+} from "/games/minefield3d/quality.js?v=5";
 
 const freeconsole = new FreeConsole();
 
@@ -1018,6 +1018,17 @@ function updateDread() {
 let dreadStep = -1;
 let dreadSurvival = null;
 function setDread(level) {
+  // Low turns the wash off outright. `display:none` rather than opacity 0 so the layer is
+  // not composited at all — an invisible full-screen element still costs a TV fill rate.
+  if (!Q.dread) {
+    if (dreadStep !== 0) {
+      dreadStep = 0;
+      dread.style.display = "none";
+    }
+    return;
+  }
+  if (dread.style.display === "none") dread.style.display = "";
+
   // The gradient shape is a class, not a per-frame style, so it is only touched when the
   // mode actually changes — which is at most once per round.
   const survival = isSurvival();

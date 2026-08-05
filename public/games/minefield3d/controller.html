@@ -413,6 +413,17 @@
 
   function tickPing() {
     requestAnimationFrame(tickPing);
+
+    // Survival has no echolocation, so there is no countdown to show. The ring is hidden
+    // outright rather than left frozen: a dial that sits at a stale number reads as a broken
+    // phone, and the pad is the only thing that should be drawing the eye in that mode.
+    if (survival) {
+      pulsering.style.display = "none";
+      pulsering.classList.remove("hot");
+      return;
+    }
+    pulsering.style.display = "";
+
     if (myState !== "alive" || over) { pulsering.classList.remove("hot"); return; }
     var t = freeconsole.getServerTime();
     if (!nextPingAt) { nextPingAt = t + period * 1000; return; }

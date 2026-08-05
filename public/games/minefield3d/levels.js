@@ -146,15 +146,17 @@ export function getLevel(index) {
  * and beaten the same way every time, where a room of loose blades has no intent behind it to
  * anticipate. The danger is the absence of a plan, not the presence of one.
  *
+ * There is no sonar in an arena either — the floor is simply lit. Echolocation exists to find
+ * what is hidden on the ground, and nothing is: the machines are the only thing worth looking
+ * at and they carry their own light. sonarPeriod survives as a field only because the shared
+ * broadcast and the controller both read it; no ping is ever emitted.
+ *
  * @typedef {object} Arena
  * @property {string} name
  * @property {string} tagline
  * @property {number} cols          Room width in tiles.
  * @property {number} rows          Room depth in tiles.
- * @property {number} sonarPeriod   Seconds between each player's own pings.
- * @property {number} sonarRadius   How far a ping reaches, in tiles.
- * @property {number} sonarHold     Seconds a revealed tile stays lit after the ring passes.
- * @property {number} sonarSpeed    Tiles/second the personal ring expands.
+ * @property {number} sonarPeriod   Vestigial. Broadcast to controllers; no ping is emitted.
  * @property {number} startRoombas  How many saws are on the floor at the opening bell.
  * @property {number} waveEvery     Seconds between reinforcements.
  * @property {number} maxRoombas    Hard cap, so a long round cannot become a slideshow.
@@ -181,9 +183,6 @@ export const ARENAS = [
     // unreadable one. The radius is generous for the same reason: with nothing on the floor
     // to find, the sonar's whole job here is showing you where the machines are.
     sonarPeriod: 1.6,
-    sonarRadius: 5.0,
-    sonarHold: 0.8,
-    sonarSpeed: 10,
 
     startRoombas: 3,
     waveEvery: 12,
@@ -200,9 +199,6 @@ export const ARENAS = [
     cols: 24,
     rows: 22,
     sonarPeriod: 1.8,
-    sonarRadius: 4.4,
-    sonarHold: 0.7,
-    sonarSpeed: 10,
     // The dial this arena turns is the count. More machines is superlinear rather than just
     // harder: collisions go up with the square of them, and collisions are where the chaos
     // actually comes from.
@@ -221,9 +217,6 @@ export const ARENAS = [
     // reach you having never once been lit — you are navigating on the glow off their own
     // chassis and on where you last saw one heading.
     sonarPeriod: 2.2,
-    sonarRadius: 3.2,
-    sonarHold: 0.6,
-    sonarSpeed: 10,
     startRoombas: 4,
     waveEvery: 11,
     maxRoombas: 18,

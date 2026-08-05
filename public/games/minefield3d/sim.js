@@ -14,7 +14,7 @@
  * end, closest to the camera) and walk toward the gate at z = 0. x is the narrow axis.
  */
 
-import { getLevel, getArena } from "/games/minefield3d/levels.js?v=5";
+import { getLevel, getArena } from "/games/minefield3d/levels.js?v=6";
 
 /* ------------------------------------------------------------------ constants */
 
@@ -36,10 +36,11 @@ export const MODE_ESCAPE = "escape";
  * have no intent to anticipate, so the floor never resolves into a pattern.
  *
  * Held as a field on the round rather than as a second sim module because the substrate is
- * genuinely shared — per-player sonar, the legs economy, movement and collision. What differs
- * is what is trying to kill you and what counts as winning. The mode branches at exactly three
- * places (createRound, startRound, step), plus two suppressions that are cheaper as a check
- * than as a fork: no mines are laid, and no footprints are dropped.
+ * genuinely shared — the legs economy, movement, collision, the roster and the round
+ * lifecycle. What differs is what is trying to kill you and what counts as winning. The mode
+ * branches at exactly three places (createRound, startRound, step), plus two suppressions that
+ * are cheaper as a check than as a fork: no mines are laid, and no sonar is emitted. An arena
+ * floor is simply lit — there is nothing hidden on it to go looking for.
  */
 export const MODE_SURVIVAL = "survival";
 
@@ -111,11 +112,14 @@ export const SPEED_CRAWL = 0.75;
 /** Seconds a player is stunned after an explosion, unable to move at all. */
 const BLAST_STUN = 1.1;
 
-/** Footprints older than this fade out entirely. */
+/**
+ * Footprints older than this fade out entirely.
+ *
+ * Nothing drops prints any more (see dropPrint), so this only ever ages an empty list. Kept
+ * because the renderer still imports it to fade any print it is given, and because the ageing
+ * path is what guarantees the list stays empty rather than merely starting that way.
+ */
 export const PRINT_LIFE = 30;
-
-/** Distance a player must travel before dropping the next footprint. */
-const PRINT_SPACING = 0.55;
 
 export const ALIVE = "alive";
 export const DEAD = "dead";
@@ -476,6 +480,11 @@ export function step(round, dt) {
  */
 function stepPing(round, p, dt) {
   const { level } = round;
+
+  // No echolocation in survival. It exists to find things hidden on the floor, and an arena
+  // hides nothing — the machines are lit, moving, and the only thing worth looking at. Leaving
+  // it in meant a ring sweeping the room every 1.6 seconds that revealed bare ground.
+  if (round.mode === MODE_SURVIVAL) { p.ping = null; return; }
 
   if (p.ping) {
     p.ping.r += level.sonarSpeed * dt;
@@ -986,26 +995,21 @@ function escape(round, p) {
 /* ---------------------------------------------------------------- footprints */
 
 /**
- * Footprints are the only navigation aid that persists between pings, and with per-player
- * sonar they are the whole social mechanic: they are the only way to learn about ground your
- * own light never reached. They are deliberately not marked safe or unsafe.
+ * Distance travelled. No trail is left behind, in either mode.
+ *
+ * Footprints used to persist here as a navigation aid — a dotted line marking ground somebody
+ * had crossed without exploding. They were removed from the game: on a bare arena floor they
+ * marked nothing at all, and in the aisle they cluttered the one surface the sonar is trying
+ * to communicate through, competing with the lit ground for the player's attention.
+ *
+ * `round.prints` stays as an always-empty array rather than being deleted. The renderer's
+ * syncPrints, the round reset and the tests all read it, and an empty array costs nothing
+ * while a missing field would be a null check in each of them.
  */
 function dropPrint(round, p, dist) {
   p.distance += dist;
-
-  // No trail in survival. Footprints exist to say "somebody walked here and did not explode",
-  // which is information only a minefield can carry — with a bare floor they mark nothing, and
-  // in a room where everyone is constantly running they just smear the ground with dotted
-  // lines that compete with the machines for attention.
-  if (round.mode === MODE_SURVIVAL) return;
-
-  if (Math.hypot(p.x - p.lastPrintX, p.z - p.lastPrintZ) < PRINT_SPACING) return;
-
   p.lastPrintX = p.x;
   p.lastPrintZ = p.z;
-  round.prints.push({ x: p.x, z: p.z, id: p.id, age: 0, crawl: p.legs === 0 });
-
-  if (round.prints.length > 900) round.prints.splice(0, round.prints.length - 900);
 }
 
 function agePrints(round, dt) {

@@ -1,11 +1,10 @@
 {"message":"connected.","label":"vite","level":"info"}
 {"message":"Generated 1ms","label":"types","level":"info"}
+{"message":"Port 4321 is in use, trying another one...","label":"vite","level":"info"}
 {"message":"connected.","label":"vite","level":"info"}
-{"message":" astro  v7.1.6 ready in 2958 ms\n┃ Local    http://localhost:4321/\n┃ Network  http://192.168.1.9:4321/","label":"SKIP_FORMAT","level":"info"}
+{"message":"Re-optimizing dependencies because vite config has changed","label":"vite","level":"info"}
+{"message":" astro  v7.1.6 ready in 1874 ms\n┃ Local    http://localhost:4322/\n┃ Network  http://192.168.1.77:4322/","label":"SKIP_FORMAT","level":"info"}
 {"message":"watching for file changes...","label":null,"level":"info"}
-{"message":"public/games/nidhogg/screen.html","label":"watch","level":"info"}
-{"message":"public/games/nidhogg/screen.html","label":"watch","level":"info"}
-{"message":"public/games/nidhogg/screen.html","label":"watch","level":"info"}
 {"message":"public/games/minefield3d/screen.html","label":"watch","level":"info"}
 {"message":"public/games/minefield3d/screen.html","label":"watch","level":"info"}
 {"message":"public/games/minefield3d/screen.html","label":"watch","level":"info"}
@@ -14,22 +13,5 @@
 {"message":"public/games/minefield3d/screen.html","label":"watch","level":"info"}
 {"message":"public/games/minefield3d/screen.html","label":"watch","level":"info"}
 {"message":"public/games/minefield3d/screen.html","label":"watch","level":"info"}
-{"message":"public/games/nidhogg/screen.html","label":"watch","level":"info"}
 {"message":"public/games/minefield3d/screen.html","label":"watch","level":"info"}
 {"message":"public/games/minefield3d/screen.html","label":"watch","level":"info"}
-{"message":"public/games/nidhogg/screen.html","label":"watch","level":"info"}
-{"message":"public/games/nidhogg/screen.html","label":"watch","level":"info"}
-{"message":"public/games/nidhogg/screen.html","label":"watch","level":"info"}
-{"message":"public/games/nidhogg/screen.html","label":"watch","level":"info"}
-{"message":"public/games/minefield3d/screen.html","label":"watch","level":"info"}
-{"message":"public/games/minefield3d/screen.html","label":"watch","level":"info"}
-{"message":"public/games/nidhogg/screen.html","label":"watch","level":"info"}
-{"message":"public/games/nidhogg/screen.html","label":"watch","level":"info"}
-{"message":"public/games/nidhogg/screen.html","label":"watch","level":"info"}
-{"message":"public/games/nidhogg/screen.html","label":"watch","level":"info"}
-{"message":"public/games/nidhogg/screen.html","label":"watch","level":"info"}
-{"message":"public/games/nidhogg/screen.html","label":"watch","level":"info"}
-{"message":"public/games/nidhogg/screen.html","label":"watch","level":"info"}
-{"message":"public/__ctrltest.html","label":"watch","level":"info"}
-{"message":"public/__ctrltest.html","label":"watch","level":"info"}
-{"message":"public/__ctrltest.html","label":"watch","level":"info"}

@@ -392,19 +392,47 @@ console.log("\nround end");
 /* ---- 10. footprints ---- */
 console.log("\nfootprints");
 {
+  // Prints were removed from the game. The trail cluttered the surface the sonar communicates
+  // through in the aisle, and marked nothing at all on a bare arena floor. What these guard is
+  // that nothing starts dropping them again, and that distance is still accumulated — the
+  // print bookkeeping and the odometer used to live in the same function.
   const r = begin(0, 31, 1);
   r.mines.fill(0);
   r.level = { ...r.level, killerDelay: 999 };
   r.players.get(1).x = 1.5;
   sim.setInput(r, 1, "up", true);
   run(r, 3);
-  ok("walking leaves prints", r.prints.length > 3, "(" + r.prints.length + ")");
-  ok("prints are attributed to the walker", r.prints.every((p) => p.id === 1));
+  ok("walking leaves no trail", r.prints.length === 0, "(" + r.prints.length + ")");
+  ok("but distance is still tracked", r.players.get(1).distance > 1,
+     "(" + r.players.get(1).distance.toFixed(1) + ")");
 
-  const before = r.prints.length;
   sim.clearInput(r, 1);
   run(r, sim.PRINT_LIFE + 2);
-  ok("prints expire", r.prints.length < before, "(" + before + " -> " + r.prints.length + ")");
+  ok("the print list stays empty", r.prints.length === 0, "(" + r.prints.length + ")");
+}
+
+/* ---- 10b. no sonar in an arena ---- */
+console.log("\nsurvival: no echolocation");
+{
+  const r = sim.createRound(0, 33, sim.MODE_SURVIVAL);
+  for (let i = 1; i <= 3; i++) sim.addPlayer(r, i);
+  sim.startRound(r);
+  run(r, 6);
+  ok("nobody emits a ping", [...r.players.values()].every((p) => p.ping === null));
+  ok("no ping events are raised", !r.events.some((e) => e.type === "ping"));
+
+  // And with no emitters, nothing on the floor is ever revealed.
+  let anyLit = 0;
+  for (let z = 0; z < r.rows; z++) {
+    for (let x = 0; x < r.cols; x++) if (sim.tileReveal(r, x, z) > 0) anyLit++;
+  }
+  ok("no tile is ever sonar-lit", anyLit === 0, "(" + anyLit + " lit)");
+
+  // Escape must be untouched by this.
+  const e = begin(0, 33, 2);
+  run(e, 3);
+  ok("escape still pings", [...e.players.values()].some((p) => p.ping !== null) ||
+     e.events.some((ev) => ev.type === "ping"));
 }
 
 /* ---- 11. input hygiene ---- */
