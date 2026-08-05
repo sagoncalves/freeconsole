@@ -215,7 +215,13 @@ const description =
          else is the stage. In a game the stage is the entire viewport. */
       #landing.hidden { display: none; }
       #session { display: none; }
-      #session.active { display: flex; flex-direction: column; height: 100dvh; }
+      /* `vh` first, `dvh` second: dvh is Chrome 108+, and Samsung Tizen TVs are frozen on
+         Chrome 94 (Tizen 5.5 ships SamsungBrowser 3.0 / Chrome 94). An unsupported unit
+         makes the browser DROP the whole declaration, so #session got no height, #stage
+         (flex:1) collapsed to zero, and #store (position:absolute; inset:0) rendered its
+         tiles correctly inside a zero-height box — a black screen with no error anywhere.
+         A TV viewport has no dynamic toolbar, so vh and dvh are identical there anyway. */
+      #session.active { display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
 
       /* Two levels of hiding.
          In a room (store or game): the site nav and footer go entirely — this is a console
