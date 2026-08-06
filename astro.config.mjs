@@ -15,26 +15,10 @@ import vercel from "@astrojs/vercel";
  *   - ./relay.js etc. are imported by relative URL from inlined page scripts
  *
  * `output: "static"` with `trailingSlash: false` keeps '/play.html' as '/play.html' so QR
- * codes and the ?room= query keep working. The prettier '/play' URL is layered on top by
- * rewrites in vercel.json rather than by Vercel's cleanUrls.
- *
- * That choice is deliberate and worth not undoing: cleanUrls is a site-wide boolean with no
- * path scoping, and it 308s every .html file in the output to an extensionless path. That
- * would catch '/games/<id>/screen.html' and 'controller.html', which are load-bearing -
- * iframes load them literally (public/session.js) and the Firestore catalog stores them as
- * data (screenUrl/controllerUrl). Rewrites give the pages in src/pages extensionless URLs
- * while leaving everything under public/ resolving exactly as written, and with no redirect
- * hop in either direction.
- *
- * One consequence to keep in mind when editing vercel.json's headers: they match the
- * *incoming* request path, before rewrites resolve. The no-cache rule keyed on a literal
- * .js|.mjs|.html extension therefore never fires for '/play', so the extensionless paths
- * are listed in a second rule of their own. Drop that rule and they fall back to Vercel's
- * default caching - the stale-ES-module trap where a browser holds one module while
- * fetching a fresh one that imports it, and the mismatched pair fails to link.
+ * codes and the ?room= query keep working.
  */
 export default defineConfig({
-  site: "https://freeconsole.vercel.app",
+  site: "https://freeconsole.app",
   output: "static",
   trailingSlash: "never",
   build: {

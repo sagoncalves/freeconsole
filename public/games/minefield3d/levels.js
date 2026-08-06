@@ -282,6 +282,11 @@ export const STAGES = [
     callTimeMin: 1.15,
     callTimeStep: 0.28,
 
+    // The board starts closing in from round four, alongside the clock rather than after it.
+    // Held back until the clock alone has stopped being enough is too late: measured that way
+    // half of all rounds still ran past five minutes.
+    shrinkAfter: 4,
+
     hangTime: 1.5,
     settleTime: 0.9,
     tileFall: 9,
@@ -296,6 +301,7 @@ export const STAGES = [
     callTime: 2.4,
     callTimeMin: 0.8,
     callTimeStep: 0.22,
+    shrinkAfter: 2,
     // A shorter hang as well, so there is less recovery between calls than there is call.
     hangTime: 1.1,
     settleTime: 0.6,

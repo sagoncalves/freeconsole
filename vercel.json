@@ -4,22 +4,9 @@
   "outputDirectory": "dist",
   "cleanUrls": false,
   "trailingSlash": false,
-  "rewrites": [
-    { "source": "/play", "destination": "/play.html" },
-    { "source": "/docs", "destination": "/docs.html" },
-    { "source": "/signup", "destination": "/signup.html" },
-    { "source": "/admin", "destination": "/admin.html" },
-    { "source": "/diag", "destination": "/diag.html" }
-  ],
   "headers": [
     {
       "source": "/:_path(.*\\.(?:js|mjs|html))",
-      "headers": [
-        { "key": "Cache-Control", "value": "no-cache, must-revalidate" }
-      ]
-    },
-    {
-      "source": "/(play|docs|signup|admin|diag)",
       "headers": [
         { "key": "Cache-Control", "value": "no-cache, must-revalidate" }
       ]

@@ -198,8 +198,8 @@
 <script src="/sdk.js"></script>
 <script type="module">
 import * as THREE from "/vendor/three.js?v=5";
-import * as sim from "/games/minefield3d/sim.js?v=11";
-import { LEVELS, getLevel, ARENAS, getArena, STAGES, getStage } from "/games/minefield3d/levels.js?v=7";
+import * as sim from "/games/minefield3d/sim.js?v=13";
+import { LEVELS, getLevel, ARENAS, getArena, STAGES, getStage } from "/games/minefield3d/levels.js?v=8";
 import {
   createScene, updateCamera, updateArenaCamera, updateCallCamera, updateFloor, setGateOpen, resize,
   updateCallTiles, updateCallBoard,
@@ -532,6 +532,25 @@ function loadLevel(index) {
 }
 
 /**
+ * Advance to the next round, from the end card.
+ *
+ * Escape advances on somebody getting out. Survival and calls advance on somebody being the
+ * last one standing — in a room where everyone died to the opening pack, the next level would
+ * just be a harder way to lose the same way, so a wipe replays the current one.
+ *
+ * Shared by the controller's "again" message and by the test harness, because a transition
+ * that only one of the two exercises is a transition that only one of them is known to work.
+ */
+function playAgain() {
+  if (round.phase !== "over") return false;
+  const won = mode === sim.MODE_ESCAPE ? round.escapedOrder.length > 0 : round.winner !== null;
+  const advance = won && levelIndex + 1 < modeLevels().length;
+  loadLevel(advance ? levelIndex + 1 : levelIndex);
+  maybeStart();
+  return true;
+}
+
+/**
  * Switch modes, from the master controller.
  *
  * Always drops back to the first level of the new mode: the two tables are different lengths
@@ -592,13 +611,7 @@ freeconsole.onMessage = function (deviceId, data) {
   if (data.t === "again" && round.phase === "over") {
     const master = safeCall(() => freeconsole.getMasterControllerDeviceId(), deviceId);
     if (master !== undefined && deviceId !== master) return;
-    // Escape advances on somebody getting out. Survival advances on somebody being the last
-    // one standing — in a room where everyone died to the opening pack, the next arena would
-    // just be a harder way to lose the same way.
-    const won = mode === sim.MODE_ESCAPE ? round.escapedOrder.length > 0 : round.winner !== null;
-    const advance = won && levelIndex + 1 < modeLevels().length;
-    loadLevel(advance ? levelIndex + 1 : levelIndex);
-    maybeStart();
+    playAgain();
   }
 };
 
@@ -1230,9 +1243,18 @@ if (TEST) {
   showOverlay(null);
 
   // Expose the live round so a driver script can assert on it. Test mode only.
+  //
+  // `__round` is re-assigned on every loadLevel, so the plain reference below goes stale the
+  // moment a round advances. `__live()` reads the current binding instead — without it a
+  // driver testing the turn transition asserts against the round that just ended and sees
+  // nothing happen.
   window.__round = round;
   window.__sim = sim;
   window.__ctx = () => ctx;
+  window.__live = () => round;
+  window.__mode = () => mode;
+  /** The exact path the master controller's "tap to continue" takes. */
+  window.__again = playAgain;
 
   const keys = {
     ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right",

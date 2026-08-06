@@ -929,7 +929,7 @@ const themeColor = "#05060d";
       if (!user || user.isAnonymous) {
         // Signing in is signup.html's whole job now, so hand off rather than duplicating the
         // form here. replace() so Back doesn't bounce between the two pages.
-        location.replace("/signup?next=/admin");
+        location.replace("/signup.html?next=/admin.html");
         return;
       }
 

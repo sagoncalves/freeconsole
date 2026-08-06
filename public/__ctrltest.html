@@ -1,0 +1,30 @@
+<!doctype html><meta charset=utf-8>
+<style>html,body{margin:0;background:#03040a}iframe{width:420px;height:900px;border:0;display:block}</style>
+<iframe id=f src="http://localhost:4321/games/minefield3d/controller.html"></iframe>
+<script>
+const P="console-sdk/2";
+const LOC="http://localhost:4321/games/minefield3d/controller.html";
+const f=document.getElementById("f");
+window.__sent=[];
+f.addEventListener("load",()=>{
+  const w=f.contentWindow;
+  const send=(type,payload)=>w.postMessage({protocol:P,type,payload},"*");
+  send("welcome",{device_id:1,code:"TEST",clockOffset:0,devices:[
+    {device_id:0,connected:true,location:LOC},
+    {device_id:1,connected:true,location:LOC,nickname:"Player 1"}
+  ]});
+  // Capture what the controller posts back to the "shell".
+  window.addEventListener("message",(e)=>{ if(e.data&&e.data.protocol===P) window.__sent.push(e.data); });
+  setTimeout(()=>{
+    // A RUNNING calls round, player alive — the exact state the user is in.
+    send("message",{from:0,data:{
+      phase:"running", mode:"calls", legs:{1:2}, states:{1:"alive"},
+      exitOpen:false, exitLeft:0, exitCapacity:0, sonarPeriod:1.6,
+      level:1, levelName:"X or O",
+      call:{round:2,symbol:"X",phase:"showing",seconds:3.2},
+      quality:{choice:"low",tier:"low",choices:["auto","high","medium","low"]},
+      modes:{current:"calls",choices:["escape","survival","calls"]}
+    }});
+  },500);
+});
+</script>

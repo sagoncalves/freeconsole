@@ -11,18 +11,14 @@
  * in by script (see account.js). It renders a reserved-width placeholder here so swapping
  * "Sign in" for an admin's email doesn't reflow the bar.
  */
-// Pages are built as /play.html etc and served at both that path and the extensionless
-// /play (rewrites in vercel.json). Links use the clean form; match() has to accept either,
-// because a visitor who followed an old QR code is on /play.html and still needs the right
-// tab lit. Astro's dev server only serves the .html form, so both arms are live in dev.
 const LINKS = [
   { href: "/", label: "Games", match: (p: string) => p === "/" || p === "/index.html" },
   // play.html owns a live room session and a game iframe; it binds its listeners at
   // module-evaluation time. Client-side routing
   // would hand them a fresh DOM without re-running that setup, so links into them force a
   // real page load via data-astro-reload.
-  { href: "/play", label: "Join a game", match: (p: string) => p === "/play" || p === "/play.html", reload: true },
-  { href: "/docs", label: "Build a game", match: (p: string) => p === "/docs" || p === "/docs.html" },
+  { href: "/play.html", label: "Join a game", match: (p: string) => p === "/play.html", reload: true },
+  { href: "/docs.html", label: "Build a game", match: (p: string) => p === "/docs.html" },
 ];
 
 // Astro.url.pathname is the build-time path for a static page, which is exactly the
@@ -54,12 +50,11 @@ const path = Astro.url.pathname;
   // the bar never repaints. The cost is that the server-rendered .active class is the one
   // from whichever page first rendered the nav, so it has to be recomputed after each swap.
   document.addEventListener("astro:page-load", () => {
-    // Strip the extension so /play and /play.html both match the clean href we render.
-    const path = location.pathname.replace(/\.html$/, "");
+    const path = location.pathname;
     for (const link of document.querySelectorAll("#nav .nav-links a[href]")) {
       const href = link.getAttribute("href");
       const active =
-        href === "/" ? path === "/" || path === "/index" : path === href;
+        href === "/" ? path === "/" || path === "/index.html" : path === href;
       link.classList.toggle("active", active);
     }
   });

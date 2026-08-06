@@ -14,7 +14,7 @@
  * end, closest to the camera) and walk toward the gate at z = 0. x is the narrow axis.
  */
 
-import { getLevel, getArena, getStage } from "/games/minefield3d/levels.js?v=7";
+import { getLevel, getArena, getStage } from "/games/minefield3d/levels.js?v=8";
 
 /* ------------------------------------------------------------------ constants */
 
@@ -246,6 +246,8 @@ export function createRound(levelIndex, seed, mode = MODE_ESCAPE) {
     tileState: null,
     /** How far each tile has fallen, in world units. Purely for the renderer. */
     tileDrop: null,
+    /** Tiles removed from the board for good, once the clock can tighten no further. */
+    tileRetired: null,
     /** Which symbol is currently called, or null before the first one. */
     called: null,
     /** Where we are in the call cycle, and how long is left in it. */
@@ -329,6 +331,7 @@ function generateStageField(round) {
   round.tileSym = new Uint8Array(n);
   round.tileState = new Uint8Array(n);      // all TILE_SOLID, which is 0
   round.tileDrop = new Float32Array(n);
+  round.tileRetired = new Uint8Array(n);
 
   // No gate here either, for the same reason as the arena.
   round.exitFrom = -1;
@@ -349,22 +352,146 @@ function generateStageField(round) {
  */
 function shuffleTiles(round) {
   const n = round.level.cols * round.level.rows;
-  const half = Math.floor(n / 2);
 
-  // Build an exactly-even bag, then shuffle it. This guarantees both symbols are always
-  // reachable, which is what makes the call fair.
-  for (let i = 0; i < n; i++) round.tileSym[i] = i < half ? SYM_X : SYM_O;
-  for (let i = n - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    const tmp = round.tileSym[i];
-    round.tileSym[i] = round.tileSym[j];
-    round.tileSym[j] = tmp;
+  // Retired tiles are gone for good and take no part in the deal — dealing them a symbol
+  // would advertise safe ground that is not there.
+  const live = [];
+  for (let i = 0; i < n; i++) if (!round.tileRetired[i]) live.push(i);
+
+  // Build a bag over the tiles that remain, then shuffle it.
+  //
+  // The invariant that matters is that BOTH symbols are always present: the screen calls one
+  // of the two at random, and a board dealt all-X has no answer to a call of O — everybody
+  // dies through no fault of their own. On a full board an even split gives that for free, but
+  // on a shrunken one it does not. An earlier version assigned the odd tile randomly and
+  // measured 69 unanswerable calls in 2689, all of them in the two-tile endgame where the
+  // rounding could put both tiles on the same symbol.
+  //
+  // So the first two tiles are forced to be one of each, and only the remainder is split.
+  // With the minimum board of two tiles that is the whole deal, and it is exactly right: one
+  // X, one O, and the call decides which one you needed to be standing on.
+  const half = Math.floor((live.length - 2) / 2);
+  for (let k = 0; k < live.length; k++) {
+    if (k === 0) round.tileSym[live[k]] = SYM_X;
+    else if (k === 1) round.tileSym[live[k]] = SYM_O;
+    else round.tileSym[live[k]] = (k - 2) < half ? SYM_X : SYM_O;
+  }
+  for (let k = live.length - 1; k > 0; k--) {
+    const j = Math.floor(Math.random() * (k + 1));
+    const tmp = round.tileSym[live[k]];
+    round.tileSym[live[k]] = round.tileSym[live[j]];
+    round.tileSym[live[j]] = tmp;
   }
 
+  // On a small board, force the two symbols apart.
+  //
+  // A shuffle alone will happily deal the last X and the last O side by side, and a player
+  // who stands on the seam between them then wins every call forever without reacting to
+  // anything — measured as rounds that never ended even after the board had shrunk all the
+  // way down. Swapping so the nearest pair are the furthest-apart tiles restores the run that
+  // is the whole point of the mode.
+  if (live.length <= 6) spreadSymbols(round, live);
+
   for (let i = 0; i < n; i++) {
+    if (round.tileRetired[i]) {
+      round.tileState[i] = TILE_GONE;
+      round.tileDrop[i] = round.level.crusherDepth;
+      continue;
+    }
     round.tileState[i] = TILE_SOLID;
     round.tileDrop[i] = 0;
   }
+}
+
+/**
+ * Re-assign symbols on a small board so the two groups sit as far apart as possible.
+ *
+ * Finds the widest-separated pair of live tiles and puts one symbol on each, then assigns
+ * every other tile to whichever of those two anchors it is nearer. On a two-tile board this is
+ * simply "X here, O over there"; on a four- or six-tile one it splits the board into two
+ * clusters at opposite ends, which is the same shape of problem at a larger scale.
+ */
+function spreadSymbols(round, live) {
+  const { cols } = round.level;
+  const xy = (i) => ({ x: (i % cols) + 0.5, z: Math.floor(i / cols) + 0.5 });
+
+  let a = live[0];
+  let b = live[live.length - 1];
+  let far = -1;
+  for (let i = 0; i < live.length; i++) {
+    for (let j = i + 1; j < live.length; j++) {
+      const p = xy(live[i]);
+      const q = xy(live[j]);
+      const d = Math.hypot(p.x - q.x, p.z - q.z);
+      if (d > far) { far = d; a = live[i]; b = live[j]; }
+    }
+  }
+
+  // Which anchor gets which symbol is random, or the same corner would always be X and the
+  // endgame would become something players could pre-position for.
+  const aSym = Math.random() < 0.5 ? SYM_X : SYM_O;
+  const bSym = aSym === SYM_X ? SYM_O : SYM_X;
+
+  const pa = xy(a);
+  const pb = xy(b);
+  for (const i of live) {
+    if (i === a) { round.tileSym[i] = aSym; continue; }
+    if (i === b) { round.tileSym[i] = bSym; continue; }
+    const p = xy(i);
+    const da = Math.hypot(p.x - pa.x, p.z - pa.z);
+    const db = Math.hypot(p.x - pb.x, p.z - pb.z);
+    round.tileSym[i] = da <= db ? aSym : bSym;
+  }
+}
+
+/**
+ * Permanently remove a tile or two from the board.
+ *
+ * The endgame escalation, once the clock can go no lower. Tiles are retired from the *edges*
+ * inward rather than at random: a hole punched in the middle of the grid is a hazard you have
+ * to path around under time pressure, which is a different and much fussier game, while a
+ * board that closes in from its edges simply gets smaller and keeps the mode about speed.
+ *
+ * The floor is two tiles — one of each symbol. It cannot go lower without the deal becoming
+ * impossible, and it must not stop higher: at four tiles the board stalls at two safe squares
+ * within a step of each other and the game becomes unloseable, which measured as a permanent
+ * stalemate from about call fifteen onward. At two, surviving means being on the right one of
+ * a pair when the clock stops, which is still a choice rather than a coin flip — you pick
+ * where to wait, and the run between them is the whole test.
+ */
+/** How many tiles are still part of the board. */
+function liveTiles(round) {
+  if (!round.tileRetired) return 0;
+  let n = 0;
+  for (let i = 0; i < round.tileRetired.length; i++) if (!round.tileRetired[i]) n++;
+  return n;
+}
+
+function retireTiles(round) {
+  const { cols, rows } = round.level;
+  const n = cols * rows;
+
+  const liveCount = liveTiles(round);
+  if (liveCount <= 2) return;
+
+  // Rank the survivors by how far out they sit, and take from the outside in.
+  const cx = (cols - 1) / 2;
+  const cz = (rows - 1) / 2;
+  const candidates = [];
+  for (let z = 0; z < rows; z++) {
+    for (let x = 0; x < cols; x++) {
+      const i = z * cols + x;
+      if (round.tileRetired[i]) continue;
+      // A jitter on the distance so two runs never retire the identical sequence.
+      candidates.push({ i, d: Math.hypot(x - cx, z - cz) + Math.random() * 0.4 });
+    }
+  }
+  candidates.sort((a, b) => b.d - a.d);
+
+  const take = Math.min(candidates.length - 2, 2);
+  for (let k = 0; k < take; k++) round.tileRetired[candidates[k].i] = 1;
+
+  round.events.push({ type: "retire", left: liveCount - take });
 }
 
 /**
@@ -525,6 +652,9 @@ export function startRound(round) {
     round.callRound = 0;
     round.callTime = round.level.callTime;
     round.called = null;
+    // A restart gets the whole board back — retirement is progress within one round, not a
+    // permanent state of the stage.
+    round.tileRetired.fill(0);
     shuffleTiles(round);
     // Open on the settle window rather than on a live call, so the first thing players get is
     // a moment to look at the board before anything is demanded of them.
@@ -1048,12 +1178,38 @@ function stepCalls(round, dt) {
   }
 
   // CALL_HANGING → the floor comes back, freshly shuffled, and the clock tightens.
-  shuffleTiles(round);
-  round.called = null;
-  round.callTime = Math.max(level.callTimeMin, round.callTime - level.callTimeStep);
+  // The clock keeps tightening past its nominal floor once the board is down to its last few
+  // tiles. callTimeMin is tuned for a full 6×4 grid, where it is already brutal; on two tiles
+  // a player simply stands between them and makes every call, and a perfect player then never
+  // loses — which measured as rounds that ran indefinitely even after the board had shrunk all
+  // the way down. Past that point the only dial left is time.
+  const floor = liveTiles(round) <= 4 ? level.callTimeMin * 0.55 : level.callTimeMin;
+  round.callTime = Math.max(floor, round.callTime - level.callTimeStep);
   round.callPhase = CALL_RISING;
   round.callLeft = level.settleTime;
   round.events.push({ type: "rise", callTime: round.callTime });
+
+  // The board starts shrinking well before the clock bottoms out, and the two escalations
+  // then run together.
+  //
+  // Without this the mode never ends. A 6×4 grid is small enough that a competent player
+  // crosses it inside even the minimum time, so once the clock floors out every round is
+  // identical and survivable forever. Headless runs bore that out brutally: 25 of 25 rounds
+  // ran past five minutes and 69–99 calls with nobody ever dying, on every stage and at every
+  // player count. Waiting for the clock floor before retiring tiles only halved it.
+  //
+  // Retiring tiles is the escalation that actually bites, because it attacks what makes the
+  // mode easy: how much safe ground there is to aim at. Fewer called tiles means further to
+  // run and more people converging on the same square.
+  //
+  // Retirement happens BEFORE the deal, not after. Dealt first, the symbols are laid out over
+  // a board that is about to lose two tiles, and retiring them can take away every tile of one
+  // symbol — measured as exactly one unanswerable call per game, always on the step down to
+  // the two-tile endgame. Shrinking first means shuffleTiles only ever deals over ground that
+  // is really there.
+  if (round.callRound >= level.shrinkAfter) retireTiles(round);
+  shuffleTiles(round);
+  round.called = null;
 }
 
 /** Move falling tiles down and returning tiles back up. Presentation only. */
