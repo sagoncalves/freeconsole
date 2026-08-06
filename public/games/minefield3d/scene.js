@@ -1293,8 +1293,28 @@ export function posePlayer(mesh, p, states, dt) {
   const { body, group, lamp, baseScale } = mesh;
   const s = baseScale;
 
-  group.position.set(p.x, 0, p.z);
+  // A player dropped through the floor keeps falling. Their y is the only thing that moves —
+  // x and z are frozen at the tile that vanished, because there is nothing to walk on.
+  const fell = states.fallDepth ? states.fallDepth(p) : 0;
+  group.position.set(p.x, -fell, p.z);
   group.rotation.y = p.heading;
+
+  if (fell > 0) {
+    // Tumbling, upright-ish, lamp out. Deliberately NOT the flat-on-the-ground death pose
+    // below: that one is a body lying on a floor, and this one has no floor to lie on.
+    mesh.spin = (mesh.spin || 0) + (dt || 0) * 4.5;
+    body.rotation.z = Math.sin(mesh.spin) * 0.5;
+    body.rotation.x = mesh.spin * 0.8;
+    body.position.set(0, mesh.isModel ? 0 : 0.62, 0);
+    body.scale.setScalar(s);
+    lamp.intensity = 0;
+    if (mesh.glow) mesh.glow.material.opacity = 0;
+    if (mesh.actions) {
+      if (mesh.actions.idle) mesh.actions.idle.setEffectiveWeight(0);
+      if (mesh.actions.running) mesh.actions.running.setEffectiveWeight(0);
+    }
+    return;
+  }
 
   if (p.state === states.DEAD) {
     // Flat on the ground, lamp out. Toppling sideways swings the body out along x from the

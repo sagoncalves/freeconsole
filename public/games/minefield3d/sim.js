@@ -398,8 +398,15 @@ function shuffleTiles(round) {
       round.tileDrop[i] = round.level.crusherDepth;
       continue;
     }
-    round.tileState[i] = TILE_SOLID;
-    round.tileDrop[i] = 0;
+    // Tiles come back UP from the pit rather than blinking into place.
+    //
+    // Snapping them straight to SOLID at zero depth was the original behaviour and it read as
+    // the board flashing to a new state — the drop had weight and the return had none, so the
+    // cycle felt like an edit rather than like machinery. Starting them deep and letting
+    // animateTiles carry them home makes the floor rebuild itself in front of the players,
+    // which is also the window in which they read the fresh symbols.
+    round.tileState[i] = TILE_RISING;
+    round.tileDrop[i] = round.level.crusherDepth;
   }
 }
 
@@ -549,6 +556,16 @@ export function addPlayer(round, deviceId) {
 
     /** Survival: when a saw last bit this player, so one brush cannot strip both legs. */
     sawHitAt: -99,
+
+    /**
+     * Calls: how far this player has fallen through the floor, in world units.
+     *
+     * A player dropped into the crusher is DEAD the instant the tile goes, because the rules
+     * have to resolve at the moment of the call — but they are still visibly in the air, and
+     * the round must not be declared over while somebody is mid-fall. Null means "not falling",
+     * which is every player in every other mode.
+     */
+    fallY: null,
     /** Survival: seconds this player lasted. Frozen at the moment they go down. */
     survivedFor: 0,
 
@@ -708,6 +725,7 @@ function resetPlayer(round, p, index, total) {
   p.pingCount = 0;
   p.sawHitAt = -99;
   p.survivedFor = 0;
+  p.fallY = null;
 
   // Stagger the first ping across the roster so the aisle does not strobe in unison. Each
   // player then runs free on their own period.
@@ -1130,6 +1148,7 @@ function stepCalls(round, dt) {
   // Tiles that are on their way down or back up keep moving regardless of the phase clock —
   // their motion is what the renderer draws, and it must not stall between phases.
   animateTiles(round, dt);
+  animateFallers(round, dt);
 
   round.callLeft -= dt;
   if (round.callLeft > 0) return;
@@ -1212,6 +1231,38 @@ function stepCalls(round, dt) {
   round.called = null;
 }
 
+/**
+ * Drop anybody who lost their footing, until they are out of sight in the crusher.
+ *
+ * Accelerating rather than linear, because a body and a tile falling at the same constant rate
+ * read as one object — the player has to visibly come away from the platform they were
+ * standing on. They keep falling a little past the crusher so nothing is left hanging in the
+ * pit at the bottom of frame.
+ */
+function animateFallers(round, dt) {
+  const floor = round.level.crusherDepth + 3;
+  for (const p of round.players.values()) {
+    if (p.fallY === null || p.fallY >= floor) continue;
+    // v = g*t with g pinned to the tile fall rate, so the two are obviously the same gravity.
+    p.fallVel = (p.fallVel || 0) + round.level.tileFall * 1.6 * dt;
+    p.fallY = Math.min(floor, p.fallY + p.fallVel * dt);
+  }
+}
+
+/** Is anybody still in the air? The round cannot end while there is. */
+function anyoneFalling(round) {
+  const floor = round.level.crusherDepth + 3;
+  for (const p of round.players.values()) {
+    if (p.fallY !== null && p.fallY < floor) return true;
+  }
+  return false;
+}
+
+/** How far this player has fallen through the floor, or 0. Read by the renderer. */
+export function fallDepth(p) {
+  return p.fallY === null ? 0 : p.fallY;
+}
+
 /** Move falling tiles down and returning tiles back up. Presentation only. */
 function animateTiles(round, dt) {
   const { level } = round;
@@ -1254,7 +1305,13 @@ function checkFooting(round) {
     }
 
     const state = round.tileState[tz * cols + tx];
-    if (state === TILE_FALLING || state === TILE_GONE) down(round, p, "fell");
+    if (state === TILE_FALLING || state === TILE_GONE) {
+      // Begin the drop rather than merely dying. The rules resolve now — this player is out —
+      // but they are still in the air, and both the renderer and checkOver read fallY to know
+      // that the round is not finished being watched yet.
+      p.fallY = 0;
+      down(round, p, "fell");
+    }
   }
 }
 
@@ -1494,6 +1551,11 @@ function checkOver(round) {
   if (round.mode === MODE_SURVIVAL || round.mode === MODE_CALLS) {
     const contested = countContenders(round) > 1;
     if (stillPlaying > (contested ? 1 : 0)) return;
+
+    // Let the last drop finish before calling it. The rules resolved the moment the tile went,
+    // but ending here would cut to the results card with a body still in mid-air — the fall
+    // is how a player learns they lost, and it has to be allowed to land.
+    if (round.mode === MODE_CALLS && anyoneFalling(round)) return;
 
     round.phase = "over";
     round.lastStand = round.t;

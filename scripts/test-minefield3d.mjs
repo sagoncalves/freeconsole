@@ -890,10 +890,26 @@ console.log("\ncalls: the board");
   ok("calls uses the stage table", r0.level.name === STAGES[0].name, "(" + r0.level.name + ")");
   ok("the board is 6 by 4", r0.cols === 6 && r0.rows === 4, "(" + r0.cols + "x" + r0.rows + ")");
 
-  // Every tile carries a symbol and starts solid.
+  // The board opens by rising into place rather than appearing — tiles come up out of the pit
+  // so the floor visibly rebuilds itself, which is also the window players read the new
+  // symbols in. They are RISING at t=0 and SOLID a fraction of a second later.
   const n = r0.cols * r0.rows;
-  ok("every tile is solid at the start",
-     [...r0.tileState].every((s) => s === sim.TILE_SOLID));
+  ok("the board rises into place",
+     [...r0.tileState].every((s) => s === sim.TILE_RISING));
+  ok("and starts from the pit",
+     [...r0.tileDrop].every((d) => d > 0));
+
+  {
+    const rr = beginC(0, 5, 1);
+    run(rr, rr.level.crusherDepth / rr.level.tileFall + 0.1);
+    ok("the risen board becomes solid",
+       [...rr.tileState].every((s) => s === sim.TILE_SOLID),
+       "(" + [...new Set(rr.tileState)].join(",") + ")");
+    // And it must finish rising before the call it belongs to is made, or players are asked
+    // to stand on ground that has not arrived.
+    ok("it lands before the first call", rr.called === null || rr.callPhase !== sim.CALL_SHOWING ||
+       [...rr.tileState].every((s) => s === sim.TILE_SOLID));
+  }
 
   // The deal must be even, or calling the minority is a massacre nobody could avoid.
   let xs = 0;
@@ -1002,6 +1018,38 @@ console.log("\ncalls: the board");
   // matters: an unbounded clock would eventually be shorter than a frame.
   ok("the call time is floored", r5.callTime >= r5.level.callTimeMin * 0.5,
      "(" + r5.callTime.toFixed(2) + " vs min " + r5.level.callTimeMin + ")");
+
+  // A dropped player must visibly FALL, and the round must not end while they are in the air.
+  {
+    const rf = beginC(0, 61, 1);
+    const fp = rf.players.get(1);
+    // Stand still: they get dropped the first time their tile is not the called one.
+    let g = 0;
+    while (fp.state === sim.ALIVE && g++ < 60 * 30) { sim.step(rf, DT); rf.events.length = 0; }
+    ok("a dropped player starts falling", sim.fallDepth(fp) >= 0,
+       "(depth " + sim.fallDepth(fp).toFixed(2) + ")");
+
+    const atDeath = sim.fallDepth(fp);
+    // The round must still be running while they are in the air — the fall is how a player
+    // learns they lost, and cutting to the results card mid-drop erases it.
+    ok("the round is not over mid-fall", rf.phase === "running", "(" + rf.phase + ")");
+
+    let g2 = 0;
+    while (rf.phase === "running" && g2++ < 60 * 10) { sim.step(rf, DT); rf.events.length = 0; }
+    ok("they fall further than they started", sim.fallDepth(fp) > atDeath,
+       "(" + atDeath.toFixed(2) + " -> " + sim.fallDepth(fp).toFixed(2) + ")");
+    ok("they fall past the crusher", sim.fallDepth(fp) >= rf.level.crusherDepth,
+       "(" + sim.fallDepth(fp).toFixed(2) + " vs " + rf.level.crusherDepth + ")");
+    ok("and the round then ends", rf.phase === "over", "(" + rf.phase + ")");
+    ok("the fall took real time", g2 > 30, "(" + g2 + " frames)");
+  }
+
+  // Nobody falls in the other modes — fallDepth must stay zero there.
+  {
+    const re = begin(0, 63, 1);
+    run(re, 2);
+    ok("escape players never fall", sim.fallDepth(re.players.get(1)) === 0);
+  }
 
   // Walking off the edge of the platform is fatal — there is nothing out there.
   const r6 = beginC(0, 29, 1);
