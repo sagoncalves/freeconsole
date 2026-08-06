@@ -1,0 +1,34 @@
+<!doctype html><meta charset=utf-8>
+<style>html,body{margin:0;background:#03040a;display:flex}
+#scr{width:1060px;height:620px;border:0}#ctl{width:420px;height:880px;border:0}</style>
+<iframe id=scr src="http://localhost:4321/games/minefield3d/screen.html?test=1&mode=calls"></iframe>
+<iframe id=ctl src="http://localhost:4321/games/minefield3d/controller.html"></iframe>
+<script>
+// A minimal stand-in for the console shell: hands out device ids and relays messages.
+const P="console-sdk/2";
+const LOC={scr:"http://localhost:4321/games/minefield3d/screen.html",
+           ctl:"http://localhost:4321/games/minefield3d/controller.html"};
+const scr=document.getElementById("scr"), ctl=document.getElementById("ctl");
+const devices=[{device_id:0,connected:true,location:LOC.scr},
+               {device_id:1,connected:true,location:LOC.ctl,nickname:"Player 1"}];
+window.__log=[];
+let ready=0;
+function welcome(frame,device_id){
+  frame.contentWindow.postMessage({protocol:P,type:"welcome",
+    payload:{device_id,code:"CHAIN",clockOffset:0,devices}},"*");
+}
+window.addEventListener("message",(e)=>{
+  const d=e.data; if(!d||d.protocol!==P) return;
+  if(d.type==="hello"){ if(++ready<=2) return; }
+  if(d.type==="message"){
+    const from = e.source===scr.contentWindow ? 0 : 1;
+    window.__log.push(d.payload && d.payload.data);
+    const relay={protocol:P,type:"message",payload:{from,data:d.payload.data}};
+    const to=d.payload.to;
+    if(to===0||to===null||to===undefined) scr.contentWindow.postMessage(relay,"*");
+    if(to===1||to===null||to===undefined) ctl.contentWindow.postMessage(relay,"*");
+  }
+});
+scr.addEventListener("load",()=>setTimeout(()=>welcome(scr,0),300));
+ctl.addEventListener("load",()=>setTimeout(()=>welcome(ctl,1),600));
+</script>
