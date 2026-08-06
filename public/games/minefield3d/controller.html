@@ -626,6 +626,7 @@
   };
 
   var lastLegs = 2;
+  var lastState = null;
 
   freeconsole.onMessage = function (deviceId, data) {
     if (deviceId !== FreeConsole.SCREEN || !data) return;
@@ -660,11 +661,18 @@
       // none and nothing unlocks it until the next phase, so the pad is dead for the round.
       if (state !== undefined) pad.classList.toggle("locked", state !== "alive");
       if (typeof legs === "number") {
-        if (legs !== lastLegs || state !== "alive") setCondition(legs, state);
+        // `lastState` is checked alongside the legs because calls never takes a leg — you are
+        // on the board or you are gone. Keyed on legs alone, a calls player keeps the
+        // "Waiting for the aisle…" connect text for the entire round.
+        if (legs !== lastLegs || state !== lastState || state !== "alive") {
+          setCondition(legs, state);
+        }
         lastLegs = legs;
+        lastState = state;
       }
     } else if (data.phase === "briefing") {
       lastLegs = 2;
+      lastState = null;
       nextPingAt = 0;
       over = false;
       myState = "alive";

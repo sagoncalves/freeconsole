@@ -802,7 +802,7 @@ function buildCrusher(level) {
     color: 0xff2e88, transparent: true, opacity: 0.3,
     blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
   });
-  const pool = new THREE.Mesh(new THREE.PlaneGeometry(level.cols + 2, level.rows + 2), glowMat);
+  const pool = new THREE.Mesh(new THREE.PlaneGeometry(level.cols, level.rows), glowMat);
   pool.rotation.x = -Math.PI / 2;
   pool.position.set(cx, -depth, cz);
   group.add(pool);
@@ -813,7 +813,7 @@ function buildCrusher(level) {
   // Two counter-turning rollers, suggested rather than modelled.
   for (let r = 0; r < 2; r++) {
     const roller = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.55, 0.55, level.cols + 1, 8),
+      new THREE.CylinderGeometry(0.55, 0.55, level.cols - 0.4, 8),
       toothMat
     );
     roller.rotation.z = Math.PI / 2;
@@ -850,9 +850,10 @@ export function updateCallCamera(ctx, dt) {
   const boardTop = 5.4;
   const needV = (level.rows * Math.sin(tiltRad) + boardTop * Math.cos(tiltRad)) * 0.5;
   const needH = (level.cols * 0.5) / (camera.aspect || 16 / 9);
-  // A generous margin: the board is only six tiles wide, so fitting it tightly fills the frame
-  // with a grid the size of a postage stamp surrounded by nothing.
-  const dist = (Math.max(needV, needH) * 1.75) / Math.tan(fov / 2);
+  // 1.35 rather than a tighter fit: some air is wanted around the stage so it reads as a
+  // platform in a void, but at 1.75 the grid became a postage stamp in the middle of an
+  // otherwise empty frame and the symbols stopped being readable at a glance.
+  const dist = (Math.max(needV, needH) * 1.35) / Math.tan(fov / 2);
 
   const wantX = level.cols / 2;
   const wantY = Math.sin(tiltRad) * dist + 1.2;
