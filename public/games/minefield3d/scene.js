@@ -1100,20 +1100,32 @@ export function updateSniperCamera(camera, round, sim, dt) {
   };
 
   const scoped = round.scoped;
-  // Behind and above the muzzle when hip-firing; almost on it when scoped.
-  const back = scoped ? 0.35 : 2.6;
-  const up = scoped ? 0.06 : 1.0;
+  // Behind and above the muzzle, and offset to the shooter's shoulder.
+  //
+  // The lateral offset is what makes this a third-person view rather than a look down the
+  // inside of the barrel. Sat directly behind the rifle the barrel occludes the whole frame —
+  // measured, and it rendered as a pink smear across the entire right half of the screen.
+  // Scoping slides onto the sight line, which is what the zoom is for.
+  const back = scoped ? 1.1 : 4.2;
+  const up = scoped ? 0.18 : 1.5;
+  const side = scoped ? 0 : 1.0;
 
-  const wantX = from.x - dir.x * back;
+  // Right vector, perpendicular to the aim in the ground plane.
+  const rx = Math.cos(round.aimYaw);
+  const rz = -Math.sin(round.aimYaw);
+
+  const wantX = from.x - dir.x * back + rx * side;
   const wantY = from.y - dir.y * back + up;
-  const wantZ = from.z - dir.z * back;
+  const wantZ = from.z - dir.z * back + rz * side;
 
   const k = 1 - Math.exp(-dt * (scoped ? 14 : 9));
   camera.position.x += (wantX - camera.position.x) * k;
   camera.position.y += (wantY - camera.position.y) * k;
   camera.position.z += (wantZ - camera.position.z) * k;
 
-  camera.lookAt(from.x + dir.x * 20, from.y + dir.y * 20, from.z + dir.z * 20);
+  // Look well down the aim line rather than at the muzzle, so the barrel sits at the edge of
+  // frame pointing at what the camera is centred on.
+  camera.lookAt(from.x + dir.x * 30, from.y + dir.y * 30, from.z + dir.z * 30);
 
   const wantFov = scoped ? 14 : 58;
   if (Math.abs(camera.fov - wantFov) > 0.01) {
