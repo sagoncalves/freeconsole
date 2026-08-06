@@ -49,6 +49,21 @@
   #clock { min-width: 5.5ch; }
   #survivalHud.hot .val { color: var(--hot); }
 
+  /* Sniper: who is in the nest, whether the rifle is loaded, and how many are still running. */
+  #sniperHud { display: none; align-items: center; gap: 8px; }
+  #sniperHud.show { display: flex; }
+  #sniperHud .label {
+    font-family: var(--font-mono); font-size: 9px; letter-spacing: .14em;
+    text-transform: uppercase; color: var(--text-faint);
+  }
+  #sniperHud .val {
+    font-family: var(--font-mono); font-weight: 700;
+    font-size: clamp(11px,1.3vw,16px); color: var(--glow);
+  }
+  #rifleState { min-width: 7ch; }
+  /* Red while the bolt is out — the same tell the laser carries, for anyone watching the HUD. */
+  #sniperHud.reloading #rifleState { color: var(--hot); }
+
   /* Calls: the round counter, the called symbol, and the countdown. */
   #callsHud { display: none; align-items: center; gap: 8px; }
   #callsHud.show { display: flex; }
@@ -175,6 +190,14 @@
     <span class="label">Saws</span>
     <span id="sawVal" class="val">0</span>
   </div>
+  <div id="sniperHud">
+    <span class="label">Nest</span>
+    <span id="nestName" class="val">—</span>
+    <span class="label">Rifle</span>
+    <span id="rifleState" class="val">ready</span>
+    <span class="label">Runners</span>
+    <span id="runnersLeft" class="val">0</span>
+  </div>
   <div id="callsHud">
     <span class="label">Round</span>
     <span id="callRound" class="val">0</span>
@@ -198,16 +221,17 @@
 <script src="/sdk.js"></script>
 <script type="module">
 import * as THREE from "/vendor/three.js?v=5";
-import * as sim from "/games/minefield3d/sim.js?v=15";
-import { LEVELS, getLevel, ARENAS, getArena, STAGES, getStage } from "/games/minefield3d/levels.js?v=8";
+import * as sim from "/games/minefield3d/sim.js?v=16";
+import { LEVELS, getLevel, ARENAS, getArena, STAGES, getStage, RANGES, getRange } from "/games/minefield3d/levels.js?v=9";
 import {
   createScene, updateCamera, updateArenaCamera, updateCallCamera, updateFloor, setGateOpen, resize,
   updateCallTiles, updateCallBoard,
+  buildCover, updateSniper, updateSniperCamera, updateRangeCamera, renderSplit,
   buildMineField, updateMineField,
   createPlayerMesh, posePlayer, createKillerMesh, loadAvatar, setAvatar, createBloodSplat,
   setAvatarHeight, createRoombaMesh, updateRoombaMesh,
   createPingRing, updatePingRing, createBlast, stepBlast, createPrintMesh,
-} from "/games/minefield3d/scene.js?v=21";
+} from "/games/minefield3d/scene.js?v=22";
 import {
   TIERS, QUALITY_CHOICES, DEFAULT_QUALITY, resolveTier, makeFpsWatchdog,
 } from "/games/minefield3d/quality.js?v=5";
@@ -278,12 +302,14 @@ let mode = sim.MODES.includes(params.get("mode")) ? params.get("mode") : sim.MOD
 
 function isSurvival() { return mode === sim.MODE_SURVIVAL; }
 function isCalls() { return mode === sim.MODE_CALLS; }
+function isSniper() { return mode === sim.MODE_SNIPER; }
 
 /** The level table, the getter and the HUD noun for each mode, in one place. */
 const MODE_TABLE = {
   [sim.MODE_ESCAPE]: { list: () => LEVELS, get: getLevel, noun: "Level " },
   [sim.MODE_SURVIVAL]: { list: () => ARENAS, get: getArena, noun: "Arena " },
   [sim.MODE_CALLS]: { list: () => STAGES, get: getStage, noun: "Stage " },
+  [sim.MODE_SNIPER]: { list: () => RANGES, get: getRange, noun: "Range " },
 };
 
 function modeInfo() { return MODE_TABLE[mode] || MODE_TABLE[sim.MODE_ESCAPE]; }
@@ -301,6 +327,10 @@ const slotsEl = document.getElementById("slots");
 const gateEl = document.getElementById("gate");
 const survivalHud = document.getElementById("survivalHud");
 const callsHud = document.getElementById("callsHud");
+const sniperHud = document.getElementById("sniperHud");
+const nestNameEl = document.getElementById("nestName");
+const rifleStateEl = document.getElementById("rifleState");
+const runnersLeftEl = document.getElementById("runnersLeft");
 const callRoundEl = document.getElementById("callRound");
 const callSymEl = document.getElementById("callSym");
 const callClockEl = document.getElementById("callClock");
@@ -336,6 +366,7 @@ killer.group.visible = false;
 
 // Every mine as one instanced draw call. Rebuilt with the scene, since its capacity is the
 // aisle's tile count.
+let cover = null;
 let mineField = buildMineField(round, sim, Q);
 ctx.world.add(mineField.mesh);
 
@@ -353,6 +384,9 @@ const AVATAR_HEIGHTS = {
   [sim.MODE_ESCAPE]: 2.5,
   [sim.MODE_SURVIVAL]: 2.5,
   [sim.MODE_CALLS]: 0.95,
+  // The range is long and the runners are seen from a distance and through a scope. They need
+  // to be big enough to pick out at forty tiles, but not so big they dwarf 1.6-tile cover.
+  [sim.MODE_SNIPER]: 1.7,
 };
 
 function rebuildScene() {
@@ -384,6 +418,11 @@ function rebuildScene() {
   // Nothing to show in an arena, and updateMineField never runs there to correct the count.
   mineField.mesh.visible = mode === sim.MODE_ESCAPE;
   ctx.world.add(mineField.mesh);
+
+  // Cover is static for the whole round, so it is built once here rather than touched per
+  // frame — the only per-frame sniper work is the rifle and the laser.
+  cover = isSniper() ? buildCover(round, sim, Q) : null;
+  if (cover) ctx.world.add(cover.group);
 
   for (const id of round.players.keys()) ensureBody(id);
   setGateOpen(ctx, round.exitOpen);
@@ -532,6 +571,22 @@ function loadLevel(index) {
 }
 
 /**
+ * Seconds since the last aim message, for integrating the rifle's swing.
+ *
+ * Aim arrives as a stream of stick positions, not as deltas, so the turn has to be integrated
+ * against real elapsed time. Measured on the screen because it is the only clock both halves
+ * of the game agree on — and because a phone that lies about dt would otherwise be able to
+ * snap the rifle anywhere instantly.
+ */
+let lastAimAt = 0;
+function aimDt() {
+  const now = performance.now();
+  const dt = lastAimAt ? (now - lastAimAt) / 1000 : 1 / 30;
+  lastAimAt = now;
+  return dt;
+}
+
+/**
  * Advance to the next round, from the end card.
  *
  * Escape advances on somebody getting out. Survival and calls advance on somebody being the
@@ -545,7 +600,16 @@ function playAgain() {
   if (round.phase !== "over") return false;
   const won = mode === sim.MODE_ESCAPE ? round.escapedOrder.length > 0 : round.winner !== null;
   const advance = won && levelIndex + 1 < modeLevels().length;
+
+  // The nest is the prize. Whoever won this round takes it next round, which puts the best
+  // player behind the rifle and everyone else in front of it — the mode self-balances instead
+  // of needing a handicap. A round nobody won leaves the nest where it is.
+  const nextSniper = isSniper()
+    ? (round.escapedOrder.length ? round.escapedOrder[0] : round.sniperId)
+    : null;
+
   loadLevel(advance ? levelIndex + 1 : levelIndex);
+  if (isSniper() && nextSniper !== null) round.sniperId = nextSniper;
   maybeStart();
   return true;
 }
@@ -590,6 +654,20 @@ freeconsole.onMessage = function (deviceId, data) {
   if (data.t === "hold") { sim.setInput(round, deviceId, data.k, data.v); return; }
   if (data.t === "axis") { sim.setAxis(round, deviceId, data.x, data.z); return; }
   if (data.t === "release") { sim.clearInput(round, deviceId); return; }
+  // Sniper controls. Each is gated inside the sim on whether this device is actually in the
+  // nest, so a runner's phone sending "fire" does nothing.
+  if (data.t === "aim") {
+    // dt is taken from the screen's own clock rather than the phone's: a controller could
+    // otherwise claim an enormous delta and slew the rifle across the aisle in one message.
+    sim.aim(round, deviceId, data.x, data.z, Math.min(0.05, aimDt()));
+    return;
+  }
+  if (data.t === "scope") { sim.setScoped(round, deviceId, !!data.on); return; }
+  if (data.t === "fire") {
+    if (sim.fire(round, deviceId)) shake = Math.min(1, shake + 0.25);
+    return;
+  }
+
   if (data.t === "push") {
     // The sim validates everything — reach, arc, cooldown, whether this device is even alive.
     // The phone only ever says "I tapped push"; it never asserts who it hit.
@@ -644,6 +722,8 @@ function broadcastState(force) {
     // The called symbol goes out on change, not the countdown that follows it — the phone
     // runs its own clock off `callSeconds`, exactly as it does for the sonar period.
     calls ? round.callRound : 0, calls ? round.called : null, calls ? round.callPhase : "",
+    isSniper() ? round.sniperId : null, isSniper() ? round.reload > 0 : false,
+    round.escapedOrder.length,
   ]);
   if (!force && key === lastStateKey) return;
   lastStateKey = key;
@@ -666,6 +746,16 @@ function broadcastState(force) {
     // Calls: which symbol is up, how long it was given, and where the cycle is. The phone
     // shows the letter so a player can glance down instead of up, which matters most in the
     // back row where the wall screen is furthest away.
+    // Sniper: the phone needs to know whether it is holding a rifle or a pair of legs, since
+    // that changes its entire control surface.
+    // Whether anyone got through, so the sniper's phone can tell them if they held the aisle.
+    escapedAny: round.escapedOrder.length > 0,
+    sniper: isSniper() ? {
+      id: round.sniperId,
+      name: round.sniperId === null ? null : nameOf(round.sniperId),
+      reload: round.reload > 0,
+      scoped: round.scoped,
+    } : null,
     call: calls ? {
       round: round.callRound,
       symbol: round.called === null ? null : (round.called === sim.SYM_O ? "O" : "X"),
@@ -708,9 +798,12 @@ function renderSlots() {
   // survival the clock and the wave, calls the round and the countdown. Exactly one is visible.
   const survival = isSurvival();
   const calls = isCalls();
+  const sniper = isSniper();
+  // The range keeps the gate row — the runners are racing to it — alongside its own readout.
   gateEl.style.display = survival || calls ? "none" : "";
   survivalHud.classList.toggle("show", survival);
   callsHud.classList.toggle("show", calls);
+  sniperHud.classList.toggle("show", sniper);
   if (survival || calls) return;
 
   const cap = round.level.exitCapacity;
@@ -753,6 +846,22 @@ function renderCallsHud() {
     callClockEl.textContent = "—";
     callsHud.classList.remove("hot");
   }
+}
+
+/** The nest readout, ticked from the frame loop so the reload clock is continuous. */
+function renderSniperHud() {
+  if (!isSniper()) return;
+  nestNameEl.textContent = round.sniperId === null ? "—" : nameOf(round.sniperId);
+
+  const reloading = round.reload > 0;
+  rifleStateEl.textContent = reloading ? round.reload.toFixed(1) + "s" : "ready";
+  sniperHud.classList.toggle("reloading", reloading);
+
+  let left = 0;
+  for (const p of round.players.values()) {
+    if (p.state === sim.ALIVE && sim.isRunner(round, p)) left++;
+  }
+  runnersLeftEl.textContent = String(left);
 }
 
 function renderSurvivalHud() {
@@ -1057,6 +1166,11 @@ function frame(ts) {
     killer.group.visible = false;
     syncRoombas(dt);
     renderSurvivalHud();
+  } else if (isSniper()) {
+    // No crusher in the range — the sniper is the threat.
+    killer.group.visible = false;
+    updateSniper(ctx.nest, ctx.laser, round, sim, dt);
+    renderSniperHud();
   } else if (isCalls()) {
     // The aisle crusher is not the one under this stage; that one is scenery built into the
     // scene and needs no per-frame work.
@@ -1091,6 +1205,18 @@ function frame(ts) {
     // A fixed shot framing the grid and the wall screen together — both have to be readable at
     // once, since the whole mode is matching one to the other.
     updateCallCamera(ctx, dt);
+  } else if (isSniper()) {
+    // Two cameras: the aisle behind the runners, and the sniper's own over-the-shoulder view.
+    let lead = Infinity;
+    let tail = -Infinity;
+    for (const p of round.players.values()) {
+      if (p.state !== sim.ALIVE || !sim.isRunner(round, p)) continue;
+      if (p.z < lead) lead = p.z;
+      if (p.z > tail) tail = p.z;
+    }
+    if (!isFinite(lead)) { lead = round.rows - 2; tail = round.rows - 2; }
+    updateRangeCamera(ctx, lead, tail, dt);
+    if (ctx.sniperCam) updateSniperCamera(ctx.sniperCam, round, sim, dt);
   } else if (isSurvival()) {
     // A fixed shot of the whole room. There is no pack to follow and no direction that counts
     // as progress, so the camera's job is to hold every machine on screen at once.
@@ -1117,7 +1243,9 @@ function frame(ts) {
   }
 
   updateDread();
-  ctx.renderer.render(ctx.scene, ctx.camera);
+  // Sniper draws two viewports; every other mode is a single full-frame render. renderSplit
+  // handles both and always hands the renderer back unscissored.
+  renderSplit(ctx, canvas);
 }
 
 function updateDread() {

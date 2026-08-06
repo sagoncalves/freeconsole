@@ -46,6 +46,7 @@ const COL = {
 export function createScene(canvas, level, Q, mode = "escape") {
   const survival = mode === "survival";
   const calls = mode === "calls";
+  const sniper = mode === "sniper";
   const renderer = new THREE.WebGLRenderer({
     canvas,
     antialias: Q.antialias,
@@ -71,9 +72,14 @@ export function createScene(canvas, level, Q, mode = "escape") {
   // to read — and there is no hidden ground for it to protect.
   if (Q.fog && !calls) {
     const far = Math.max(level.cols, level.rows);
-    scene.fog = survival
-      ? new THREE.Fog(0x03040a, far * 0.9, far * 2.1)
-      : new THREE.Fog(0x03040a, level.rows * 0.35, level.rows * 0.95);
+    // Sniper fog is pushed right back. The whole mode is a long sight-line, and aisle-tuned
+    // fog would grey out the runners at exactly the range the rifle exists to reach — the
+    // sniper would be shooting at a wall of haze and the runners would be safe by accident.
+    scene.fog = sniper
+      ? new THREE.Fog(0x03040a, level.rows * 0.8, level.rows * 2.4)
+      : survival
+        ? new THREE.Fog(0x03040a, far * 0.9, far * 2.1)
+        : new THREE.Fog(0x03040a, level.rows * 0.35, level.rows * 0.95);
   }
 
   const camera = new THREE.PerspectiveCamera(52, 16 / 9, 0.1, 400);
@@ -84,7 +90,9 @@ export function createScene(canvas, level, Q, mode = "escape") {
   // Calls is the exception and needs real light: nothing is hidden there, and the entire mode
   // is reading a symbol on a tile and a symbol on a wall. At aisle ambient the stage renders as
   // a black rectangle with two glowing shapes floating on it.
-  scene.add(new THREE.AmbientLight(0x2a3550, calls ? 1.35 : 0.22));
+  // The range is lit too: cover is what hides a runner, not darkness. At aisle ambient the
+  // sniper would be firing at shapes they cannot resolve, which is a different game.
+  scene.add(new THREE.AmbientLight(0x2a3550, calls ? 1.35 : sniper ? 0.95 : 0.22));
 
   // A cold key light from above the gate, so there is a sense of "out there" to walk toward
   // without it illuminating the ground you are standing on.
@@ -139,13 +147,30 @@ export function createScene(canvas, level, Q, mode = "escape") {
   if (survival) {
     world.add(buildArenaWalls(level));
   } else if (!calls) {
+    // Sniper reuses the aisle's walls and gate wholesale: it IS an aisle with a gate, just
+    // with something in the rafters.
     world.add(buildWalls(level));
     world.add(gate.group);
   }
 
+  // The sniper's own view. A second camera on the same scene rather than a second scene: the
+  // two halves of the screen are looking at the same aisle from different places, and keeping
+  // one scene means a runner and their cover can never disagree between the views.
+  let sniperCam = null;
+  let nest = null;
+  let laser = null;
+  if (sniper) {
+    sniperCam = new THREE.PerspectiveCamera(58, 16 / 9, 0.1, 400);
+    nest = buildNest(level);
+    world.add(nest.group);
+    laser = buildLaser();
+    world.add(laser.group);
+  }
+
   return {
     renderer, scene, camera, world, floor, gate, level, Q,
-    mode, survival, calls, tiles, board,
+    mode, survival, calls, sniper, tiles, board,
+    sniperCam, nest, laser,
   };
 }
 
@@ -867,6 +892,256 @@ export function updateCallCamera(ctx, dt) {
   // Aim above the floor's midpoint so the board sits in the upper half of frame and the grid
   // in the lower — both fully readable, neither crowding the other.
   camera.lookAt(level.cols / 2, 1.5, level.rows / 2 - 1.0);
+}
+
+/* ------------------------------------------------------------------- sniper */
+
+/**
+ * The cover blocks runners hide behind.
+ *
+ * One InstancedMesh for the whole aisle. There can be sixty-odd of them and they never move,
+ * so instancing costs one draw call instead of sixty — the same reasoning as the mine field.
+ */
+export function buildCover(round, sim, Q) {
+  const { cols, rows } = round.level;
+  const h = round.level.coverHeight || 1.6;
+  const max = cols * rows;
+
+  const geo = new THREE.BoxGeometry(0.92, h, 0.92);
+  const mat = new THREE.MeshStandardMaterial({
+    color: 0x1b2438, roughness: 0.9, metalness: 0.15,
+  });
+  const mesh = new THREE.InstancedMesh(geo, mat, max);
+  mesh.count = 0;
+  if (Q.shadows) { mesh.castShadow = true; mesh.receiveShadow = true; }
+
+  // A hot rim along each block's top edge, so from the nest the cover reads as a skyline of
+  // things to shoot over rather than as flat shapes on a dark floor.
+  const rimGeo = new THREE.BoxGeometry(0.96, 0.045, 0.96);
+  const rimMat = new THREE.MeshBasicMaterial({
+    color: 0x35f0e0, transparent: true, opacity: 0.34, depthWrite: false,
+  });
+  const rim = new THREE.InstancedMesh(rimGeo, rimMat, max);
+  rim.count = 0;
+
+  const dummy = new THREE.Object3D();
+  let n = 0;
+  for (let z = 0; z < rows; z++) {
+    for (let x = 0; x < cols; x++) {
+      if (!sim.coverAt(round, x, z)) continue;
+      dummy.position.set(x + 0.5, h / 2, z + 0.5);
+      dummy.updateMatrix();
+      mesh.setMatrixAt(n, dummy.matrix);
+      dummy.position.set(x + 0.5, h, z + 0.5);
+      dummy.updateMatrix();
+      rim.setMatrixAt(n, dummy.matrix);
+      n++;
+    }
+  }
+  mesh.count = n;
+  rim.count = n;
+  mesh.instanceMatrix.needsUpdate = true;
+  rim.instanceMatrix.needsUpdate = true;
+
+  const group = new THREE.Group();
+  group.add(mesh);
+  group.add(rim);
+  return { group, mesh, rim, count: n };
+}
+
+/**
+ * The nest: a platform over the gate with the rifle on it.
+ *
+ * Built as scenery rather than as an avatar. The sniper is a player, but from the aisle they
+ * are a silhouette on a gantry — what the runners need to read is the *rifle's* bearing, and
+ * that is carried by the laser rather than by a body they can barely see at that range.
+ */
+export function buildNest(level) {
+  const group = new THREE.Group();
+  const cx = level.cols / 2;
+  const h = level.nestHeight || 6.5;
+
+  const strutMat = new THREE.MeshStandardMaterial({
+    color: 0x0d1018, roughness: 0.85, metalness: 0.5,
+  });
+  const deck = new THREE.Mesh(new THREE.BoxGeometry(level.cols * 0.5, 0.3, 2.2), strutMat);
+  deck.position.set(cx, h - 0.15, -1.2);
+  group.add(deck);
+
+  // Legs down to the floor either side of the gate, so the nest is visibly supported rather
+  // than floating over the doorway everyone is running at.
+  for (const side of [-1, 1]) {
+    const leg = new THREE.Mesh(new THREE.BoxGeometry(0.22, h, 0.22), strutMat);
+    leg.position.set(cx + side * level.cols * 0.22, h / 2, -1.2);
+    group.add(leg);
+  }
+
+  // A rail, and a lamp so the nest is legible from the far end of the aisle.
+  const railMat = new THREE.MeshBasicMaterial({
+    color: 0xff2e88, transparent: true, opacity: 0.55, depthWrite: false,
+  });
+  const rail = new THREE.Mesh(new THREE.BoxGeometry(level.cols * 0.5, 0.05, 0.06), railMat);
+  rail.position.set(cx, h + 0.42, -0.2);
+  group.add(rail);
+
+  const lamp = new THREE.PointLight(0xff2e88, 1.6, 10, 2);
+  lamp.position.set(cx, h + 0.6, -1.0);
+  group.add(lamp);
+
+  // The rifle itself, parented so the whole thing can be swung by the sim's aim.
+  const rifle = new THREE.Group();
+  const barrelMat = new THREE.MeshStandardMaterial({
+    color: 0x2a3550, roughness: 0.4, metalness: 0.85,
+  });
+  const barrel = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.1, 1.5), barrelMat);
+  barrel.position.z = 0.75;
+  rifle.add(barrel);
+  const stock = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.2, 0.5), barrelMat);
+  stock.position.z = -0.2;
+  rifle.add(stock);
+  rifle.position.set(cx, h + 0.35, -1.2);
+  group.add(rifle);
+
+  return { group, rifle, lamp, height: h };
+}
+
+/**
+ * The laser: a thin beam from the muzzle plus a dot where it lands.
+ *
+ * This is the mode's single most important piece of feedback, and it is deliberately visible
+ * to *everyone*. The sniper needs it to aim; the runners need it far more, because seeing the
+ * dot crawl toward their block is the only warning they get. Hiding it would make every death
+ * arbitrary.
+ */
+export function buildLaser() {
+  const group = new THREE.Group();
+
+  const beamMat = new THREE.MeshBasicMaterial({
+    color: 0xff2e88, transparent: true, opacity: 0.32,
+    blending: THREE.AdditiveBlending, depthWrite: false,
+  });
+  // A unit-length cylinder along +z, scaled to the trace distance each frame.
+  const beamGeo = new THREE.CylinderGeometry(0.018, 0.018, 1, 5);
+  beamGeo.rotateX(Math.PI / 2);
+  beamGeo.translate(0, 0, 0.5);
+  const beam = new THREE.Mesh(beamGeo, beamMat);
+  group.add(beam);
+
+  const dotMat = new THREE.MeshBasicMaterial({
+    color: 0xff5c9d, transparent: true, opacity: 0.95,
+    blending: THREE.AdditiveBlending, depthWrite: false,
+  });
+  const dot = new THREE.Mesh(new THREE.SphereGeometry(0.11, 10, 8), dotMat);
+  group.add(dot);
+
+  // A ring flat on the ground under the dot, which is what actually reads from a distance —
+  // a sphere at forty tiles is two pixels, but a ring on the floor keeps its shape.
+  const haloMat = new THREE.MeshBasicMaterial({
+    color: 0xff2e88, transparent: true, opacity: 0.5,
+    blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+  });
+  const halo = new THREE.Mesh(new THREE.RingGeometry(0.2, 0.34, 16), haloMat);
+  halo.rotation.x = -Math.PI / 2;
+  group.add(halo);
+
+  return { group, beam, beamMat, dot, dotMat, halo, haloMat };
+}
+
+/** Point the rifle and draw the beam from the muzzle to wherever the sim says it lands. */
+export function updateSniper(nest, laser, round, sim, dt) {
+  const from = sim.nestPos(round);
+
+  if (nest) {
+    nest.rifle.rotation.order = "YXZ";
+    nest.rifle.rotation.y = round.aimYaw;
+    nest.rifle.rotation.x = round.aimPitch;
+    // A red pulse on the nest lamp while the bolt is being worked, so the aisle can see the
+    // window it has to move in.
+    const reloading = round.reload > 0;
+    nest.lamp.intensity = reloading ? 0.5 : 1.6 + Math.sin(round.t * 6) * 0.3;
+  }
+
+  if (!laser) return;
+  const at = round.laser;
+  if (!at) { laser.group.visible = false; return; }
+  laser.group.visible = true;
+
+  laser.beam.position.set(from.x, from.y, from.z);
+  laser.beam.lookAt(at.x, at.y, at.z);
+  laser.beam.scale.set(1, 1, at.dist);
+
+  laser.dot.position.set(at.x, at.y + 0.02, at.z);
+  laser.halo.position.set(at.x, 0.04, at.z);
+  // The halo only means anything where the beam meets the ground.
+  laser.halo.visible = at.y < 0.4;
+
+  // Hot while loaded, dim while the bolt is out — the colour is the "can he shoot right now"
+  // tell, and it is the difference between breaking cover and staying put.
+  const ready = round.reload <= 0;
+  laser.dotMat.opacity = ready ? 0.95 : 0.4;
+  laser.beamMat.opacity = ready ? 0.32 : 0.12;
+  laser.haloMat.opacity = ready ? 0.5 : 0.18;
+}
+
+/**
+ * The sniper's own camera: third person, over the shoulder of the rifle.
+ *
+ * Pulled back and up from the muzzle so the nest and the rail are in shot, which is what makes
+ * it read as a person on a gantry rather than as a floating gun. Scoping pushes it forward and
+ * narrows the field of view — the same camera, so the transition is a move rather than a cut.
+ */
+export function updateSniperCamera(camera, round, sim, dt) {
+  const from = sim.nestPos(round);
+  const cy = Math.cos(round.aimPitch);
+  const dir = {
+    x: Math.sin(round.aimYaw) * cy,
+    y: Math.sin(round.aimPitch),
+    z: Math.cos(round.aimYaw) * cy,
+  };
+
+  const scoped = round.scoped;
+  // Behind and above the muzzle when hip-firing; almost on it when scoped.
+  const back = scoped ? 0.35 : 2.6;
+  const up = scoped ? 0.06 : 1.0;
+
+  const wantX = from.x - dir.x * back;
+  const wantY = from.y - dir.y * back + up;
+  const wantZ = from.z - dir.z * back;
+
+  const k = 1 - Math.exp(-dt * (scoped ? 14 : 9));
+  camera.position.x += (wantX - camera.position.x) * k;
+  camera.position.y += (wantY - camera.position.y) * k;
+  camera.position.z += (wantZ - camera.position.z) * k;
+
+  camera.lookAt(from.x + dir.x * 20, from.y + dir.y * 20, from.z + dir.z * 20);
+
+  const wantFov = scoped ? 14 : 58;
+  if (Math.abs(camera.fov - wantFov) > 0.01) {
+    camera.fov += (wantFov - camera.fov) * k;
+    camera.updateProjectionMatrix();
+  }
+}
+
+/**
+ * The aisle camera for sniper mode.
+ *
+ * Frames the runners from behind, looking toward the gate and the nest above it, so the half
+ * of the screen the runners are watching shows them what they are running at.
+ */
+export function updateRangeCamera(ctx, lead, tail, dt) {
+  const { camera, level } = ctx;
+  const spread = Math.max(0, tail - lead);
+
+  const wantZ = tail + 9;
+  const wantY = 8.5 + spread * 0.3;
+
+  const k = 1 - Math.exp(-dt * 2.2);
+  camera.position.x += (level.cols / 2 - camera.position.x) * k;
+  camera.position.y += (wantY - camera.position.y) * k;
+  camera.position.z += (wantZ - camera.position.z) * k;
+
+  // Look ahead of the pack toward the gate, and high enough that the nest is in frame.
+  camera.lookAt(level.cols / 2, 1.8, Math.max(0, (lead + tail) / 2 - 8));
 }
 
 /* --------------------------------------------------------------------- gate */
@@ -2043,6 +2318,53 @@ export function createPrintMesh(colorHex, crawl) {
   mesh.rotation.x = -Math.PI / 2;
   mesh.position.y = 0.025;
   return { mesh, mat };
+}
+
+/**
+ * Draw the aisle and the sniper's view side by side.
+ *
+ * Two scissored viewports over one scene, not two renderers. A second WebGL context would
+ * double the state and the memory for a scene that is identical in both halves — the only
+ * difference is where the camera is standing.
+ *
+ * The split is vertical (left/right) rather than horizontal because both views are wide: the
+ * aisle is a long corridor and the scope is a landscape shot, and stacking them would squash
+ * each into a letterbox where neither is readable.
+ */
+export function renderSplit(ctx, canvas) {
+  const { renderer, scene, camera, sniperCam } = ctx;
+  if (!sniperCam) { renderer.render(scene, camera); return; }
+
+  const rect = canvas.getBoundingClientRect();
+  const w = Math.max(1, Math.floor(rect.width));
+  const h = Math.max(1, Math.floor(rect.height));
+  const half = Math.floor(w / 2);
+
+  renderer.setScissorTest(true);
+
+  // Left: the aisle, from behind the runners.
+  renderer.setViewport(0, 0, half, h);
+  renderer.setScissor(0, 0, half, h);
+  if (camera.aspect !== half / h) {
+    camera.aspect = half / h;
+    camera.updateProjectionMatrix();
+  }
+  renderer.render(scene, camera);
+
+  // Right: down the barrel.
+  renderer.setViewport(half, 0, w - half, h);
+  renderer.setScissor(half, 0, w - half, h);
+  if (sniperCam.aspect !== (w - half) / h) {
+    sniperCam.aspect = (w - half) / h;
+    sniperCam.updateProjectionMatrix();
+  }
+  renderer.render(scene, sniperCam);
+
+  // Hand the renderer back in the state everything else expects, or the next mode's single
+  // full-frame render inherits a half-width scissor and draws into one side of the screen.
+  renderer.setScissorTest(false);
+  renderer.setViewport(0, 0, w, h);
+  renderer.setScissor(0, 0, w, h);
 }
 
 /** Resize the renderer and camera to the canvas's current size. */

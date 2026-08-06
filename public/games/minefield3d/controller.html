@@ -143,6 +143,33 @@
   #shove.cooling { opacity: .3; }
   #pad.locked #shove { display: none; }
 
+  /* The sniper's controls, in place of the shove button.
+     Fire is the big one under the right thumb; scope sits above it. Both carry `q` so the
+     stick handler skips them — the pad still steers, it just aims a rifle instead of legs. */
+  #fireBtn, #scopeBtn {
+    position: absolute; right: 14px; z-index: 3;
+    display: none;
+    border-radius: 50%;
+    font-family: var(--font-mono); font-weight: 700;
+    letter-spacing: .1em; text-transform: uppercase;
+    transition: transform .08s, background .12s, opacity .2s;
+  }
+  #fireBtn.show, #scopeBtn.show { display: block; }
+  #fireBtn {
+    bottom: 14px; width: 104px; height: 104px;
+    border: 2px solid var(--hot); background: rgba(255,46,136,.14);
+    color: var(--hot); font-size: 15px;
+  }
+  #fireBtn:active { transform: scale(.9); background: rgba(255,46,136,.32); }
+  /* Greyed while the bolt is out, so a dead trigger looks dead. */
+  #fireBtn.cooling { opacity: .28; }
+  #scopeBtn {
+    bottom: 132px; width: 76px; height: 76px;
+    border: 2px solid var(--glow); background: rgba(53,240,224,.1);
+    color: var(--glow); font-size: 12px;
+  }
+  #scopeBtn.on { background: rgba(53,240,224,.34); box-shadow: 0 0 18px rgba(53,240,224,.4); }
+
   #banner {
     position: fixed; inset: 0; z-index: 20;
     display: none; flex-direction: column; align-items: center; justify-content: center;
@@ -189,6 +216,8 @@
   <div id="base"></div>
   <div id="knob"></div>
   <button id="shove" class="q">push</button>
+  <button id="scopeBtn" class="q">scope</button>
+  <button id="fireBtn" class="q">fire</button>
   <div id="hint">drag to move · tap push to shove</div>
 </div>
 
@@ -222,6 +251,8 @@
   var callring = document.getElementById("callring");
   var calltext = document.getElementById("calltext");
   var shove = document.getElementById("shove");
+  var fireBtn = document.getElementById("fireBtn");
+  var scopeBtn = document.getElementById("scopeBtn");
   var admin = document.getElementById("admin");
   var qbtns = document.getElementById("qbtns");
   var mbtns = document.getElementById("mbtns");
@@ -232,6 +263,11 @@
   var survival = false;
   /** Calls mode: the phone mirrors the called symbol so the back row need not squint at the TV. */
   var calls = false;
+  /** Sniper mode, and whether THIS phone is the one holding the rifle. */
+  var sniperMode = false;
+  var iAmSniper = false;
+  var scopedOn = false;
+  var rifleReloading = false;
 
   // Paint the pad in this device's own colour, so a player's lamp on the TV and their phone
   // are unmistakably the same light.
@@ -260,6 +296,9 @@
   var originY = 0;
   var sentX = 0;
   var sentZ = 0;
+  /** The stick's current vector, held so the aim stream has something to resend. */
+  var heldX = 0;
+  var heldZ = 0;
 
   var baseEl = document.getElementById("base");
   var knobEl = document.getElementById("knob");
@@ -270,12 +309,45 @@
    * platform asks games not to send; a small threshold cuts the stream to the moments the
    * direction actually differs while staying far below anything a thumb can perceive.
    */
+  /**
+   * Send the stick.
+   *
+   * Same stick, two meanings: legs for a runner, rifle bearing for the sniper. Switching the
+   * message here rather than on the screen keeps the wire honest — a phone that is not the
+   * sniper never sends an aim at all, so there is nothing for the screen to have to reject.
+   *
+   * The aim stream is NOT change-gated the way axis is. A held stick means "keep turning",
+   * so the screen has to keep hearing it; suppressing unchanged values would stop the rifle
+   * dead whenever the thumb was steady, which is exactly when it is tracking someone.
+   */
+  function sendAim(x, z) {
+    freeconsole.message(FreeConsole.SCREEN, { t: "aim", x: x, z: z });
+  }
+
   function sendAxis(x, z) {
+    heldX = x;
+    heldZ = z;
+    // The sniper's stick aims rather than walks, and must be resent continuously.
+    if (iAmSniper) { sendAim(x, z); return; }
     if (Math.abs(x - sentX) < 0.04 && Math.abs(z - sentZ) < 0.04) return;
     sentX = x;
     sentZ = z;
     freeconsole.message(FreeConsole.SCREEN, { t: "axis", x: x, z: z });
   }
+
+  /**
+   * Keep the rifle turning while the stick is held.
+   *
+   * A runner's stick is edge-triggered — the screen remembers the last vector and keeps
+   * walking — but a bearing has to be integrated, so a held stick has to keep arriving. This
+   * resends the current stick at a fixed rate for as long as the sniper is holding it, and
+   * sends nothing at all otherwise.
+   */
+  var AIM_HZ = 30;
+  setInterval(function () {
+    if (!iAmSniper || over || stickId === null) return;
+    sendAim(heldX, heldZ);
+  }, 1000 / AIM_HZ);
 
   function placeStick(cx, cy, kx, ky) {
     var r = pad.getBoundingClientRect();
@@ -481,6 +553,69 @@
     doPush();
   });
 
+  /* ------------------------------------------------------------------ rifle */
+
+  /**
+   * Trigger and scope.
+   *
+   * Both are fire-and-forget: the screen owns the reload clock and whether a shot connects,
+   * and this only reflects what it is told. The local greying is the same idea as the shove
+   * button's — a trigger that will be ignored has to look like one.
+   */
+  function doFire() {
+    if (!iAmSniper || over || rifleReloading) return;
+    freeconsole.message(FreeConsole.SCREEN, { t: "fire" });
+    freeconsole.vibrate(35);
+  }
+
+  function toggleScope() {
+    if (!iAmSniper || over) return;
+    scopedOn = !scopedOn;
+    scopeBtn.classList.toggle("on", scopedOn);
+    freeconsole.message(FreeConsole.SCREEN, { t: "scope", on: scopedOn });
+    freeconsole.vibrate(12);
+  }
+
+  fireBtn.addEventListener("pointerdown", function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    doFire();
+  });
+  scopeBtn.addEventListener("pointerdown", function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    toggleScope();
+  });
+
+  /**
+   * Swap the phone between a runner's controls and the sniper's.
+   *
+   * The pad stays in both — it is the stick either way — but everything around it changes,
+   * and the shove button is hidden for the sniper because there is nobody in the nest to push.
+   */
+  function renderSniper(sn) {
+    sniperMode = !!sn;
+    var was = iAmSniper;
+    iAmSniper = false;
+    if (sn) {
+      try { iAmSniper = sn.id === freeconsole.getDeviceId(); } catch (err) { iAmSniper = false; }
+      rifleReloading = !!sn.reload;
+    }
+
+    fireBtn.classList.toggle("show", iAmSniper);
+    scopeBtn.classList.toggle("show", iAmSniper);
+    fireBtn.classList.toggle("cooling", rifleReloading);
+    // A runner in sniper mode still has legs but nothing to shove — the nest is out of reach.
+    shove.style.display = sniperMode ? "none" : "";
+
+    // Losing the rifle between rounds has to reset the scope, or the next sniper inherits a
+    // zoomed view they never asked for and cannot see the aisle through.
+    if (was && !iAmSniper) {
+      scopedOn = false;
+      scopeBtn.classList.remove("on");
+    }
+  }
+
   /* ---------------------------------------------------------------- ping clock */
 
   /**
@@ -545,8 +680,15 @@
     }
     if (legs >= 2) {
       conditionEl.classList.add("ok");
-      conditionEl.textContent = calls ? "On the board" : survival ? "Running" : "Walking";
-      subEl.textContent = calls ? "read the wall" : survival ? "keep moving" : "two legs";
+      if (iAmSniper) {
+        conditionEl.textContent = "In the nest";
+        subEl.textContent = rifleReloading ? "working the bolt" : "rifle ready";
+      } else {
+        conditionEl.textContent = calls ? "On the board"
+          : survival ? "Running" : sniperMode ? "Running" : "Walking";
+        subEl.textContent = calls ? "read the wall"
+          : survival ? "keep moving" : sniperMode ? "watch the laser" : "two legs";
+      }
     } else if (legs === 1) {
       conditionEl.classList.add("hurt");
       conditionEl.textContent = "Limping";
@@ -597,7 +739,7 @@
     calltext.textContent = call.symbol;
   }
 
-  var MODE_LABELS = { escape: "escape", survival: "saws", calls: "X or O" };
+  var MODE_LABELS = { escape: "escape", survival: "saws", calls: "X or O", sniper: "sniper" };
 
   /**
    * Mode buttons, master controller only — the same shape as the quality row.
@@ -697,6 +839,7 @@
       calls = data.mode === "calls";
     }
     renderCall(data.call);
+    renderSniper(data.sniper);
     if (typeof data.exitLeft === "number" && typeof data.exitCapacity === "number") {
       // Capacity 0 is how survival says "there is no gate" — renderGate then empties the row.
       renderGate(data.exitLeft, data.exitCapacity, data.exitOpen);
@@ -746,9 +889,19 @@
       // In survival there is no gate to get through, so "made it" means still being alive
       // when the round ended — the last one standing.
       // Escape is won by getting out; the other two by still being alive at the end.
-      var out = survival || calls ? state === "alive" : state === "escaped";
+      // The sniper's win condition is inverted: they win when NOBODY got out.
+      var out = iAmSniper ? !(data.escapedAny)
+        : survival || calls ? state === "alive" : state === "escaped";
       var big, sub;
-      if (calls) {
+      if (iAmSniper) {
+        big = out ? "Aisle cleared" : "They got past you";
+        sub = out ? "Nobody reached the gate. Tap to go again."
+                  : "Someone made it through. Tap to go again.";
+      } else if (sniperMode) {
+        big = out ? "You got out" : "Down";
+        sub = out ? "Past the nest and through the gate. Tap to go again."
+                  : "The rifle found you. Tap to go again.";
+      } else if (calls) {
         big = out ? "Last one standing" : "Dropped";
         sub = out ? "You read every call. Tap for a faster board."
                   : "The floor went out from under you. Tap to step back on.";

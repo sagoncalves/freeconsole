@@ -314,3 +314,87 @@ export const STAGES = [
 export function getStage(index) {
   return STAGES[Math.max(0, Math.min(STAGES.length - 1, index | 0))];
 }
+
+/* --------------------------------------------------------------------- range */
+
+/**
+ * Sniper mode — "The Range".
+ *
+ * One player per round sits in a nest above the far end of a long aisle with a rifle and a
+ * laser sight. Everybody else starts at the near end and has to reach the gate underneath
+ * them. The screen splits: the aisle on one side, the sniper's own view on the other.
+ *
+ * This is the first genuinely asymmetric mode, and the design follows from that. The two
+ * halves must be playable from a single TV, which is why the sniper gets a real viewport
+ * rather than a HUD overlay — you cannot aim at something you are watching from behind a
+ * runner's shoulder. And the sniper's advantage has to be *visible* to the people it is aimed
+ * at: the laser is not decoration, it is the tell that lets a runner know they are being
+ * tracked and break for the next block of cover.
+ *
+ * Cover is the whole level. A bare aisle is a shooting gallery, and a fully covered one is a
+ * walk, so what a Range tunes is the gap: enough blocks that there is always a next one to
+ * reach, spaced far enough apart that crossing between them is a decision.
+ *
+ * @typedef {object} Range
+ * @property {string} name
+ * @property {string} tagline
+ * @property {number} cols          Aisle width in tiles.
+ * @property {number} rows          Aisle length in tiles.
+ * @property {number} coverDensity  Fraction of eligible tiles that become cover blocks.
+ * @property {number} coverHeight   How tall a block stands, in tiles. Taller = safer behind.
+ * @property {number} safeRows      Rows at the runners' end kept clear, so nobody spawns boxed in.
+ * @property {number} nestHeight    How high above the floor the sniper sits.
+ * @property {number} reloadTime    Seconds between shots. The runners' entire window to move.
+ * @property {number} turnSpeed     Radians/second the sniper can swing at full stick.
+ * @property {number} zoomTurn      Multiplier on turnSpeed while scoped, so zoom trades speed.
+ * @property {number} exitWidth     Gate width in tiles, centred at the far end.
+ * @property {number} exitCapacity  How many runners get through before the gate shuts.
+ */
+
+/** @type {Range[]} */
+export const RANGES = [
+  {
+    name: "The Range",
+    tagline: "One of you is up there. The rest of you had better find a wall.",
+    // Wider than the escape aisle. A sniper firing down a narrow corridor has almost no angle
+    // to solve — every runner is on nearly the same bearing — and the runners have nowhere
+    // lateral to go. Width is what turns the shot into a choice for both sides.
+    cols: 15,
+    rows: 34,
+
+    // Roughly one block per two rows per column. Measured against the balance section of the
+    // test suite, which fails if a careful runner cannot cross or if a still one is safe.
+    coverDensity: 0.15,
+    coverHeight: 1.6,
+    safeRows: 3,
+
+    nestHeight: 6.5,
+    reloadTime: 2.0,
+    turnSpeed: 1.15,
+    zoomTurn: 0.38,
+
+    exitWidth: 4,
+    exitCapacity: 3,
+  },
+  {
+    name: "Long Shot",
+    tagline: "Further to run, and less to hide behind on the way.",
+    cols: 15,
+    rows: 42,
+    coverDensity: 0.105,
+    coverHeight: 1.5,
+    safeRows: 3,
+    nestHeight: 7.5,
+    // A faster bolt on a longer aisle: the crossing takes more shots to survive.
+    reloadTime: 1.7,
+    turnSpeed: 1.05,
+    zoomTurn: 0.34,
+    exitWidth: 3,
+    exitCapacity: 2,
+  },
+];
+
+/** Ranges are addressed by index exactly as every other table is. */
+export function getRange(index) {
+  return RANGES[Math.max(0, Math.min(RANGES.length - 1, index | 0))];
+}

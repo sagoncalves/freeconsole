@@ -14,7 +14,7 @@
  * end, closest to the camera) and walk toward the gate at z = 0. x is the narrow axis.
  */
 
-import { getLevel, getArena, getStage } from "/games/minefield3d/levels.js?v=8";
+import { getLevel, getArena, getStage, getRange } from "/games/minefield3d/levels.js?v=9";
 
 /* ------------------------------------------------------------------ constants */
 
@@ -55,7 +55,39 @@ export const MODE_SURVIVAL = "survival";
  */
 export const MODE_CALLS = "calls";
 
-export const MODES = [MODE_ESCAPE, MODE_SURVIVAL, MODE_CALLS];
+/**
+ * Sniper: one player per round in a nest above the far end, everyone else running the aisle
+ * beneath them toward a gate.
+ *
+ * The first asymmetric mode. Everything that makes it work follows from the sniper being a
+ * *player* rather than a hazard: the rifle is slow and single-shot so a miss is a real gift,
+ * the laser announces where they are looking so runners can read and break, and the nest is
+ * awarded to whoever won last round so the best player is the one everybody is hunting.
+ *
+ * Cover is the level. The runners' entire game is the gap between one block and the next.
+ */
+export const MODE_SNIPER = "sniper";
+
+export const MODES = [MODE_ESCAPE, MODE_SURVIVAL, MODE_CALLS, MODE_SNIPER];
+
+/* ------------------------------------------------------------------- sniper */
+
+/** How close a shot has to land to a runner to count as a hit, in tiles. */
+const SHOT_HIT_R = 0.55;
+
+/**
+ * How far above the floor the rifle sits relative to the nest, and how tall a runner is for
+ * line-of-sight purposes.
+ *
+ * The chest height matters more than it looks: cover is 1.5–1.6 tiles tall, so a shot is
+ * blocked when the line from the muzzle to a runner's chest passes through a block. Aiming at
+ * the feet would make every block useless and aiming at the head would make them all perfect.
+ */
+const MUZZLE_DROP = 0.35;
+const RUNNER_CHEST = 1.1;
+
+/** Steps taken along a shot when tracing it against cover. Finer than a block is wide. */
+const TRACE_STEP = 0.22;
 
 /* -------------------------------------------------------------------- calls */
 
@@ -233,6 +265,7 @@ const LEVEL_SOURCE = {
   [MODE_ESCAPE]: getLevel,
   [MODE_SURVIVAL]: getArena,
   [MODE_CALLS]: getStage,
+  [MODE_SNIPER]: getRange,
 };
 
 export function createRound(levelIndex, seed, mode = MODE_ESCAPE) {
@@ -294,6 +327,25 @@ export function createRound(levelIndex, seed, mode = MODE_ESCAPE) {
     callTime: 0,
     /** How many calls have been survived. This is the score. */
     callRound: 0,
+
+    /* sniper only — inert in the other three */
+
+    /** Which device is in the nest this round, or null before one is chosen. */
+    sniperId: null,
+    /** Where the rifle is looking. Yaw sweeps the aisle, pitch tips down it. */
+    aimYaw: 0,
+    aimPitch: 0,
+    /** Whether the scope is up. Zoomed aim is slower to swing — that is the trade. */
+    scoped: false,
+    /** Seconds until the next shot can be taken. */
+    reload: 0,
+    /** Where the laser currently lands, and whether it stops on cover or on a runner. */
+    laser: null,
+    /** Shots taken and runners dropped, for the end card. */
+    shots: 0,
+    hits: 0,
+    /** One byte per tile: 1 where a cover block stands. */
+    cover: null,
   };
 
   generateField(round);
@@ -314,6 +366,11 @@ function generateField(round) {
 
   if (round.mode === MODE_CALLS) {
     generateStageField(round);
+    return;
+  }
+
+  if (round.mode === MODE_SNIPER) {
+    generateRangeField(round, rng);
     return;
   }
 
@@ -354,6 +411,59 @@ function generateArenaField(round, rng) {
   round.exitFrom = -1;
   round.exitTo = -1;
   round.exitOpen = false;
+}
+
+/**
+ * Scatter cover down the aisle.
+ *
+ * Blocks are placed per-row with a guaranteed minimum rather than by a flat dice roll on every
+ * tile. A uniform roll produces runs of empty rows by chance, and an empty row on a sniper
+ * level is not "a bit harder" — it is a stretch of aisle with no answer, where a runner's only
+ * option is to walk into the open and hope. Every row past the spawn strip gets at least one
+ * block, so there is always a next thing to run to.
+ *
+ * The gate mouth and the spawn strip stay clear: cover in the doorway would let a runner camp
+ * the win, and cover on the spawn line would box people in before they had moved.
+ */
+function generateRangeField(round, rng) {
+  const { level } = round;
+  const { cols, rows } = level;
+  round.cover = new Uint8Array(cols * rows);
+
+  const halfGate = Math.floor(level.exitWidth / 2);
+  const centre = Math.floor(cols / 2);
+  round.exitFrom = Math.max(0, centre - halfGate);
+  round.exitTo = Math.min(cols - 1, round.exitFrom + level.exitWidth - 1);
+  round.exitOpen = true;
+
+  const perRow = Math.max(1, Math.round(cols * level.coverDensity));
+
+  for (let z = 0; z < rows; z++) {
+    if (z >= rows - level.safeRows) continue;   // spawn strip
+    if (z <= 1) continue;                       // gate mouth
+
+    // Lay this row's guaranteed blocks at distinct columns.
+    const taken = new Set();
+    for (let k = 0; k < perRow; k++) {
+      let x = Math.floor(rng() * cols);
+      // Nudge off a duplicate rather than rejecting, so density is exact rather than expected.
+      for (let tries = 0; tries < cols && taken.has(x); tries++) x = (x + 1) % cols;
+      taken.add(x);
+      round.cover[z * cols + x] = 1;
+    }
+  }
+
+  // Stagger: knock out any block with a block directly in front of AND behind it, so the
+  // aisle never grows a solid wall a runner cannot get around.
+  for (let z = 2; z < rows - level.safeRows - 1; z++) {
+    for (let x = 0; x < cols; x++) {
+      const i = z * cols + x;
+      if (!round.cover[i]) continue;
+      if (round.cover[(z - 1) * cols + x] && round.cover[(z + 1) * cols + x]) {
+        round.cover[i] = 0;
+      }
+    }
+  }
 }
 
 /**
@@ -788,13 +898,50 @@ export function startRound(round) {
   round.nextWaveAt = survival ? round.level.waveEvery : Infinity;
 
   const ids = [...round.players.keys()].sort((a, b) => a - b);
-  ids.forEach((id, i) => resetPlayer(round, round.players.get(id), i, ids.length));
+
+  // The nest is assigned BEFORE anyone is seated, because resetPlayer spreads the runners
+  // across the aisle and needs to know how many there actually are — counting the sniper
+  // among them leaves a gap on the spawn line where nobody is standing.
+  if (round.mode === MODE_SNIPER) {
+    if (!ids.length) round.sniperId = null;
+    else if (!round.players.has(round.sniperId)) round.sniperId = ids[0];
+  }
+
+  const runners = round.mode === MODE_SNIPER
+    ? ids.filter((id) => id !== round.sniperId)
+    : ids;
+  runners.forEach((id, i) => resetPlayer(round, round.players.get(id), i, runners.length));
+  // The sniper still needs their per-round fields cleared, just not a place in the line.
+  if (round.mode === MODE_SNIPER && round.players.has(round.sniperId)) {
+    resetPlayer(round, round.players.get(round.sniperId), 0, 1);
+  }
 
   if (survival) {
     // The opening pack. Spawned on the rim looking inward, so the first thing anybody sees is
     // the room closing on them — a saw that has to cross the floor to reach you reads as
     // hunting, where one that starts adjacent just reads as unfair.
     for (let i = 0; i < round.level.startRoombas; i++) spawnRoomba(round, i);
+  }
+
+  if (round.mode === MODE_SNIPER) {
+    round.aimYaw = 0;
+    // Start looking down the aisle rather than at the sky, so the first frame is useful.
+    round.aimPitch = -0.32;
+    round.scoped = false;
+    round.reload = 0;
+    round.laser = null;
+    round.shots = 0;
+    round.hits = 0;
+
+    const sniper = round.players.get(round.sniperId);
+    if (sniper) {
+      // The sniper is seated in the nest and takes no part in the footrace. They are marked
+      // ALIVE so the roster shows them playing, but nothing on the floor can reach them.
+      sniper.x = round.level.cols / 2;
+      sniper.z = -1.2;
+      sniper.state = ALIVE;
+      sniper.heading = 0;
+    }
   }
 
   if (round.mode === MODE_CALLS) {
@@ -858,6 +1005,8 @@ function resetPlayer(round, p, index, total) {
   p.sawHitAt = -99;
   p.survivedFor = 0;
   p.fallY = null;
+  p.lastX = p.x;
+  p.lastZ = p.z;
   p.downFor = 0;
   p.slideX = 0;
   p.slideZ = 0;
@@ -895,6 +1044,8 @@ export function step(round, dt) {
     for (const p of round.players.values()) {
       if (p.state === ALIVE) p.survivedFor = round.t;
     }
+  } else if (round.mode === MODE_SNIPER) {
+    stepSniper(round, dt);
   } else if (round.mode === MODE_CALLS) {
     stepCalls(round, dt);
     for (const p of round.players.values()) {
@@ -1271,6 +1422,175 @@ function down(round, p, cause) {
   kill(round, p, cause);
 }
 
+/* ------------------------------------------------------------ sniper: the nest */
+
+/** Where the rifle sits in world space. */
+export function nestPos(round) {
+  return {
+    x: round.level.cols / 2,
+    y: (round.level.nestHeight || 6.5) - MUZZLE_DROP,
+    z: -1.2,
+  };
+}
+
+/** Is this device the one in the nest? */
+export function isSniper(round, deviceId) {
+  return round.mode === MODE_SNIPER && round.sniperId === deviceId;
+}
+
+/** Whoever is in the nest, or null. */
+export function sniperOf(round) {
+  return round.sniperId === null ? null : round.players.get(round.sniperId) || null;
+}
+
+/** Is this player a runner — in the race rather than in the nest? */
+export function isRunner(round, p) {
+  if (round.mode !== MODE_SNIPER) return true;
+  return p.id !== round.sniperId;
+}
+
+/**
+ * Swing the rifle. The stick's x sweeps across the aisle, its z tips down it.
+ *
+ * Clamped so the sniper can never look behind themselves or at the sky: the nest overlooks
+ * one aisle and nothing else, and an unbounded pitch mostly produces a view of empty space
+ * that makes the split screen useless to watch.
+ */
+export function aim(round, deviceId, dx, dz, dt) {
+  if (round.phase !== "running" || !isSniper(round, deviceId)) return;
+  if (!Number.isFinite(dx) || !Number.isFinite(dz)) return;
+
+  const level = round.level;
+  // Scoping trades swing speed for precision, which is the whole reason to ever un-scope.
+  const rate = (level.turnSpeed || 1.15) * (round.scoped ? (level.zoomTurn || 0.38) : 1);
+
+  round.aimYaw += dx * rate * dt;
+  round.aimPitch -= dz * rate * dt;
+
+  // Yaw: enough to cover the aisle's width from the nest, and no further.
+  const halfSpan = Math.atan2(level.cols * 0.75, 6);
+  round.aimYaw = Math.max(-halfSpan, Math.min(halfSpan, round.aimYaw));
+  // Pitch: from steeply down at the gate mouth to nearly level at the far end.
+  round.aimPitch = Math.max(-1.15, Math.min(-0.05, round.aimPitch));
+}
+
+/** Raise or drop the scope. */
+export function setScoped(round, deviceId, on) {
+  if (!isSniper(round, deviceId)) return;
+  round.scoped = !!on;
+}
+
+/**
+ * Trace where the rifle is pointing, stopping at whatever it meets first.
+ *
+ * This is both the laser dot and the shot — deliberately the same function, so what a runner
+ * sees on the floor is exactly what a trigger pull would hit. Computing them separately is how
+ * you end up with a laser that lies.
+ *
+ * Marched in short steps rather than solved analytically because the aisle is a heightfield of
+ * unit blocks, and a march is simpler to reason about than a set of box intersections — at a
+ * step finer than a block it cannot tunnel through one.
+ */
+export function traceShot(round) {
+  const level = round.level;
+  const from = nestPos(round);
+
+  const cy = Math.cos(round.aimPitch);
+  const dir = {
+    x: Math.sin(round.aimYaw) * cy,
+    y: Math.sin(round.aimPitch),
+    z: Math.cos(round.aimYaw) * cy,
+  };
+
+  const maxDist = level.rows + 12;
+  for (let d = 0.5; d < maxDist; d += TRACE_STEP) {
+    const x = from.x + dir.x * d;
+    const y = from.y + dir.y * d;
+    const z = from.z + dir.z * d;
+
+    // Left the aisle sideways or out the back — the shot is gone.
+    if (x < -1 || x > level.cols + 1 || z > level.rows + 2) {
+      return { x, y: Math.max(0, y), z, dist: d, hit: null, blocked: false };
+    }
+
+    const tx = Math.floor(x);
+    const tz = Math.floor(z);
+    const inside = tx >= 0 && tz >= 0 && tx < level.cols && tz < level.rows;
+
+    // A runner, if the line passes through their chest.
+    for (const p of round.players.values()) {
+      if (p.state !== ALIVE || !isRunner(round, p)) continue;
+      const chest = RUNNER_CHEST * 0.5;
+      if (Math.abs(y - chest) > RUNNER_CHEST * 0.75) continue;
+      if (Math.hypot(p.x - x, p.z - z) <= SHOT_HIT_R) {
+        return { x, y, z, dist: d, hit: p.id, blocked: false };
+      }
+    }
+
+    // Cover, if the line is below the top of a block standing here.
+    if (inside && round.cover[tz * level.cols + tx] && y <= level.coverHeight) {
+      return { x, y, z, dist: d, hit: null, blocked: true };
+    }
+
+    // The floor.
+    if (y <= 0.02) {
+      return { x, y: 0, z, dist: d, hit: null, blocked: false };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Pull the trigger.
+ *
+ * The shot is resolved from the same trace the laser draws, so a runner who could see the dot
+ * on their own body was genuinely about to be hit. Everything is validated here — the phone
+ * says "I fired" and never says what it hit.
+ */
+export function fire(round, deviceId) {
+  if (round.phase !== "running" || !isSniper(round, deviceId)) return false;
+  if (round.reload > 0) return false;
+
+  round.reload = round.level.reloadTime || 2;
+  round.shots++;
+
+  const shot = traceShot(round);
+  const at = shot || { x: round.level.cols / 2, y: 0, z: round.level.rows, hit: null };
+
+  round.events.push({
+    type: "shot",
+    x: at.x, y: at.y, z: at.z,
+    hit: at.hit ?? null,
+  });
+
+  if (at.hit !== null && at.hit !== undefined) {
+    const target = round.players.get(at.hit);
+    if (target && target.state === ALIVE) {
+      round.hits++;
+      // One shot, one runner. Cover is the counter-play, not hit points.
+      target.survivedFor = round.t;
+      round.downOrder.push(target.id);
+      kill(round, target, "shot");
+    }
+    return true;
+  }
+  return false;
+}
+
+/** Advance the rifle: reload clock and the live laser dot. */
+function stepSniper(round, dt) {
+  if (round.reload > 0) round.reload = Math.max(0, round.reload - dt);
+  round.laser = traceShot(round);
+}
+
+/** Is there a cover block on this tile? Read by the renderer. */
+export function coverAt(round, tx, tz) {
+  if (!round.cover) return 0;
+  if (tx < 0 || tz < 0 || tx >= round.level.cols || tz >= round.level.rows) return 0;
+  return round.cover[tz * round.level.cols + tx];
+}
+
 /* -------------------------------------------------------------- calls: floor */
 
 /**
@@ -1486,6 +1806,9 @@ export function roombaCount(round) {
 
 function stepPlayer(round, p, dt) {
   if (p.state !== ALIVE) return;
+  // The sniper is bolted into the nest. Their stick aims the rifle instead of walking, which
+  // is handled by aim() straight off the wire.
+  if (round.mode === MODE_SNIPER && p.id === round.sniperId) { p.dx = 0; p.dz = 0; return; }
 
   if (p.pushCooldown > 0) p.pushCooldown -= dt;
 
@@ -1610,6 +1933,31 @@ function moveTo(round, p, x, z) {
 
   // The aisle walls. Only the gate at the far end is a way out.
   p.x = Math.max(0.32, Math.min(cols - 0.32, x));
+
+  // Cover is solid, and each axis is resolved separately.
+  //
+  // Per-axis is what makes running the aisle feel right: a runner pushing diagonally into the
+  // face of a block keeps the component that is clear and loses only the one that is blocked,
+  // so they slide along cover instead of sticking to it. Rejecting the whole move would pin
+  // anyone who brushed a corner, exactly when they are trying to get out of a laser.
+  if (round.mode === MODE_SNIPER && round.cover) {
+    const solid = (wx, wz) => {
+      const tx = Math.floor(wx);
+      const tz = Math.floor(wz);
+      if (tx < 0 || tz < 0 || tx >= cols || tz >= rows) return false;
+      return round.cover[tz * cols + tx] === 1;
+    };
+
+    const fromX = p.lastX ?? p.x;
+    const fromZ = p.lastZ ?? z;
+
+    // Try the x move on its own, then the z move on its own.
+    if (solid(p.x, fromZ)) p.x = fromX;
+    if (solid(p.x, z)) z = fromZ;
+
+    p.lastX = p.x;
+    p.lastZ = z;
+  }
 
   const tileX = Math.floor(p.x);
   const inGate = tileX >= round.exitFrom && tileX <= round.exitTo;
@@ -1737,9 +2085,13 @@ function checkOver(round) {
   if (round.phase !== "running") return;
   if (round.players.size === 0) return;
 
+  // The sniper is deliberately excluded from the head count. They are ALIVE for the whole
+  // round by construction — nothing on the floor can reach the nest — so counting them would
+  // mean a sniper round could never end, however cleanly the aisle was cleared.
   let stillPlaying = 0;
   let lastAlive = null;
   for (const p of round.players.values()) {
+    if (!isRunner(round, p)) continue;
     if (p.state === ALIVE) { stillPlaying++; lastAlive = p; }
   }
 
@@ -1789,7 +2141,10 @@ function checkOver(round) {
 /** Players who actually took part this round — spectators do not count toward "last standing". */
 function countContenders(round) {
   let n = 0;
-  for (const p of round.players.values()) if (p.state !== WAITING) n++;
+  for (const p of round.players.values()) {
+    if (p.state === WAITING || !isRunner(round, p)) continue;
+    n++;
+  }
   return n;
 }
 

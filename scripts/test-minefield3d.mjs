@@ -26,7 +26,7 @@ for (const f of ["sim.js", "levels.js"]) {
 }
 
 const sim = await import(pathToFileURL(join(OUT, "sim.js")).href);
-const { LEVELS, ARENAS, STAGES } = await import(pathToFileURL(join(OUT, "levels.js")).href);
+const { LEVELS, ARENAS, STAGES, RANGES } = await import(pathToFileURL(join(OUT, "levels.js")).href);
 
 let pass = 0, fail = 0;
 const ok = (name, cond, extra = "") => {
@@ -1024,10 +1024,16 @@ console.log("\ncalls: the board");
     const rf = beginC(0, 61, 1);
     const fp = rf.players.get(1);
     // Stand still: they get dropped the first time their tile is not the called one.
+    //
+    // The loop stops on the frame of death, when the fall has been STARTED but has not yet
+    // been advanced — so fallDepth is legitimately 0 here and `atDeath` must be read as the
+    // baseline rather than as evidence. Asserting a positive depth at this instant was a
+    // latent flaw: it only passed while unrelated tests happened to leave Math.random in a
+    // state that killed this player on a later frame.
     let g = 0;
     while (fp.state === sim.ALIVE && g++ < 60 * 30) { sim.step(rf, DT); rf.events.length = 0; }
-    ok("a dropped player starts falling", sim.fallDepth(fp) >= 0,
-       "(depth " + sim.fallDepth(fp).toFixed(2) + ")");
+    ok("a dropped player starts falling", fp.fallY !== null,
+       "(fallY " + fp.fallY + ")");
 
     const atDeath = sim.fallDepth(fp);
     // The round must still be running while they are in the air — the fall is how a player
@@ -1321,6 +1327,220 @@ console.log("\npushing");
     const idle = pair(sim.MODE_CALLS, 31);
     idle.r.phase = "over";
     ok("pushing does nothing once the round is over", sim.push(idle.r, 1) === false);
+  }
+}
+
+/* ---- 17. sniper ---- */
+console.log("\nsniper: the nest");
+{
+  const beginS = (rangeIndex, seed, n = 4) => {
+    const r = sim.createRound(rangeIndex, seed, sim.MODE_SNIPER);
+    for (let i = 1; i <= n; i++) sim.addPlayer(r, i);
+    sim.startRound(r);
+    return r;
+  };
+
+  const r0 = beginS(0, 5);
+  ok("the round knows it is sniper", r0.mode === sim.MODE_SNIPER);
+  ok("it uses the range table", r0.level.name === RANGES[0].name, "(" + r0.level.name + ")");
+  ok("somebody is in the nest", r0.sniperId !== null, "(" + r0.sniperId + ")");
+  ok("the sniper is a seated player", r0.players.has(r0.sniperId));
+  ok("isSniper agrees", sim.isSniper(r0, r0.sniperId));
+  ok("and everyone else is a runner",
+     [...r0.players.values()].filter((p) => sim.isRunner(r0, p)).length === 3);
+
+  // The sniper sits in the nest, off the floor, and the runners are on the spawn line.
+  const sn = r0.players.get(r0.sniperId);
+  ok("the sniper is not on the spawn line", sn.z < 0, "(z " + sn.z.toFixed(1) + ")");
+  const runners = [...r0.players.values()].filter((p) => sim.isRunner(r0, p));
+  ok("runners start at the far end",
+     runners.every((p) => p.z > r0.rows - 2), "(" + runners.map((p) => p.z.toFixed(1)) + ")");
+  // ...and they are spread out, not stacked, with the sniper excluded from the count.
+  ok("runners are spread across the aisle",
+     new Set(runners.map((p) => p.x.toFixed(2))).size === runners.length);
+
+  console.log("\nsniper: cover");
+  {
+    // Every eligible row must carry cover: a bare row is a stretch with no answer.
+    let bare = 0;
+    let total = 0;
+    for (let s = 1; s <= 40; s++) {
+      const r = sim.createRound(0, s * 977, sim.MODE_SNIPER);
+      for (let z = 2; z < r.rows - r.level.safeRows; z++) {
+        let n = 0;
+        for (let x = 0; x < r.cols; x++) if (sim.coverAt(r, x, z)) n++;
+        total++;
+        if (n === 0) bare++;
+      }
+    }
+    ok("every eligible row has cover", bare === 0, "(" + bare + " of " + total + " bare)");
+
+    const r = beginS(0, 31);
+    // The gate mouth and the spawn strip stay clear.
+    let atGate = 0;
+    let atSpawn = 0;
+    for (let x = 0; x < r.cols; x++) {
+      if (sim.coverAt(r, x, 0) || sim.coverAt(r, x, 1)) atGate++;
+      for (let z = r.rows - r.level.safeRows; z < r.rows; z++) {
+        if (sim.coverAt(r, x, z)) atSpawn++;
+      }
+    }
+    ok("the gate mouth is clear", atGate === 0, "(" + atGate + ")");
+    ok("the spawn strip is clear", atSpawn === 0, "(" + atSpawn + ")");
+
+    // Cover is solid — a runner cannot walk through it.
+    const rc = beginS(0, 37, 2);
+    const p = [...rc.players.values()].find((q) => sim.isRunner(rc, q));
+    // Find a block and try to walk into it head-on.
+    let block = null;
+    for (let z = 3; z < rc.rows - 5 && !block; z++) {
+      for (let x = 0; x < rc.cols; x++) if (sim.coverAt(rc, x, z)) { block = { x, z }; break; }
+    }
+    p.x = block.x + 0.5;
+    p.z = block.z + 1.8;
+    run(rc, 1.2, () => sim.setAxis(rc, p.id, 0, -1));
+    ok("cover blocks a runner", p.z > block.z + 0.9,
+       "(stopped at z " + p.z.toFixed(2) + ", block at " + block.z + ")");
+  }
+
+  console.log("\nsniper: the rifle");
+  {
+    const r = beginS(0, 41, 2);
+    const target = [...r.players.values()].find((p) => sim.isRunner(r, p));
+    const nest = sim.nestPos(r);
+    ok("the nest is above the floor", nest.y > 4, "(" + nest.y.toFixed(1) + ")");
+
+    // Aim only moves for the sniper.
+    const yaw0 = r.aimYaw;
+    sim.aim(r, target.id, 1, 0, 0.1);
+    ok("a runner cannot aim the rifle", r.aimYaw === yaw0);
+    sim.aim(r, r.sniperId, 1, 0, 0.1);
+    ok("the sniper can aim", r.aimYaw !== yaw0);
+
+    // The swing is clamped so the nest cannot look behind itself.
+    for (let i = 0; i < 200; i++) sim.aim(r, r.sniperId, 1, 0, 0.1);
+    ok("yaw is clamped", Math.abs(r.aimYaw) < Math.PI / 2, "(" + r.aimYaw.toFixed(2) + ")");
+    for (let i = 0; i < 200; i++) sim.aim(r, r.sniperId, 0, -1, 0.1);
+    ok("pitch is clamped below level", r.aimPitch <= -0.05, "(" + r.aimPitch.toFixed(2) + ")");
+
+    // The laser and the shot must agree — that is the promise the mode makes to the runners.
+    const r2 = beginS(0, 43, 2);
+    const t2 = [...r2.players.values()].find((p) => sim.isRunner(r2, p));
+    r2.cover.fill(0);
+    t2.x = r2.cols / 2;
+    t2.z = r2.rows / 2;
+    const n2 = sim.nestPos(r2);
+    r2.aimYaw = Math.atan2(t2.x - n2.x, t2.z - n2.z);
+    r2.aimPitch = Math.atan2(0.55 - n2.y, Math.hypot(t2.x - n2.x, t2.z - n2.z));
+    sim.step(r2, DT);
+    ok("the laser reports the runner it is on", r2.laser && r2.laser.hit === t2.id,
+       "(" + (r2.laser ? r2.laser.hit : "no laser") + ")");
+    ok("firing kills what the laser was on",
+       sim.fire(r2, r2.sniperId) === true && t2.state === sim.DEAD, "(" + t2.state + ")");
+    ok("the shot is announced", r2.events.some((e) => e.type === "shot" && e.hit === t2.id));
+
+    // One shot, then the bolt.
+    ok("the rifle is now reloading", r2.reload > 0, "(" + r2.reload.toFixed(2) + ")");
+    ok("a second shot is refused", sim.fire(r2, r2.sniperId) === false);
+    // Killing the only runner ended the round, and step() does nothing once it is over — so
+    // the clock is held open here rather than asserting against a sim that has stopped.
+    r2.phase = "running";
+    run(r2, r2.level.reloadTime + 0.1, () => { r2.phase = "running"; });
+    ok("the reload finishes", r2.reload <= 0, "(" + r2.reload.toFixed(2) + ")");
+
+    // A runner cannot fire.
+    const r3 = beginS(0, 47, 2);
+    const t3 = [...r3.players.values()].find((p) => sim.isRunner(r3, p));
+    ok("a runner cannot fire", sim.fire(r3, t3.id) === false);
+  }
+
+  console.log("\nsniper: cover actually protects");
+  {
+    // The whole mode rests on this: a runner directly behind a block must be unhittable, and
+    // the same runner in the open must be hittable. If cover does not block the trace, the
+    // level is decoration.
+    const r = beginS(0, 53, 2);
+    const t = [...r.players.values()].find((p) => sim.isRunner(r, p));
+    const n = sim.nestPos(r);
+
+    // Put a block mid-aisle and the runner directly behind it, on the line from the nest.
+    r.cover.fill(0);
+    const bz = Math.floor(r.rows / 2);
+    const bx = Math.floor(r.cols / 2);
+    r.cover[bz * r.cols + bx] = 1;
+    t.x = bx + 0.5;
+    t.z = bz + 1.1;
+
+    const aimAt = (px, pz) => {
+      r.aimYaw = Math.atan2(px - n.x, pz - n.z);
+      r.aimPitch = Math.atan2(0.55 - n.y, Math.hypot(px - n.x, pz - n.z));
+      sim.step(r, DT);
+    };
+
+    aimAt(t.x, t.z);
+    ok("cover blocks the shot", r.laser && r.laser.hit === null && r.laser.blocked,
+       "(hit " + (r.laser && r.laser.hit) + ", blocked " + (r.laser && r.laser.blocked) + ")");
+
+    // Step the same runner out from behind it.
+    t.x = bx + 2.2;
+    aimAt(t.x, t.z);
+    ok("the same runner in the open is hittable", r.laser && r.laser.hit === t.id,
+       "(" + (r.laser ? r.laser.hit : "none") + ")");
+  }
+
+  console.log("\nsniper: the round");
+  {
+    // Runners reach the gate and get out; the round resolves.
+    //
+    // They have to actually STEER: cover is solid, so a runner marched blindly at the gate
+    // walks into the first block on their column and stands there forever. That is the mode
+    // working — the test just has to play it rather than shove.
+    const r = beginS(0, 59, 3);
+    const runners = [...r.players.values()].filter((p) => sim.isRunner(r, p));
+    const gateX = (r.exitFrom + r.exitTo) / 2 + 0.5;
+    let g = 0;
+    while (r.phase === "running" && g++ < 60 * 120) {
+      for (const p of runners) {
+        if (p.state !== sim.ALIVE) continue;
+        const tx = Math.floor(p.x);
+        const tz = Math.floor(p.z - 0.6);
+        let vx;
+        if (sim.coverAt(r, tx, tz)) {
+          // Blocked ahead: step around whichever side is open.
+          vx = sim.coverAt(r, tx - 1, tz) ? 1 : -1;
+          if (tx <= 0) vx = 1;
+          if (tx >= r.cols - 1) vx = -1;
+        } else {
+          vx = Math.abs(gateX - p.x) > 0.4 ? Math.sign(gateX - p.x) * 0.6 : 0;
+        }
+        sim.setAxis(r, p.id, vx, -1);
+      }
+      sim.step(r, DT);
+      r.events.length = 0;
+    }
+    ok("runners can reach the gate", r.escapedOrder.length > 0,
+       "(" + r.escapedOrder.length + " out)");
+    ok("the round resolves", r.phase === "over", "(" + r.phase + ")");
+
+    // And the sniper can end it by clearing the aisle.
+    const r2 = beginS(0, 61, 2);
+    r2.cover.fill(0);
+    for (const p of r2.players.values()) {
+      if (sim.isRunner(r2, p)) { p.state = sim.DEAD; r2.downOrder.push(p.id); }
+    }
+    sim.step(r2, DT);
+    ok("clearing the aisle ends the round", r2.phase === "over", "(" + r2.phase + ")");
+  }
+
+  // The other modes must be untouched by all of this.
+  {
+    const esc = begin(0, 67, 2);
+    ok("escape has no sniper", esc.sniperId === null || esc.mode !== sim.MODE_SNIPER);
+    ok("escape treats everyone as a runner",
+       [...esc.players.values()].every((p) => sim.isRunner(esc, p)));
+    ok("aiming does nothing in escape",
+       (() => { const y = esc.aimYaw; sim.aim(esc, 1, 1, 0, 0.1); return esc.aimYaw === y; })());
+    ok("firing does nothing in escape", sim.fire(esc, 1) === false);
   }
 }
 
