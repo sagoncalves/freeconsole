@@ -167,6 +167,44 @@
         rgba(255,30,110,.4) 100%);
   }
 
+  /* The scope overlay, drawn over the right-hand viewport only. */
+  #scope {
+    position: absolute; top: 0; right: 0; bottom: 0; width: 50%;
+    z-index: 5; pointer-events: none; opacity: 0;
+    transition: opacity .18s ease-out;
+  }
+  #scope.show { opacity: 1; }
+  /* The eyepiece: everything outside the circle goes black, which is what actually sells a
+     scope — the narrowed field of view, not the crosshair. */
+  #scope .ring {
+    position: absolute; inset: 0;
+    background: radial-gradient(circle at 50% 50%,
+      rgba(0,0,0,0) 27%, rgba(0,0,0,.55) 30%, rgba(0,0,0,.98) 38%, #000 100%);
+  }
+  #scope .cross {
+    position: absolute; background: rgba(255,46,136,.85);
+    left: 50%; top: 50%;
+  }
+  /* Deliberately broken at the centre: an unbroken cross hides the thing being aimed at. */
+  #scope .cross.v { width: 1px; height: 22%; transform: translate(-50%,-50%); }
+  #scope .cross.h { width: 22%; height: 1px; transform: translate(-50%,-50%); }
+  #scope .mil {
+    position: absolute; left: 50%; width: 9px; height: 1px;
+    background: rgba(255,46,136,.6); transform: translateX(-50%);
+  }
+  #scope .mil.m1 { top: calc(50% + 26px); }
+  #scope .mil.m2 { top: calc(50% + 46px); width: 7px; }
+  #scope .mil.m3 { top: calc(50% + 66px); width: 5px; }
+
+  /* A hairline between the two views, so the split reads as two windows rather than as one
+     confusing panorama. */
+  #splitLine {
+    position: absolute; top: 0; bottom: 0; left: 50%; width: 1px; z-index: 5;
+    background: linear-gradient(to bottom, transparent, rgba(53,240,224,.35), transparent);
+    pointer-events: none; display: none;
+  }
+  #splitLine.show { display: block; }
+
   #quality {
     position: absolute; right: 10px; bottom: 8px; z-index: 6;
     font-family: var(--font-mono); font-size: 10px; letter-spacing: .1em;
@@ -212,6 +250,18 @@
   <canvas id="c"></canvas>
   <div id="dread"></div>
   <div id="quality"></div>
+  <!-- The scope. A CSS overlay on the right half rather than geometry in the scene, because
+       a reticle has to stay pin-sharp and screen-aligned — modelled in 3D it would swim with
+       the camera and blur at the exact moment the sniper is trying to place a shot. -->
+  <div id="scope">
+    <div class="ring"></div>
+    <div class="cross v"></div>
+    <div class="cross h"></div>
+    <div class="mil m1"></div>
+    <div class="mil m2"></div>
+    <div class="mil m3"></div>
+  </div>
+  <div id="splitLine"></div>
   <div id="overlay">
     <div class="ring"></div>
     <div class="sub">Waiting for players…</div>
@@ -328,6 +378,8 @@ const gateEl = document.getElementById("gate");
 const survivalHud = document.getElementById("survivalHud");
 const callsHud = document.getElementById("callsHud");
 const sniperHud = document.getElementById("sniperHud");
+const scopeEl = document.getElementById("scope");
+const splitLineEl = document.getElementById("splitLine");
 const nestNameEl = document.getElementById("nestName");
 const rifleStateEl = document.getElementById("rifleState");
 const runnersLeftEl = document.getElementById("runnersLeft");
@@ -804,6 +856,8 @@ function renderSlots() {
   survivalHud.classList.toggle("show", survival);
   callsHud.classList.toggle("show", calls);
   sniperHud.classList.toggle("show", sniper);
+  splitLineEl.classList.toggle("show", sniper);
+  if (!sniper) scopeEl.classList.remove("show");
   if (survival || calls) return;
 
   const cap = round.level.exitCapacity;
@@ -862,6 +916,8 @@ function renderSniperHud() {
     if (p.state === sim.ALIVE && sim.isRunner(round, p)) left++;
   }
   runnersLeftEl.textContent = String(left);
+
+  scopeEl.classList.toggle("show", round.scoped);
 }
 
 function renderSurvivalHud() {
