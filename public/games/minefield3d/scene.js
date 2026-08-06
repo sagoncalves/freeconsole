@@ -1106,7 +1106,7 @@ function cloneSkinned(source) {
 
 let avatarPromise = null;
 
-export function loadAvatar(url = "/games/minefield3d/ninja.glb?v=3") {
+export function loadAvatar(url = "/games/minefield3d/ninja.glb?v=4") {
   if (avatarPromise) return avatarPromise;
   avatarPromise = new Promise((resolve) => {
     if (!THREE.GLTFLoader) { resolve(null); return; }
@@ -1224,6 +1224,17 @@ export function createPlayerMesh(colorHex, Q) {
         actions[name].play();
         actions[name].setEffectiveWeight(name === "idle" ? 1 : 0);
       }
+
+      // The knockdown pair are one-shots, not loops: they play once on a trigger and hold
+      // their last frame. `clampWhenFinished` is what keeps a floored player lying on the
+      // floor rather than snapping back to a standing bind pose the instant the clip ends.
+      for (const name of ["behit", "standup"]) {
+        const act = actions[name];
+        if (!act) continue;
+        act.setLoop(THREE.LoopOnce, 1);
+        act.clampWhenFinished = true;
+        act.setEffectiveWeight(0);
+      }
     }
 
     // Grab the bones the game needs to drive directly. The rig is a standard biped, so the
@@ -1314,6 +1325,64 @@ export function posePlayer(mesh, p, states, dt) {
       if (mesh.actions.running) mesh.actions.running.setEffectiveWeight(0);
     }
     return;
+  }
+
+  // Knocked down by a shove: play the hit, then the stand-up as the timer runs out.
+  //
+  // Driven off the sim's `downFor` countdown rather than off events, so it is correct on the
+  // frame a scene is rebuilt mid-knockdown — an event-driven trigger would leave a player who
+  // was on the floor during a quality switch standing upright and unable to move.
+  if (states.isDown && states.isDown(p)) {
+    const acts = mesh.actions;
+    if (acts && acts.behit && acts.standup) {
+      // The stand-up is started so it finishes exactly as control returns, which is what makes
+      // getting up feel like the reason you can move again rather than a delay after it.
+      const standTime = Math.min(acts.standup.getClip().duration, 0.9);
+      const rising = p.downFor <= standTime;
+
+      if (rising && !mesh.standing) {
+        mesh.standing = true;
+        acts.behit.setEffectiveWeight(0);
+        acts.standup.reset();
+        acts.standup.setEffectiveWeight(1);
+        // Scale the clip so it lands on its feet as downFor hits zero, however long it is.
+        acts.standup.timeScale = acts.standup.getClip().duration / Math.max(0.15, standTime);
+        acts.standup.play();
+      } else if (!rising && !mesh.knocked) {
+        mesh.knocked = true;
+        mesh.standing = false;
+        acts.standup.setEffectiveWeight(0);
+        acts.behit.reset();
+        acts.behit.setEffectiveWeight(1);
+        acts.behit.timeScale = 1;
+        acts.behit.play();
+      }
+
+      if (acts.idle) acts.idle.setEffectiveWeight(0);
+      if (acts.running) acts.running.setEffectiveWeight(0);
+      if (mesh.mixer) mesh.mixer.update(dt || 0);
+    } else if (!mesh.isModel) {
+      // Capsule fallback: just lie it down.
+      body.rotation.z = Math.PI / 2;
+      body.position.y = 0.26;
+      body.scale.setScalar(s);
+    }
+
+    // Undo any leg damage posing — the clips own the whole skeleton while they play.
+    restoreBones(mesh);
+    lamp.intensity = 1.6;
+    if (mesh.glow) mesh.glow.material.opacity = 0.14;
+    return;
+  }
+  // Back on their feet: let the locomotion clips take over again.
+  if (mesh.knocked || mesh.standing) {
+    mesh.knocked = false;
+    mesh.standing = false;
+    if (mesh.actions) {
+      if (mesh.actions.behit) mesh.actions.behit.setEffectiveWeight(0);
+      if (mesh.actions.standup) mesh.actions.standup.setEffectiveWeight(0);
+    }
+    mesh.blend = 0;
   }
 
   if (p.state === states.DEAD) {

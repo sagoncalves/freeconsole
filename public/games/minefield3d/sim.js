@@ -146,6 +146,43 @@ const HIT_SCATTER = 0.9;
 const COLLIDE_BOOST = 1.05;
 const TEMPO_MAX = 1.9;
 
+/* --------------------------------------------------------------------- push */
+
+/**
+ * Shoving another player.
+ *
+ * Available in every mode, because it is a verb about the people in the room rather than about
+ * any one game's hazard — and in all three the interesting thing to do with a shove is the
+ * same: put somebody where they did not want to be. In calls that is off a called tile; in
+ * survival it is into a blade; in escape it is onto ground nobody has lit.
+ *
+ * The reach is deliberately short. A long grab would let a player farm shoves from safety;
+ * at just over a body's width you have to close, which means putting yourself in the same
+ * danger you are trying to inflict.
+ */
+const PUSH_REACH = 1.15;
+
+/** How wide the arc in front of you counts as a shove — a cone, not a full circle. */
+const PUSH_ARC = Math.PI * 0.55;
+
+/** Seconds between shoves, so it cannot be spammed into a stunlock. */
+const PUSH_COOLDOWN = 1.1;
+
+/** Seconds a shoved player spends on the floor before starting to get up. */
+const PUSH_DOWN_TIME = 1.5;
+
+/**
+ * Opening speed of the slide, in tiles/second, and how fast it bleeds off.
+ *
+ * These two together set the distance: v²/2k, which is about 1.7 tiles over 0.6s. That is the
+ * number that actually matters and it is tuned against the smallest board in the game — the
+ * calls grid is only six tiles wide, and an earlier 6.5/4.2 pairing slid a target 5.1 tiles,
+ * far enough that one shove cleared the entire platform regardless of where anyone stood.
+ * A shove should cost you position, not the round.
+ */
+const PUSH_SLIDE = 5.5;
+const PUSH_DRAG = 9;
+
 /** Movement, in tiles per second. Losing legs is a heavy tax — that is the whole tension. */
 export const SPEED_WALK = 3.0;
 export const SPEED_LIMP = 1.6;
@@ -558,6 +595,22 @@ export function addPlayer(round, deviceId) {
     sawHitAt: -99,
 
     /**
+     * Knockdown, from being shoved by another player.
+     *
+     * `downFor` counts the seconds left on the floor and is the whole state machine: above
+     * zero means flat and unable to steer, and it running out is what triggers standing up.
+     * The slide is separate from `dx/dz` because it must survive the stun that stops those —
+     * being pushed has to actually carry you, or the shove is a stun with a costume on.
+     */
+    downFor: 0,
+    slideX: 0,
+    slideZ: 0,
+    /** Who did it, so the screen can credit a push that drops someone into the crusher. */
+    pushedBy: null,
+    /** Seconds before this player can shove again. */
+    pushCooldown: 0,
+
+    /**
      * Calls: how far this player has fallen through the floor, in world units.
      *
      * A player dropped into the crusher is DEAD the instant the tile goes, because the rules
@@ -630,6 +683,85 @@ export function clearInput(round, deviceId) {
   if (!p) return;
   p.input.up = p.input.down = p.input.left = p.input.right = false;
   p.axis = null;
+}
+
+/**
+ * Shove whoever is in front of you.
+ *
+ * Called straight from a controller tap. Everything is validated here rather than trusted:
+ * this arrives off the wire, and the phone is never allowed to assert who got hit or how hard.
+ *
+ * Targets are chosen by a cone rather than by proximity alone. A radius-only check means a
+ * shove hits whoever happens to be nearest regardless of which way you were facing, which
+ * reads as random to everyone involved — with a cone you push who you were looking at, and
+ * missing is your own fault. Only the single best target in the arc is hit, so one tap is one
+ * shove no matter how many people are crowded on a tile.
+ *
+ * @return {boolean} whether it connected, so the caller can decide about feedback.
+ */
+export function push(round, deviceId) {
+  if (round.phase !== "running") return false;
+  const p = round.players.get(deviceId);
+  if (!p || p.state !== ALIVE) return false;
+  // No shoving while stunned, already on the floor, or still on cooldown.
+  if (p.pushCooldown > 0 || p.downFor > 0 || p.stun > 0) return false;
+
+  p.pushCooldown = PUSH_COOLDOWN;
+
+  const fx = Math.sin(p.heading);
+  const fz = Math.cos(p.heading);
+
+  let best = null;
+  let bestD = PUSH_REACH;
+  for (const q of round.players.values()) {
+    if (q === p || q.state !== ALIVE) continue;
+    // Somebody already on the floor cannot be shoved again — that is the anti-stunlock rule,
+    // and it is what stops two players pinning a third for a whole round.
+    if (q.downFor > 0) continue;
+
+    const dx = q.x - p.x;
+    const dz = q.z - p.z;
+    const d = Math.hypot(dx, dz);
+    if (d > bestD || d < 1e-4) continue;
+    // Inside the forward arc?
+    const dot = (dx / d) * fx + (dz / d) * fz;
+    if (dot < Math.cos(PUSH_ARC / 2)) continue;
+    bestD = d;
+    best = { q, dx, dz, d };
+  }
+
+  round.events.push({ type: "push", id: p.id, x: p.x, z: p.z, hit: !!best });
+  if (!best) return false;
+
+  knockDown(round, best.q, best.dx / best.d, best.dz / best.d, p.id);
+  return true;
+}
+
+/**
+ * Put a player on the floor, sliding away along `nx,nz`.
+ *
+ * Split out from push() because the direction is the caller's business: a shove sends someone
+ * directly away from the shover, but the same knockdown is the natural response to anything
+ * else that should floor a player later.
+ */
+function knockDown(round, q, nx, nz, byId) {
+  q.downFor = PUSH_DOWN_TIME;
+  q.slideX = nx * PUSH_SLIDE;
+  q.slideZ = nz * PUSH_SLIDE;
+  q.pushedBy = byId ?? null;
+  // Face the way they are travelling, so the fall reads as being sent that direction.
+  q.heading = Math.atan2(nx, nz);
+  q.dx = 0;
+  q.dz = 0;
+  q.axis = null;
+  q.input.up = q.input.down = q.input.left = q.input.right = false;
+
+  round.events.push({ type: "knocked", id: q.id, by: byId ?? null, x: q.x, z: q.z });
+}
+
+/** Is this player on the floor from a shove? Read by the renderer and the controller. */
+export function isDown(p) {
+  return p.downFor > 0;
 }
 
 /* ------------------------------------------------------------------ lifecycle */
@@ -726,6 +858,11 @@ function resetPlayer(round, p, index, total) {
   p.sawHitAt = -99;
   p.survivedFor = 0;
   p.fallY = null;
+  p.downFor = 0;
+  p.slideX = 0;
+  p.slideZ = 0;
+  p.pushedBy = null;
+  p.pushCooldown = 0;
 
   // Stagger the first ping across the roster so the aisle does not strobe in unison. Each
   // player then runs free on their own period.
@@ -1297,9 +1434,11 @@ function checkFooting(round) {
     const tx = Math.floor(p.x);
     const tz = Math.floor(p.z);
 
-    // Off the grid entirely — walked past the edge. The stage is a platform in mid-air, so
-    // there is nothing out there either.
+    // Off the grid entirely — shoved past the edge. The stage is a platform in mid-air, so
+    // there is nothing out there either, and going over the side has to look exactly like
+    // dropping through a missing tile: the fall is started here for the same reason.
     if (tx < 0 || tz < 0 || tx >= cols || tz >= rows) {
+      p.fallY = 0;
       down(round, p, "fell");
       continue;
     }
@@ -1347,6 +1486,52 @@ export function roombaCount(round) {
 
 function stepPlayer(round, p, dt) {
   if (p.state !== ALIVE) return;
+
+  if (p.pushCooldown > 0) p.pushCooldown -= dt;
+
+  // Knocked down: no steering, but the slide still carries you.
+  //
+  // The slide runs through moveTo rather than writing x/z directly, so everything that makes
+  // ground dangerous still applies while you are travelling — a player shoved onto a mine sets
+  // it off, and one shoved over a hole in the calls grid falls through it. That is the entire
+  // point of the mechanic, and skipping the collision path would quietly turn a shove into a
+  // free ride across hazards.
+  if (p.downFor > 0) {
+    p.downFor -= dt;
+
+    const speed = Math.hypot(p.slideX, p.slideZ);
+    if (speed > 0.01) {
+      const fromX = p.x;
+      const fromZ = p.z;
+      const nx = fromX + p.slideX * dt;
+      const nz = fromZ + p.slideZ * dt;
+
+      const dist = Math.hypot(nx - fromX, nz - fromZ);
+      const steps = Math.max(1, Math.ceil(dist / 0.12));
+      for (let i = 1; i <= steps; i++) {
+        const t = i / steps;
+        if (!moveTo(round, p, fromX + (nx - fromX) * t, fromZ + (nz - fromZ) * t)) return;
+      }
+
+      // Friction, so the slide is a shove rather than a launch.
+      const decay = Math.max(0, 1 - (PUSH_DRAG * dt) / Math.max(speed, 0.001));
+      p.slideX *= decay;
+      p.slideZ *= decay;
+    } else {
+      p.slideX = 0;
+      p.slideZ = 0;
+    }
+
+    p.dx = 0;
+    p.dz = 0;
+
+    if (p.downFor <= 0) {
+      p.downFor = 0;
+      p.pushedBy = null;
+      round.events.push({ type: "stood-up", id: p.id, x: p.x, z: p.z });
+    }
+    return;
+  }
 
   if (p.stun > 0) {
     p.stun -= dt;
@@ -1409,6 +1594,19 @@ function stepPlayer(round, p, dt) {
 /** Returns false if the move must stop — died, escaped, or thrown by a blast. */
 function moveTo(round, p, x, z) {
   const { cols, rows } = round.level;
+
+  // The calls stage has no walls — it is a platform hanging over a crusher, and its edge is a
+  // drop rather than a boundary. But only a player who is being *carried* may go over it:
+  // clamping is what stops someone walking themselves off by holding a direction, while a
+  // shove has to be able to send them past the edge or the most interesting thing the
+  // mechanic can do is quietly cancelled by an invisible handrail.
+  //
+  // checkFooting picks an off-board player up on the next tick and starts the fall.
+  if (round.mode === MODE_CALLS && p.downFor > 0) {
+    p.x = x;
+    p.z = z;
+    return true;
+  }
 
   // The aisle walls. Only the gate at the far end is a way out.
   p.x = Math.max(0.32, Math.min(cols - 0.32, x));

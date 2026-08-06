@@ -123,6 +123,26 @@
   #callring.x { border-color: var(--glow); color: var(--glow); box-shadow: 0 0 26px rgba(53,240,224,.35); }
   #callring.o { border-color: var(--hot); color: var(--hot); box-shadow: 0 0 26px rgba(255,46,136,.35); }
 
+  /* The shove button.
+     Bottom-right of the pad, sized for a thumb, and carrying the `q` class so the stick
+     handler skips it — without that, every tap on it would also plant a joystick. It is
+     deliberately NOT centred: the stick can form anywhere on the pad, and a centred button
+     would sit exactly where people put their thumb to walk. */
+  #shove {
+    position: absolute; right: 14px; bottom: 14px; z-index: 3;
+    width: 92px; height: 92px; border-radius: 50%;
+    border: 2px solid var(--me, var(--glow));
+    background: rgba(53,240,224,.1);
+    font-family: var(--font-mono); font-size: 13px; font-weight: 700;
+    letter-spacing: .1em; text-transform: uppercase;
+    color: var(--me, var(--glow));
+    transition: transform .08s, background .12s, opacity .2s;
+  }
+  #shove:active { transform: scale(.9); background: rgba(53,240,224,.26); }
+  /* Greyed while it is on cooldown, so a tap that will do nothing looks like it. */
+  #shove.cooling { opacity: .3; }
+  #pad.locked #shove { display: none; }
+
   #banner {
     position: fixed; inset: 0; z-index: 20;
     display: none; flex-direction: column; align-items: center; justify-content: center;
@@ -168,7 +188,8 @@
   </div>
   <div id="base"></div>
   <div id="knob"></div>
-  <div id="hint">touch anywhere and drag to move</div>
+  <button id="shove" class="q">push</button>
+  <div id="hint">drag to move · tap push to shove</div>
 </div>
 
 <div id="admin">
@@ -200,6 +221,7 @@
   var pulsetext = document.getElementById("pulsetext");
   var callring = document.getElementById("callring");
   var calltext = document.getElementById("calltext");
+  var shove = document.getElementById("shove");
   var admin = document.getElementById("admin");
   var qbtns = document.getElementById("qbtns");
   var mbtns = document.getElementById("mbtns");
@@ -424,6 +446,40 @@
     banner.classList.remove("show");
     freeconsole.message(FreeConsole.SCREEN, { t: "again" });
   }
+
+  /* -------------------------------------------------------------------- push */
+
+  /**
+   * The shove button.
+   *
+   * The screen is the authority on whether a shove connects — this only sends the intent. The
+   * cooldown is mirrored locally purely so the button can grey out: a control that looks live
+   * while being ignored is worse than one that visibly says "not yet", and waiting for a
+   * round-trip to find that out would make it feel broken on a slow room.
+   *
+   * PUSH_COOLDOWN in sim.js is the real value; this is its twin and must be kept at or above
+   * it, so the button is never enabled while the sim would still refuse.
+   */
+  var PUSH_COOLDOWN_MS = 1100;
+  var lastPush = 0;
+
+  function doPush() {
+    if (myState !== "alive" || over) return;
+    var now = Date.now();
+    if (now - lastPush < PUSH_COOLDOWN_MS) return;
+    lastPush = now;
+    freeconsole.message(FreeConsole.SCREEN, { t: "push" });
+    freeconsole.vibrate(18);
+    shove.classList.add("cooling");
+    setTimeout(function () { shove.classList.remove("cooling"); }, PUSH_COOLDOWN_MS);
+  }
+
+  // pointerdown rather than click: a shove is a reflex, and click waits for the release.
+  shove.addEventListener("pointerdown", function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    doPush();
+  });
 
   /* ---------------------------------------------------------------- ping clock */
 

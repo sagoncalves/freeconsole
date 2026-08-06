@@ -1177,5 +1177,152 @@ console.log("\ncalls: the board");
   ok("calls leaves no footprints", r8.prints.length === 0);
 }
 
+/* ---- 16. pushing ---- */
+console.log("\npushing");
+{
+  const pair = (mode, seed) => {
+    const r = sim.createRound(0, seed, mode);
+    sim.addPlayer(r, 1);
+    sim.addPlayer(r, 2);
+    sim.startRound(r);
+    const a = r.players.get(1);
+    const b = r.players.get(2);
+    // Face a at +x with b just in front, both hard against the left edge.
+    //
+    // The start position matters: a shove slides the target about 2.7 tiles, and the calls
+    // board is only six wide with a drop at its edge. Starting mid-board sent every test
+    // subject over the side, so these read as push failures when they were the platform
+    // working correctly.
+    a.x = 0.5; a.z = 2.5; a.heading = Math.atan2(1, 0);
+    b.x = 1.3; b.z = 2.5;
+
+    // Hold the mode's own hazard off, so these tests measure the SHOVE and nothing else.
+    // Left live, the calls clock drops the floor mid-knockdown and the round ends before the
+    // stand-up finishes — which reads as "the push is broken" when it is the call doing its
+    // job. The one test that WANTS a lethal interaction sets its own board up explicitly.
+    if (mode === sim.MODE_CALLS) {
+      r.callPhase = sim.CALL_SHOWING;
+      r.callLeft = 999;
+      r.called = null;
+    }
+    if (mode === sim.MODE_ESCAPE) {
+      r.mines.fill(0);
+      r.level = { ...r.level, killerDelay: 999 };
+    }
+    if (mode === sim.MODE_SURVIVAL) r.roombas.length = 0;
+
+    return { r, a, b };
+  };
+
+  {
+    const { r, a, b } = pair(sim.MODE_CALLS, 5);
+    ok("a shove connects", sim.push(r, 1) === true);
+    ok("it knocks the target down", sim.isDown(b));
+    ok("the pusher is not knocked down", !sim.isDown(a));
+    ok("a push event is raised", r.events.some((e) => e.type === "push" && e.hit));
+    ok("a knocked event names the pusher",
+       r.events.some((e) => e.type === "knocked" && e.by === 1 && e.id === 2));
+  }
+
+  // Direction: the target must travel AWAY from the pusher, not anywhere else.
+  {
+    const { r, a, b } = pair(sim.MODE_CALLS, 7);
+    const x0 = b.x;
+    sim.push(r, 1);
+    run(r, 0.4);
+    ok("the target slides away from the pusher", b.x > x0 + 0.5,
+       "(" + x0.toFixed(2) + " -> " + b.x.toFixed(2) + ")");
+    ok("and moves away, not toward", b.x > a.x);
+  }
+
+  // The knockdown ends by itself, and control comes back.
+  {
+    const { r, b } = pair(sim.MODE_CALLS, 9);
+    sim.push(r, 1);
+    ok("down immediately after the shove", sim.isDown(b));
+    run(r, 0.5);
+    ok("still down mid-knockdown", sim.isDown(b));
+    run(r, 1.4);
+    ok("stands up on its own", !sim.isDown(b));
+    ok("a stood-up event is raised", r.events.some((e) => e.type === "stood-up" && e.id === 2));
+  }
+
+  // A downed player cannot steer — that is what makes the shove cost something.
+  {
+    const { r, b } = pair(sim.MODE_CALLS, 11);
+    sim.push(r, 1);
+    // Let the slide bleed off, then try to walk back while still down.
+    run(r, 0.9);
+    const held = b.x;
+    sim.setAxis(r, 2, -1, 0);
+    run(r, 0.4);
+    ok("a downed player cannot steer", Math.abs(b.x - held) < 0.2,
+       "(" + held.toFixed(2) + " -> " + b.x.toFixed(2) + ")");
+  }
+
+  // Guards: cooldown, arc, reach, and no shoving somebody already down.
+  {
+    const { r, a, b } = pair(sim.MODE_CALLS, 13);
+    ok("first shove lands", sim.push(r, 1) === true);
+    ok("an immediate second is refused", sim.push(r, 1) === false);
+    run(r, 1.3);
+    ok("the cooldown expires", r.players.get(1).pushCooldown <= 0);
+
+    const away = pair(sim.MODE_CALLS, 15);
+    away.a.heading = Math.atan2(-1, 0);   // facing the other way
+    ok("a shove facing away misses", sim.push(away.r, 1) === false);
+
+    const far = pair(sim.MODE_CALLS, 17);
+    far.b.x = 6.0;
+    ok("a shove out of reach misses", sim.push(far.r, 1) === false);
+
+    const twice = pair(sim.MODE_CALLS, 19);
+    sim.push(twice.r, 1);
+    sim.addPlayer(twice.r, 3);
+    const c = twice.r.players.get(3);
+    c.x = twice.a.x; c.z = twice.a.z; c.heading = twice.a.heading;
+    ok("somebody already down cannot be shoved again", sim.push(twice.r, 3) === false);
+  }
+
+  // The whole point: a shove can put someone somewhere lethal. In calls that is off the board.
+  {
+    const r = sim.createRound(0, 21, sim.MODE_CALLS);
+    sim.addPlayer(r, 1);
+    sim.addPlayer(r, 2);
+    sim.startRound(r);
+    const a = r.players.get(1);
+    const b = r.players.get(2);
+    // Stand b on the very edge, a behind them pointing out over the drop.
+    a.x = r.cols - 1.5; a.z = 2.5; a.heading = Math.atan2(1, 0);
+    b.x = r.cols - 0.5; b.z = 2.5;
+    sim.push(r, 1);
+    run(r, 1.2);
+    ok("a shove can put someone off the board", b.state === sim.DEAD, "(" + b.state + ")");
+    ok("and they fall for it", sim.fallDepth(b) > 0, "(" + sim.fallDepth(b).toFixed(2) + ")");
+  }
+
+  // Pushing works in every mode, not just calls — it is about the people, not the hazard.
+  {
+    const esc = pair(sim.MODE_ESCAPE, 23);
+    ok("pushing works in escape", sim.push(esc.r, 1) === true && sim.isDown(esc.b));
+
+    const sur = pair(sim.MODE_SURVIVAL, 25);
+    ok("pushing works in survival", sim.push(sur.r, 1) === true && sim.isDown(sur.b));
+  }
+
+  // Hygiene: unknown devices, dead players, and a round that is not running.
+  {
+    const { r, b } = pair(sim.MODE_CALLS, 27);
+    ok("an unknown device cannot push", sim.push(r, 99) === false);
+    b.state = sim.DEAD;
+    const solo = pair(sim.MODE_CALLS, 29);
+    solo.a.state = sim.DEAD;
+    ok("a dead player cannot push", sim.push(solo.r, 1) === false);
+    const idle = pair(sim.MODE_CALLS, 31);
+    idle.r.phase = "over";
+    ok("pushing does nothing once the round is over", sim.push(idle.r, 1) === false);
+  }
+}
+
 console.log("\n" + pass + " passed, " + fail + " failed");
 process.exit(fail ? 1 : 0);
