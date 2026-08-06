@@ -103,6 +103,26 @@
     box-shadow: 0 0 22px rgba(53,240,224,.4), inset 0 0 22px rgba(53,240,224,.16);
   }
 
+  /* The called symbol, mirrored on the phone.
+     Same slot as the ping ring — only one of the two is ever live, since the modes that use
+     them are mutually exclusive. Much bigger type than the ping clock: this is a glance from
+     a running player, not a number to read. */
+  #callring {
+    display: none;
+    width: 132px; height: 132px; border-radius: 50%;
+    border: 3px solid rgba(53,240,224,.2);
+    place-items: center; gap: 2px;
+    font-family: var(--font-mono); letter-spacing: .12em;
+    text-transform: uppercase; color: var(--text-faint);
+    transition: border-color .12s, box-shadow .12s, color .12s;
+  }
+  #callring.show { display: grid; }
+  #callring .lbl { font-size: 8px; opacity: .7; }
+  #calltext { font-size: 54px; font-weight: 700; line-height: 1; }
+  /* X is cyan and O is pink, matching the tiles and the wall screen exactly. */
+  #callring.x { border-color: var(--glow); color: var(--glow); box-shadow: 0 0 26px rgba(53,240,224,.35); }
+  #callring.o { border-color: var(--hot); color: var(--hot); box-shadow: 0 0 26px rgba(255,46,136,.35); }
+
   #banner {
     position: fixed; inset: 0; z-index: 20;
     display: none; flex-direction: column; align-items: center; justify-content: center;
@@ -142,7 +162,10 @@
 <div id="gate"></div>
 
 <div id="pad" class="locked">
-  <div id="mid"><div id="pulsering"><span class="lbl">your ping</span><span id="pulsetext">—</span></div></div>
+  <div id="mid">
+    <div id="pulsering"><span class="lbl">your ping</span><span id="pulsetext">—</span></div>
+    <div id="callring"><span class="lbl">stand on</span><span id="calltext">—</span></div>
+  </div>
   <div id="base"></div>
   <div id="knob"></div>
   <div id="hint">touch anywhere and drag to move</div>
@@ -175,6 +198,8 @@
   var banner = document.getElementById("banner");
   var pulsering = document.getElementById("pulsering");
   var pulsetext = document.getElementById("pulsetext");
+  var callring = document.getElementById("callring");
+  var calltext = document.getElementById("calltext");
   var admin = document.getElementById("admin");
   var qbtns = document.getElementById("qbtns");
   var mbtns = document.getElementById("mbtns");
@@ -183,6 +208,8 @@
   var myState = "alive";
   /** Which mode the screen is running. Changes what the status lines and the end card say. */
   var survival = false;
+  /** Calls mode: the phone mirrors the called symbol so the back row need not squint at the TV. */
+  var calls = false;
 
   // Paint the pad in this device's own colour, so a player's lamp on the TV and their phone
   // are unmistakably the same light.
@@ -417,7 +444,7 @@
     // Survival has no echolocation, so there is no countdown to show. The ring is hidden
     // outright rather than left frozen: a dial that sits at a stale number reads as a broken
     // phone, and the pad is the only thing that should be drawing the eye in that mode.
-    if (survival) {
+    if (survival || calls) {
       pulsering.style.display = "none";
       pulsering.classList.remove("hot");
       return;
@@ -447,8 +474,9 @@
     }
     if (state === "dead") {
       conditionEl.classList.add("gone");
-      conditionEl.textContent = survival ? "Cut down" : "Left in the aisle";
-      subEl.textContent = survival ? "the saws got you" : "your light went out";
+      conditionEl.textContent = calls ? "Dropped" : survival ? "Cut down" : "Left in the aisle";
+      subEl.textContent = calls ? "the floor went out from under you"
+        : survival ? "the saws got you" : "your light went out";
       return;
     }
     if (state === "waiting") {
@@ -461,8 +489,8 @@
     }
     if (legs >= 2) {
       conditionEl.classList.add("ok");
-      conditionEl.textContent = survival ? "Running" : "Walking";
-      subEl.textContent = survival ? "keep moving" : "two legs";
+      conditionEl.textContent = calls ? "On the board" : survival ? "Running" : "Walking";
+      subEl.textContent = calls ? "read the wall" : survival ? "keep moving" : "two legs";
     } else if (legs === 1) {
       conditionEl.classList.add("hurt");
       conditionEl.textContent = "Limping";
@@ -491,7 +519,29 @@
     }
   }
 
-  var MODE_LABELS = { escape: "escape", survival: "survival" };
+  /**
+   * Mirror the called symbol on the phone.
+   *
+   * Driven purely by broadcasts, with no local clock. The countdown deliberately is NOT shown
+   * here: the wall screen already runs a draining bar, and a second timer on the phone invites
+   * players to watch their hand instead of the board — which is where their feet need to be
+   * taking them. All this has to say is which letter, in the colour it appears in everywhere
+   * else, big enough to read at a glance mid-run.
+   */
+  function renderCall(call) {
+    if (!calls || !call || !call.symbol) {
+      callring.classList.remove("show", "x", "o");
+      calltext.textContent = "—";
+      return;
+    }
+    var isO = call.symbol === "O";
+    callring.classList.add("show");
+    callring.classList.toggle("o", isO);
+    callring.classList.toggle("x", !isO);
+    calltext.textContent = call.symbol;
+  }
+
+  var MODE_LABELS = { escape: "escape", survival: "saws", calls: "X or O" };
 
   /**
    * Mode buttons, master controller only — the same shape as the quality row.
@@ -585,7 +635,11 @@
       period = data.sonarPeriod;
       nextPingAt = 0;
     }
-    if (typeof data.mode === "string") survival = data.mode === "survival";
+    if (typeof data.mode === "string") {
+      survival = data.mode === "survival";
+      calls = data.mode === "calls";
+    }
+    renderCall(data.call);
     if (typeof data.exitLeft === "number" && typeof data.exitCapacity === "number") {
       // Capacity 0 is how survival says "there is no gate" — renderGate then empties the row.
       renderGate(data.exitLeft, data.exitCapacity, data.exitOpen);
@@ -627,16 +681,25 @@
 
       // In survival there is no gate to get through, so "made it" means still being alive
       // when the round ended — the last one standing.
-      var out = survival ? state === "alive" : state === "escaped";
+      // Escape is won by getting out; the other two by still being alive at the end.
+      var out = survival || calls ? state === "alive" : state === "escaped";
+      var big, sub;
+      if (calls) {
+        big = out ? "Last one standing" : "Dropped";
+        sub = out ? "You read every call. Tap for a faster board."
+                  : "The floor went out from under you. Tap to step back on.";
+      } else if (survival) {
+        big = out ? "Last one standing" : "Cut down";
+        sub = out ? "You outlasted the floor. Tap for a worse room."
+                  : "The saws got you. Tap to go back in.";
+      } else {
+        big = out ? "You got out" : "You did not";
+        sub = out ? "The gate closed behind you. Tap for the next aisle."
+                  : "The aisle keeps you. Tap to go again.";
+      }
       document.getElementById("bannerBig").className = "big" + (out ? "" : " bad");
-      document.getElementById("bannerBig").textContent = survival
-        ? (out ? "Last one standing" : "Cut down")
-        : (out ? "You got out" : "You did not");
-      document.getElementById("bannerSub").textContent = survival
-        ? (out ? "You outlasted the floor. Tap for a worse room."
-               : "The saws got you. Tap to go back in.")
-        : (out ? "The gate closed behind you. Tap for the next aisle."
-               : "The aisle keeps you. Tap to go again.");
+      document.getElementById("bannerBig").textContent = big;
+      document.getElementById("bannerSub").textContent = sub;
       banner.classList.add("show");
       freeconsole.vibrate(out ? 40 : 15);
     }

@@ -120,7 +120,7 @@ const themeColor = "#05060d";
       </div>
 
       <p class="auth-alt">
-        Just here to play? <a href="/play.html" data-astro-reload style="color:var(--glow);text-decoration:none">Join a game</a> — no account needed.
+        Just here to play? <a href="/play" data-astro-reload style="color:var(--glow);text-decoration:none">Join a game</a> — no account needed.
       </p>
     </section>
   </main>
@@ -150,7 +150,7 @@ const themeColor = "#05060d";
 
     // Where to go once an admin is signed in. ?next= is only honoured for same-origin paths,
     // so this can't be turned into an open redirect.
-    const ADMIN = "/admin.html";
+    const ADMIN = "/admin";
     const next = (() => {
       const raw = new URLSearchParams(location.search).get("next");
       return raw && /^\/[^/]/.test(raw) ? raw : ADMIN;

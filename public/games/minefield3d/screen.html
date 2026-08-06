@@ -49,6 +49,24 @@
   #clock { min-width: 5.5ch; }
   #survivalHud.hot .val { color: var(--hot); }
 
+  /* Calls: the round counter, the called symbol, and the countdown. */
+  #callsHud { display: none; align-items: center; gap: 8px; }
+  #callsHud.show { display: flex; }
+  #callsHud .label {
+    font-family: var(--font-mono); font-size: 9px; letter-spacing: .14em;
+    text-transform: uppercase; color: var(--text-faint);
+  }
+  #callsHud .val {
+    font-family: var(--font-mono); font-weight: 700;
+    font-size: clamp(11px,1.3vw,16px); color: var(--glow);
+  }
+  /* The symbol carries the colour it has on the tiles and the wall — cyan X, pink O — so the
+     three places it appears never have to be mentally reconciled. */
+  #callsHud .sym { font-size: clamp(14px,1.7vw,21px); min-width: 1.6ch; text-align: center; }
+  #callsHud .sym.o { color: var(--hot); }
+  #callClock { min-width: 4ch; }
+  #callsHud.hot #callClock { color: var(--hot); }
+
   #roster { flex: 1; display: flex; gap: 7px; flex-wrap: wrap; justify-content: flex-end; }
   .chip {
     display: flex; align-items: center; gap: 6px;
@@ -157,6 +175,13 @@
     <span class="label">Saws</span>
     <span id="sawVal" class="val">0</span>
   </div>
+  <div id="callsHud">
+    <span class="label">Round</span>
+    <span id="callRound" class="val">0</span>
+    <span class="label">Call</span>
+    <span id="callSym" class="val sym">—</span>
+    <span id="callClock" class="val">—</span>
+  </div>
   <div id="roster"></div>
 </div>
 
@@ -173,15 +198,16 @@
 <script src="/sdk.js"></script>
 <script type="module">
 import * as THREE from "/vendor/three.js?v=5";
-import * as sim from "/games/minefield3d/sim.js?v=8";
-import { LEVELS, getLevel, ARENAS, getArena } from "/games/minefield3d/levels.js?v=6";
+import * as sim from "/games/minefield3d/sim.js?v=11";
+import { LEVELS, getLevel, ARENAS, getArena, STAGES, getStage } from "/games/minefield3d/levels.js?v=7";
 import {
-  createScene, updateCamera, updateArenaCamera, updateFloor, setGateOpen, resize,
+  createScene, updateCamera, updateArenaCamera, updateCallCamera, updateFloor, setGateOpen, resize,
+  updateCallTiles, updateCallBoard,
   buildMineField, updateMineField,
   createPlayerMesh, posePlayer, createKillerMesh, loadAvatar, setAvatar, createBloodSplat,
-  setAvatarHeight, createRoombaMesh, updateRoombaMesh, createClang, stepClang,
+  setAvatarHeight, createRoombaMesh, updateRoombaMesh,
   createPingRing, updatePingRing, createBlast, stepBlast, createPrintMesh,
-} from "/games/minefield3d/scene.js?v=16";
+} from "/games/minefield3d/scene.js?v=18";
 import {
   TIERS, QUALITY_CHOICES, DEFAULT_QUALITY, resolveTier, makeFpsWatchdog,
 } from "/games/minefield3d/quality.js?v=5";
@@ -248,11 +274,21 @@ document.getElementById("quality").textContent = tierName;
  * closed room. The mode owns which table of levels is in play, so every "how many levels are
  * there" question has to go through modeLevels() rather than reading LEVELS directly.
  */
-let mode = params.get("mode") === "survival" ? sim.MODE_SURVIVAL : sim.MODE_ESCAPE;
+let mode = sim.MODES.includes(params.get("mode")) ? params.get("mode") : sim.MODE_ESCAPE;
 
 function isSurvival() { return mode === sim.MODE_SURVIVAL; }
-function modeLevels() { return isSurvival() ? ARENAS : LEVELS; }
-function modeLevel(i) { return isSurvival() ? getArena(i) : getLevel(i); }
+function isCalls() { return mode === sim.MODE_CALLS; }
+
+/** The level table, the getter and the HUD noun for each mode, in one place. */
+const MODE_TABLE = {
+  [sim.MODE_ESCAPE]: { list: () => LEVELS, get: getLevel, noun: "Level " },
+  [sim.MODE_SURVIVAL]: { list: () => ARENAS, get: getArena, noun: "Arena " },
+  [sim.MODE_CALLS]: { list: () => STAGES, get: getStage, noun: "Stage " },
+};
+
+function modeInfo() { return MODE_TABLE[mode] || MODE_TABLE[sim.MODE_ESCAPE]; }
+function modeLevels() { return modeInfo().list(); }
+function modeLevel(i) { return modeInfo().get(i); }
 
 let levelIndex = 0;
 let round = sim.createRound(levelIndex, (Math.random() * 0xffffffff) >>> 0, mode);
@@ -264,11 +300,15 @@ const rosterEl = document.getElementById("roster");
 const slotsEl = document.getElementById("slots");
 const gateEl = document.getElementById("gate");
 const survivalHud = document.getElementById("survivalHud");
+const callsHud = document.getElementById("callsHud");
+const callRoundEl = document.getElementById("callRound");
+const callSymEl = document.getElementById("callSym");
+const callClockEl = document.getElementById("callClock");
 const clockEl = document.getElementById("clock");
 const waveEl = document.getElementById("waveVal");
 const sawEl = document.getElementById("sawVal");
 
-let ctx = createScene(canvas, round.level, Q, isSurvival());
+let ctx = createScene(canvas, round.level, Q, mode);
 resize(ctx, canvas);
 addEventListener("resize", () => resize(ctx, canvas));
 
@@ -288,9 +328,6 @@ const splats = [];            // permanent blood decals, oldest first
  */
 const roombaMeshes = new Map();
 
-/** Live collision sparks. Short-lived, so this stays small even on a busy floor. */
-const clangs = [];
-
 // The crusher spans the aisle, so its geometry depends on the level's width and it is
 // rebuilt whenever the scene is.
 let killer = createKillerMesh(Q, round.level);
@@ -303,11 +340,28 @@ let mineField = buildMineField(round, sim, Q);
 ctx.world.add(mineField.mesh);
 
 /** Rebuild every scene object that depends on the quality tier. */
+/**
+ * How tall a player stands, per mode.
+ *
+ * The 2.5 default was chosen by eye against a 30-tile aisle viewed down its length, where a
+ * figure has to be enormous to read at all. A 6×4 board framed head-on is the opposite problem:
+ * at that height a ninja is taller than two tiles, hides the symbol it is standing on, and
+ * makes it impossible to tell which square anyone is actually occupying — which is the only
+ * thing that matters in this mode.
+ */
+const AVATAR_HEIGHTS = {
+  [sim.MODE_ESCAPE]: 2.5,
+  [sim.MODE_SURVIVAL]: 2.5,
+  [sim.MODE_CALLS]: 0.95,
+};
+
 function rebuildScene() {
   // Drop the old renderer's GPU resources before making another one, or switching tiers a
   // few times leaks a context per switch and the browser kills the canvas.
   const old = ctx;
-  ctx = createScene(canvas, round.level, Q, isSurvival());
+  // Set before any body is built, since the scale is baked into each mesh at creation.
+  setAvatarHeight(AVATAR_HEIGHTS[mode] || 2.5);
+  ctx = createScene(canvas, round.level, Q, mode);
   resize(ctx, canvas);
   old.renderer.dispose();
 
@@ -319,7 +373,6 @@ function rebuildScene() {
   // The machines belong to the disposed scene. Cleared rather than re-parented so the frame
   // loop rebuilds them from the sim, which is the only thing that knows how many there are.
   roombaMeshes.clear();
-  clangs.length = 0;
 
   // Rebuilt rather than re-parented: its width is the aisle's width, so carrying the old one
   // across a level change would leave a crusher sized for the previous aisle.
@@ -329,7 +382,7 @@ function rebuildScene() {
 
   mineField = buildMineField(round, sim, Q);
   // Nothing to show in an arena, and updateMineField never runs there to correct the count.
-  mineField.mesh.visible = !isSurvival();
+  mineField.mesh.visible = mode === sim.MODE_ESCAPE;
   ctx.world.add(mineField.mesh);
 
   for (const id of round.players.keys()) ensureBody(id);
@@ -470,7 +523,7 @@ function loadLevel(index) {
 
   document.getElementById("levelTitle").textContent = modeLevel(levelIndex).name;
   document.querySelector("#levelName .tag").textContent =
-    (isSurvival() ? "Arena " : "Level ") + (levelIndex + 1);
+    modeInfo().noun + (levelIndex + 1);
 
   // The aisle's dimensions change between levels, so the whole scene is rebuilt.
   rebuildScene();
@@ -486,7 +539,7 @@ function loadLevel(index) {
  * silently clamp and land somewhere nobody chose.
  */
 function setMode(next) {
-  if (next !== sim.MODE_SURVIVAL && next !== sim.MODE_ESCAPE) return;
+  if (!sim.MODES.includes(next)) return;
   if (next === mode) return;
 
   mode = next;
@@ -542,7 +595,7 @@ freeconsole.onMessage = function (deviceId, data) {
     // Escape advances on somebody getting out. Survival advances on somebody being the last
     // one standing — in a room where everyone died to the opening pack, the next arena would
     // just be a harder way to lose the same way.
-    const won = isSurvival() ? round.winner !== null : round.escapedOrder.length > 0;
+    const won = mode === sim.MODE_ESCAPE ? round.escapedOrder.length > 0 : round.winner !== null;
     const advance = won && levelIndex + 1 < modeLevels().length;
     loadLevel(advance ? levelIndex + 1 : levelIndex);
     maybeStart();
@@ -560,11 +613,18 @@ function broadcastState(force) {
   for (const [id, p] of round.players) { legs[id] = p.legs; states[id] = p.state; }
 
   const survival = isSurvival();
+  const calls = isCalls();
+  // Only escape has a gate; the other two send capacity 0 so the controller's slot row
+  // renders empty rather than showing a door that does not exist.
+  const gated = mode === sim.MODE_ESCAPE;
 
   const key = JSON.stringify([
     round.phase, legs, states, round.exitOpen, round.exitUsed, levelIndex, mode,
     round.level.exitCapacity, round.level.sonarPeriod, qualityChoice, tierName,
     survival ? round.wave : 0, survival ? round.roombas.length : 0,
+    // The called symbol goes out on change, not the countdown that follows it — the phone
+    // runs its own clock off `callSeconds`, exactly as it does for the sonar period.
+    calls ? round.callRound : 0, calls ? round.called : null, calls ? round.callPhase : "",
   ]);
   if (!force && key === lastStateKey) return;
   lastStateKey = key;
@@ -576,14 +636,23 @@ function broadcastState(force) {
     states,
     // Survival has no gate. Sent as capacity 0 so the controller's slot row renders empty
     // rather than showing a door that does not exist.
-    exitOpen: survival ? false : round.exitOpen,
-    exitLeft: survival ? 0 : Math.max(0, round.level.exitCapacity - round.exitUsed),
-    exitCapacity: survival ? 0 : round.level.exitCapacity,
+    exitOpen: gated ? round.exitOpen : false,
+    exitLeft: gated ? Math.max(0, round.level.exitCapacity - round.exitUsed) : 0,
+    exitCapacity: gated ? round.level.exitCapacity : 0,
     sonarPeriod: round.level.sonarPeriod,
     level: levelIndex + 1,
     levelName: modeLevel(levelIndex).name,
     wave: survival ? round.wave : 0,
     saws: survival ? round.roombas.length : 0,
+    // Calls: which symbol is up, how long it was given, and where the cycle is. The phone
+    // shows the letter so a player can glance down instead of up, which matters most in the
+    // back row where the wall screen is furthest away.
+    call: calls ? {
+      round: round.callRound,
+      symbol: round.called === null ? null : (round.called === sim.SYM_O ? "O" : "X"),
+      phase: round.callPhase,
+      seconds: round.callTime,
+    } : null,
     quality: { choice: qualityChoice, tier: tierName, choices: QUALITY_CHOICES },
     modes: { current: mode, choices: sim.MODES },
   }));
@@ -616,12 +685,14 @@ function renderRoster() {
 }
 
 function renderSlots() {
-  // The two modes own the same strip of HUD: escape shows the gate's remaining capacity,
-  // survival shows the clock and the wave. Exactly one is ever visible.
+  // The three modes own the same strip of HUD: escape shows the gate's remaining capacity,
+  // survival the clock and the wave, calls the round and the countdown. Exactly one is visible.
   const survival = isSurvival();
-  gateEl.style.display = survival ? "none" : "";
+  const calls = isCalls();
+  gateEl.style.display = survival || calls ? "none" : "";
   survivalHud.classList.toggle("show", survival);
-  if (survival) return;
+  callsHud.classList.toggle("show", calls);
+  if (survival || calls) return;
 
   const cap = round.level.exitCapacity;
   slotsEl.innerHTML = "";
@@ -639,6 +710,32 @@ function renderSlots() {
  * It is the score, so it has to move continuously — driving it off the change-keyed broadcast
  * would step it once a second at best and make the one number the mode is about look frozen.
  */
+/**
+ * The calls readout, ticked from the frame loop for the same reason the survival clock is:
+ * the countdown is the tension, and stepping it once per broadcast would look frozen.
+ */
+function renderCallsHud() {
+  if (!isCalls()) return;
+  callRoundEl.textContent = String(round.callRound);
+
+  const showing = round.called !== null && round.callPhase === sim.CALL_SHOWING;
+  if (showing) {
+    const isO = round.called === sim.SYM_O;
+    callSymEl.textContent = isO ? "O" : "X";
+    callSymEl.classList.toggle("o", isO);
+    callClockEl.textContent = Math.max(0, round.callLeft).toFixed(1);
+    callsHud.classList.toggle("hot", round.callLeft < round.callTime * 0.28);
+  } else {
+    // Between calls there is deliberately nothing to read. A stale symbol left up during the
+    // drop is worse than a dash — players glance at it and move toward an answer that has
+    // already been resolved.
+    callSymEl.textContent = "—";
+    callSymEl.classList.remove("o");
+    callClockEl.textContent = "—";
+    callsHud.classList.remove("hot");
+  }
+}
+
 function renderSurvivalHud() {
   if (!isSurvival()) return;
   clockEl.textContent = round.t.toFixed(1) + "s";
@@ -669,6 +766,7 @@ function showWaiting() {
 
 function showResults() {
   if (isSurvival()) { showSurvivalResults(); return; }
+  if (isCalls()) { showCallsResults(); return; }
 
   const escaped = round.escapedOrder;
   // Spectators — phones that joined or reloaded mid-round — are in neither column. They did
@@ -704,6 +802,43 @@ function showResults() {
  * out or you did not — but survival's only fact is how long each person lasted, so the board
  * has to say it explicitly or the round has no outcome at all.
  */
+/**
+ * Calls' end card: ranked by time survived, but headlined by rounds.
+ *
+ * The ranking still comes from survivalRanking — going down later is going down later, and the
+ * two modes agree on that. What differs is the number a player actually cares about: "I lasted
+ * nine calls" is the sentence people say out loud, where the seconds are just how the ordering
+ * happens to be computed.
+ */
+function showCallsResults() {
+  const ranked = sim.survivalRanking(round);
+  const champ = ranked.length ? ranked[0] : null;
+  const survived = !!champ && champ.alive;
+
+  let rows = "";
+  ranked.forEach((entry, i) => {
+    const label = escapeHtml(nameOf(entry.id)) + " — " + entry.time.toFixed(1) + "s";
+    rows += i === 0
+      ? "<div><b>" + (i + 1) + ". " + label + "</b>" + (entry.alive ? " — still standing" : "") + "</div>"
+      : "<div>" + (i + 1) + ". " + label + "</div>";
+  });
+
+  const more = levelIndex + 1 < modeLevels().length;
+
+  overlay.classList.remove("hidden");
+  overlay.innerHTML =
+    '<div class="big' + (survived ? "" : " bad") + '">' +
+      (survived ? "Last one standing" : "The floor wins") + "</div>" +
+    '<div class="sub">' + round.callRound + " call" + (round.callRound === 1 ? "" : "s") +
+      " survived</div>" +
+    '<div class="roll">' + rows + "</div>" +
+    '<div class="sub">' +
+      (survived
+        ? (more ? "Tap for a faster board." : "That was the last board. Tap to run it again.")
+        : "Tap to step back on.") +
+    "</div>";
+}
+
 function showSurvivalResults() {
   const ranked = sim.survivalRanking(round);
   const champ = ranked.length ? ranked[0] : null;
@@ -785,16 +920,9 @@ function drainEvents() {
       renderRoster();
       broadcastState();
     } else if (e.type === "clang") {
-      // Machine-on-machine hits are frequent, so this stays cheap and is capped rather than
-      // trusted to be rare — a late round on The Grinder can throw several in one frame.
-      if (clangs.length < 14) {
-        const fx = createClang(e.hard);
-        fx.group.position.set(e.x, 0, e.z);
-        ctx.world.add(fx.group);
-        clangs.push(fx);
-      }
-      // Only the real collisions kick the camera. Adding a shake per wall bounce meant the
-      // frame never sat still for a moment in a room with a dozen machines in it.
+      // Nothing is drawn for a collision — the machines changing direction is the whole tell.
+      // Only the real machine-on-machine hits kick the camera; a shake per wall bounce meant
+      // the frame never sat still for a moment in a room with a dozen machines in it.
       if (e.hard) shake = Math.min(1, shake + 0.16);
     } else if (e.type === "wave") {
       shake = Math.min(1, shake + 0.4);
@@ -910,6 +1038,13 @@ function frame(ts) {
     killer.group.visible = false;
     syncRoombas(dt);
     renderSurvivalHud();
+  } else if (isCalls()) {
+    // The aisle crusher is not the one under this stage; that one is scenery built into the
+    // scene and needs no per-frame work.
+    killer.group.visible = false;
+    if (ctx.tiles) updateCallTiles(ctx.tiles, round, sim, dt);
+    if (ctx.board) updateCallBoard(ctx.board, round, sim);
+    renderCallsHud();
   } else {
     // The crusher, once it is actually in the aisle. It is always centred on the aisle's width
     // — it spans the whole thing, so there is no lateral position to track.
@@ -926,19 +1061,18 @@ function frame(ts) {
     }
   }
 
-  for (let i = clangs.length - 1; i >= 0; i--) {
-    if (!stepClang(clangs[i], dt)) {
-      ctx.world.remove(clangs[i].group);
-      clangs.splice(i, 1);
-    }
-  }
 
-  updateFloor(ctx, round, sim, ts);
+  // Calls has no shared floor mesh at all — its ground is 24 independent tiles.
+  if (!isCalls()) updateFloor(ctx, round, sim, ts);
   // Survival lays no mines, so there is nothing for the instanced field to draw. Skipped
   // rather than left to find zero mines every frame — it is a full sweep of the tile grid.
-  if (!isSurvival()) updateMineField(mineField, round, sim, Q, ts);
+  if (mode === sim.MODE_ESCAPE) updateMineField(mineField, round, sim, Q, ts);
 
-  if (isSurvival()) {
+  if (isCalls()) {
+    // A fixed shot framing the grid and the wall screen together — both have to be readable at
+    // once, since the whole mode is matching one to the other.
+    updateCallCamera(ctx, dt);
+  } else if (isSurvival()) {
     // A fixed shot of the whole room. There is no pack to follow and no direction that counts
     // as progress, so the camera's job is to hold every machine on screen at once.
     updateArenaCamera(ctx, dt);
@@ -972,6 +1106,17 @@ function updateDread() {
   if (round.phase !== "running") { clear(); return; }
 
   let nearest = Infinity;
+
+  if (isCalls()) {
+    // The threat here is a deadline, not a distance, so the wash is driven by the clock. It
+    // rises through the last third of the call and snaps off the moment the drop resolves —
+    // which makes it read as "time is nearly up" rather than as "something is near you".
+    const showing = round.called !== null && round.callPhase === sim.CALL_SHOWING;
+    if (!showing) { clear(); return; }
+    const frac = Math.max(0, Math.min(1, round.callLeft / Math.max(0.001, round.callTime)));
+    setDread(Math.max(0, 1 - frac / 0.35) * 0.55);
+    return;
+  }
 
   if (isSurvival()) {
     // Distance from any living player to the nearest blade. The vignette is the one cue that
@@ -1058,7 +1203,10 @@ loadAvatar().then((gltf) => {
   // it would drop them all back to the default height.
   if (SIZES) return;
   setAvatar(gltf);
-  // Re-make any bodies that were built before it arrived.
+  // Re-make any bodies that were built before it arrived, at the current mode's scale — the
+  // model can land after rebuildScene has already set it, and rebuilding at the default would
+  // silently put aisle-sized figures on a 6×4 board.
+  setAvatarHeight(AVATAR_HEIGHTS[mode] || 2.5);
   for (const id of [...bodies.keys()]) {
     dropBody(id);
     ensureBody(id);
@@ -1103,7 +1251,7 @@ if (TEST) {
     }
     // Toggle modes from the keyboard, so both games can be driven without a phone.
     if (e.code === "KeyM") {
-      setMode(isSurvival() ? sim.MODE_ESCAPE : sim.MODE_SURVIVAL);
+      setMode(sim.MODES[(sim.MODES.indexOf(mode) + 1) % sim.MODES.length]);
       sim.addPlayer(round, 1);
       ensureBody(1);
       for (let i = 0; i < BOTS; i++) { const id = 2 + i; sim.addPlayer(round, id); ensureBody(id); }
@@ -1132,6 +1280,26 @@ if (TEST) {
         const id = 2 + i;
         const p = round.players.get(id);
         if (!p || p.state !== sim.ALIVE) continue;
+        // Calls bots head for the nearest tile bearing the called symbol, which is exactly
+        // what a player does — so a bot round exercises the real failure mode: several of
+        // them converging on the same safe tile from opposite sides.
+        if (isCalls()) {
+          if (round.called === null) { sim.setAxis(round, id, 0, 0); continue; }
+          let best = null;
+          let bestD = Infinity;
+          for (let z = 0; z < round.rows; z++) {
+            for (let x = 0; x < round.cols; x++) {
+              if (sim.tileSymbolAt(round, x, z) !== round.called) continue;
+              if (sim.tileStateAt(round, x, z) !== sim.TILE_SOLID) continue;
+              const d = Math.hypot(x + 0.5 - p.x, z + 0.5 - p.z);
+              if (d < bestD) { bestD = d; best = { x: x + 0.5, z: z + 0.5 }; }
+            }
+          }
+          if (!best || bestD < 0.12) { sim.setAxis(round, id, 0, 0); continue; }
+          sim.setAxis(round, id, (best.x - p.x) / bestD, (best.z - p.z) / bestD);
+          continue;
+        }
+
         if (!memory.has(id)) memory.set(id, new Set());
         const known = memory.get(id);
         for (let z = 0; z < round.rows; z++) {

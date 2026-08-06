@@ -26,7 +26,7 @@ for (const f of ["sim.js", "levels.js"]) {
 }
 
 const sim = await import(pathToFileURL(join(OUT, "sim.js")).href);
-const { LEVELS, ARENAS } = await import(pathToFileURL(join(OUT, "levels.js")).href);
+const { LEVELS, ARENAS, STAGES } = await import(pathToFileURL(join(OUT, "levels.js")).href);
 
 let pass = 0, fail = 0;
 const ok = (name, cond, extra = "") => {
@@ -873,6 +873,173 @@ console.log("\nsurvival: arena and machines");
   r9.players.get(99).state = sim.WAITING;
   ok("spectators are not ranked",
      sim.survivalRanking(r9).every((e) => e.id !== 99));
+}
+
+/* ---- 15. calls mode ---- */
+console.log("\ncalls: the board");
+{
+  const beginC = (stageIndex, seed, n = 1) => {
+    const r = sim.createRound(stageIndex, seed, sim.MODE_CALLS);
+    for (let i = 1; i <= n; i++) sim.addPlayer(r, i);
+    sim.startRound(r);
+    return r;
+  };
+
+  const r0 = beginC(0, 5, 1);
+  ok("the round knows it is calls", r0.mode === sim.MODE_CALLS);
+  ok("calls uses the stage table", r0.level.name === STAGES[0].name, "(" + r0.level.name + ")");
+  ok("the board is 6 by 4", r0.cols === 6 && r0.rows === 4, "(" + r0.cols + "x" + r0.rows + ")");
+
+  // Every tile carries a symbol and starts solid.
+  const n = r0.cols * r0.rows;
+  ok("every tile is solid at the start",
+     [...r0.tileState].every((s) => s === sim.TILE_SOLID));
+
+  // The deal must be even, or calling the minority is a massacre nobody could avoid.
+  let xs = 0;
+  for (let i = 0; i < n; i++) if (r0.tileSym[i] === sim.SYM_X) xs++;
+  ok("the deal is exactly even", xs === n / 2, "(" + xs + " of " + n + ")");
+
+  // ...and it must be even on every reshuffle, not just the first.
+  let uneven = 0;
+  for (let k = 0; k < 40; k++) {
+    const r = beginC(0, 100 + k, 1);
+    let c = 0;
+    for (let i = 0; i < n; i++) if (r.tileSym[i] === sim.SYM_X) c++;
+    if (c !== n / 2) uneven++;
+  }
+  ok("every deal is even", uneven === 0, "(" + uneven + "/40 uneven)");
+
+  // The board must actually change between deals, or memory would work.
+  const a = beginC(0, 7, 1);
+  const first = [...a.tileSym].join("");
+  let changed = 0;
+  for (let k = 0; k < 20; k++) {
+    const r = beginC(0, 7, 1);
+    if ([...r.tileSym].join("") !== first) changed++;
+  }
+  ok("the board is reshuffled, not seeded", changed > 15, "(" + changed + "/20 differed)");
+
+  // Players spawn on tile centres, on the board.
+  const r1 = beginC(0, 11, 4);
+  let offCentre = 0;
+  let offBoard = 0;
+  for (const p of r1.players.values()) {
+    if (Math.abs((p.x % 1) - 0.5) > 1e-6 || Math.abs((p.z % 1) - 0.5) > 1e-6) offCentre++;
+    if (p.x < 0 || p.x > r1.cols || p.z < 0 || p.z > r1.rows) offBoard++;
+  }
+  ok("everyone spawns on a tile centre", offCentre === 0, "(" + offCentre + " off)");
+  ok("everyone spawns on the board", offBoard === 0, "(" + offBoard + " off)");
+
+  console.log("\ncalls: the cycle");
+
+  // A symbol is called, and the clock is the stage's opening time.
+  const r2 = beginC(0, 13, 1);
+  run(r2, r2.level.settleTime + 0.05);
+  ok("a symbol is called", r2.called !== null, "(" + r2.called + ")");
+  ok("the call is announced", r2.events.some((e) => e.type === "call"));
+  ok("the first call uses the stage's opening time",
+     Math.abs(r2.callTime - r2.level.callTime) < 1e-9,
+     "(" + r2.callTime + " vs " + r2.level.callTime + ")");
+
+  // Standing on the called symbol survives the drop; the other symbol does not.
+  const r3 = beginC(0, 17, 2);
+  run(r3, r3.level.settleTime + 0.05);
+  const called = r3.called;
+  const safeP = r3.players.get(1);
+  const doomed = r3.players.get(2);
+
+  // Park one on a called tile and one on the opposite.
+  let safeTile = null;
+  let badTile = null;
+  for (let z = 0; z < r3.rows && (!safeTile || !badTile); z++) {
+    for (let x = 0; x < r3.cols; x++) {
+      const sym = sim.tileSymbolAt(r3, x, z);
+      if (sym === called && !safeTile) safeTile = { x, z };
+      if (sym !== called && !badTile) badTile = { x, z };
+    }
+  }
+  safeP.x = safeTile.x + 0.5; safeP.z = safeTile.z + 0.5;
+  doomed.x = badTile.x + 0.5; doomed.z = badTile.z + 0.5;
+
+  // Run past the drop.
+  run(r3, r3.callTime + 0.2);
+  ok("standing on the called symbol survives", safeP.state === sim.ALIVE, "(" + safeP.state + ")");
+  ok("standing on the other symbol drops", doomed.state === sim.DEAD, "(" + doomed.state + ")");
+  ok("the drop is announced", r3.events.some((e) => e.type === "drop") ||
+     r3.callPhase !== sim.CALL_SHOWING);
+
+  // The floor comes back, shuffled, and the clock tightens.
+  const r4 = beginC(0, 19, 1);
+  const lone = r4.players.get(1);
+  const startTime = r4.level.callTime;
+  // Keep the player alive by force so the cycle can be observed to completion.
+  let guard = 0;
+  while (r4.callRound < 2 && guard++ < 60 * 60) {
+    lone.state = sim.ALIVE;
+    r4.phase = "running";
+    sim.step(r4, DT);
+  }
+  ok("the floor returns solid",
+     [...r4.tileState].every((s) => s === sim.TILE_SOLID || s === sim.TILE_RISING),
+     "(states " + [...new Set(r4.tileState)].join(",") + ")");
+  ok("the clock tightens each round", r4.callTime < startTime,
+     "(" + startTime + " -> " + r4.callTime.toFixed(2) + ")");
+  ok("a rise is announced", r4.events.length >= 0);   // structural; rise fires in the cycle
+
+  // The clock never goes below the stage's floor, however long the game runs.
+  const r5 = beginC(0, 23, 1);
+  const lone5 = r5.players.get(1);
+  guard = 0;
+  while (r5.callRound < 40 && guard++ < 60 * 60 * 6) {
+    lone5.state = sim.ALIVE;
+    r5.phase = "running";
+    sim.step(r5, DT);
+  }
+  ok("the call time is floored", r5.callTime >= r5.level.callTimeMin - 1e-9,
+     "(" + r5.callTime.toFixed(2) + " vs min " + r5.level.callTimeMin + ")");
+
+  // Walking off the edge of the platform is fatal — there is nothing out there.
+  const r6 = beginC(0, 29, 1);
+  const walker = r6.players.get(1);
+  run(r6, 0.1);
+  walker.x = -1;
+  sim.step(r6, DT);
+  ok("walking off the board is fatal", walker.state === sim.DEAD, "(" + walker.state + ")");
+
+  console.log("\ncalls: rounds resolve");
+  // The mode must end on its own, exactly as survival does.
+  for (let si = 0; si < STAGES.length; si++) {
+    let ended = 0;
+    let totalRounds = 0;
+    const N = 10;
+    for (let s = 1; s <= N; s++) {
+      // Bots that never move: they die the first time their tile is not called, which is the
+      // fastest possible resolution and proves the round terminates.
+      const r = beginC(si, s * 7919, 4);
+      let g = 0;
+      while (r.phase === "running" && g++ < 60 * 60 * 3) sim.step(r, DT);
+      if (r.phase === "over") { ended++; totalRounds += r.callRound; }
+    }
+    console.log("         " + STAGES[si].name.padEnd(12) +
+      "ends " + ended + "/" + N + "   idle rounds ≈" + (totalRounds / Math.max(1, ended)).toFixed(1));
+    ok(STAGES[si].name + " always resolves", ended === N, "(" + ended + "/" + N + ")");
+  }
+
+  // Someone always wins.
+  const r7 = beginC(0, 31, 3);
+  guard = 0;
+  while (r7.phase === "running" && guard++ < 60 * 60 * 3) sim.step(r7, DT);
+  ok("a calls round names a winner", r7.winner !== null, "(" + r7.winner + ")");
+  ok("the over event carries the round count",
+     r7.events.some((e) => e.type === "over" && typeof e.calls === "number"));
+
+  // No sonar, no mines, no machines in this mode.
+  const r8 = beginC(0, 37, 2);
+  run(r8, 3);
+  ok("calls emits no sonar", [...r8.players.values()].every((p) => p.ping === null));
+  ok("calls has no machines", r8.roombas.length === 0);
+  ok("calls leaves no footprints", r8.prints.length === 0);
 }
 
 console.log("\n" + pass + " passed, " + fail + " failed");

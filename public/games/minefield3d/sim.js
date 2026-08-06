@@ -14,7 +14,7 @@
  * end, closest to the camera) and walk toward the gate at z = 0. x is the narrow axis.
  */
 
-import { getLevel, getArena } from "/games/minefield3d/levels.js?v=6";
+import { getLevel, getArena, getStage } from "/games/minefield3d/levels.js?v=7";
 
 /* ------------------------------------------------------------------ constants */
 
@@ -44,7 +44,49 @@ export const MODE_ESCAPE = "escape";
  */
 export const MODE_SURVIVAL = "survival";
 
-export const MODES = [MODE_ESCAPE, MODE_SURVIVAL];
+/**
+ * Calls: a 6×4 grid of X/O tiles, a symbol called on the back wall, and a clock. When it hits
+ * zero every tile bearing the other symbol drops into the crusher below.
+ *
+ * The reaction test of the three. Escape is solved by reading the ground and survival by
+ * reading movement; here the answer is on the wall in letters a metre high and the only
+ * question is whether you can get your body onto it in time. Nothing is hidden, so nothing
+ * needs sonar, mines or machines — the mode is a timer and a floor that goes away.
+ */
+export const MODE_CALLS = "calls";
+
+export const MODES = [MODE_ESCAPE, MODE_SURVIVAL, MODE_CALLS];
+
+/* -------------------------------------------------------------------- calls */
+
+/** The two symbols a tile can carry. Stored on the round as a Uint8Array of these. */
+export const SYM_X = 0;
+export const SYM_O = 1;
+
+/**
+ * Where a tile is in its drop cycle.
+ *
+ * SOLID is the only state you can stand on. FALLING and GONE both kill, and RISING is the
+ * grace window where a tile is on its way back but not yet safe to be caught on — a player
+ * standing in that column as it returns is simply lifted with it, which is why RISING must be
+ * distinguishable from SOLID rather than folded into it.
+ */
+export const TILE_SOLID = 0;
+export const TILE_FALLING = 1;
+export const TILE_GONE = 2;
+export const TILE_RISING = 3;
+
+/**
+ * Phases of a single call, in order.
+ *
+ * SHOWING is the thinking time — the symbol is up and the clock is visible. DROPPING is the
+ * moment of truth. HANGING is the empty floor. RISING brings it back. Each is a fixed duration
+ * from the Stage except SHOWING, which shortens every round and is the entire escalation.
+ */
+export const CALL_SHOWING = "showing";
+export const CALL_DROPPING = "dropping";
+export const CALL_HANGING = "hanging";
+export const CALL_RISING = "rising";
 
 /* ------------------------------------------------------------------ roombas */
 
@@ -149,12 +191,21 @@ function makeRng(seed) {
 
 /* -------------------------------------------------------------------- rounds */
 
+/** The level table each mode draws from. Adding a mode means adding a row here, not a ternary. */
+const LEVEL_SOURCE = {
+  [MODE_ESCAPE]: getLevel,
+  [MODE_SURVIVAL]: getArena,
+  [MODE_CALLS]: getStage,
+};
+
 export function createRound(levelIndex, seed, mode = MODE_ESCAPE) {
-  const survival = mode === MODE_SURVIVAL;
-  const level = survival ? getArena(levelIndex) : getLevel(levelIndex);
+  // An unknown mode falls back to escape rather than throwing: this arrives from a controller
+  // message, and a bad string should cost the room a wrong game, not a dead screen.
+  const resolved = LEVEL_SOURCE[mode] ? mode : MODE_ESCAPE;
+  const level = LEVEL_SOURCE[resolved](levelIndex);
   const round = {
     level,
-    mode: survival ? MODE_SURVIVAL : MODE_ESCAPE,
+    mode: resolved,
     levelIndex: levelIndex | 0,
     seed: seed >>> 0,
     phase: "briefing",
@@ -186,6 +237,24 @@ export function createRound(levelIndex, seed, mode = MODE_ESCAPE) {
     /** Seconds the last player standing lasted, and the order people went down in. */
     lastStand: 0,
     downOrder: [],
+
+    /* calls only — inert in the other two modes */
+
+    /** One symbol per tile, SYM_X or SYM_O. Reshuffled every time the floor comes back. */
+    tileSym: null,
+    /** One TILE_* state per tile. Only TILE_SOLID holds weight. */
+    tileState: null,
+    /** How far each tile has fallen, in world units. Purely for the renderer. */
+    tileDrop: null,
+    /** Which symbol is currently called, or null before the first one. */
+    called: null,
+    /** Where we are in the call cycle, and how long is left in it. */
+    callPhase: CALL_SHOWING,
+    callLeft: 0,
+    /** Seconds of thinking time this round — shrinks as the game goes on. */
+    callTime: 0,
+    /** How many calls have been survived. This is the score. */
+    callRound: 0,
   };
 
   generateField(round);
@@ -201,6 +270,11 @@ function generateField(round) {
 
   if (round.mode === MODE_SURVIVAL) {
     generateArenaField(round, rng);
+    return;
+  }
+
+  if (round.mode === MODE_CALLS) {
+    generateStageField(round);
     return;
   }
 
@@ -241,6 +315,56 @@ function generateArenaField(round, rng) {
   round.exitFrom = -1;
   round.exitTo = -1;
   round.exitOpen = false;
+}
+
+/**
+ * Prepare the call stage: a solid grid, no symbols yet.
+ *
+ * The symbols are deliberately NOT laid down here. They are dealt by shuffleTiles at the top of
+ * every call, so a round that is reset and restarted does not replay the same board — the whole
+ * mechanic depends on the grid being unmemorisable.
+ */
+function generateStageField(round) {
+  const n = round.level.cols * round.level.rows;
+  round.tileSym = new Uint8Array(n);
+  round.tileState = new Uint8Array(n);      // all TILE_SOLID, which is 0
+  round.tileDrop = new Float32Array(n);
+
+  // No gate here either, for the same reason as the arena.
+  round.exitFrom = -1;
+  round.exitTo = -1;
+  round.exitOpen = false;
+}
+
+/**
+ * Deal a fresh X/O across every tile, and stand them all back up.
+ *
+ * Called once per cycle, as the floor returns. Deliberately unseeded — it uses Math.random
+ * rather than the round's rng, because a seeded shuffle would make the whole game replay
+ * identically for a given seed and the point is that the next board is never knowable.
+ *
+ * The split is forced to be roughly even rather than left to chance. Left alone, an unlucky
+ * deal puts 22 of 24 tiles on one symbol, and calling the minority then kills almost everyone
+ * at once through no fault of theirs — a coin flip dressed up as a reaction test.
+ */
+function shuffleTiles(round) {
+  const n = round.level.cols * round.level.rows;
+  const half = Math.floor(n / 2);
+
+  // Build an exactly-even bag, then shuffle it. This guarantees both symbols are always
+  // reachable, which is what makes the call fair.
+  for (let i = 0; i < n; i++) round.tileSym[i] = i < half ? SYM_X : SYM_O;
+  for (let i = n - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const tmp = round.tileSym[i];
+    round.tileSym[i] = round.tileSym[j];
+    round.tileSym[j] = tmp;
+  }
+
+  for (let i = 0; i < n; i++) {
+    round.tileState[i] = TILE_SOLID;
+    round.tileDrop[i] = 0;
+  }
 }
 
 /**
@@ -397,6 +521,17 @@ export function startRound(round) {
     for (let i = 0; i < round.level.startRoombas; i++) spawnRoomba(round, i);
   }
 
+  if (round.mode === MODE_CALLS) {
+    round.callRound = 0;
+    round.callTime = round.level.callTime;
+    round.called = null;
+    shuffleTiles(round);
+    // Open on the settle window rather than on a live call, so the first thing players get is
+    // a moment to look at the board before anything is demanded of them.
+    round.callPhase = CALL_RISING;
+    round.callLeft = round.level.settleTime;
+  }
+
   round.events.push({ type: "start" });
 }
 
@@ -411,6 +546,18 @@ function resetPlayer(round, p, index, total) {
     p.z = round.level.rows / 2 + Math.sin(a) * r;
     // Facing outward, at whatever is coming.
     p.heading = Math.atan2(Math.cos(a), Math.sin(a));
+  } else if (round.mode === MODE_CALLS) {
+    // Spread along the row nearest the camera, each on their own tile centre. Standing on a
+    // centre rather than on a seam matters: the first call is resolved by which tile you are
+    // over, and a player straddling two of them at t=0 would be at the mercy of a rounding
+    // decision they never made.
+    const col = total <= 1
+      ? Math.floor(round.level.cols / 2)
+      : Math.round((index / (total - 1)) * (round.level.cols - 1));
+    p.x = col + 0.5;
+    p.z = round.level.rows - 0.5;
+    // Facing the wall screen, which is the thing they need to be looking at.
+    p.heading = Math.PI;
   } else {
     // Spread the line across the aisle's width. In a narrow aisle everyone is close to
     // everyone, which is the point: your neighbour's light is nearly as useful as your own.
@@ -455,10 +602,16 @@ export function step(round, dt) {
   for (const p of round.players.values()) stepPing(round, p, dt);
 
   // The one branch in the loop. Escape has a press behind you; survival has machines on the
-  // floor with you. Everything else — sonar, movement, mines, prints — is identical.
+  // floor with you; calls has a floor that goes away. Everything else — sonar, movement,
+  // mines, prints — is identical.
   if (round.mode === MODE_SURVIVAL) {
     stepWaves(round);
     stepRoombas(round, dt);
+    for (const p of round.players.values()) {
+      if (p.state === ALIVE) p.survivedFor = round.t;
+    }
+  } else if (round.mode === MODE_CALLS) {
+    stepCalls(round, dt);
     for (const p of round.players.values()) {
       if (p.state === ALIVE) p.survivedFor = round.t;
     }
@@ -467,6 +620,11 @@ export function step(round, dt) {
   }
 
   for (const p of round.players.values()) stepPlayer(round, p, dt);
+
+  // Falling happens after movement, so a player who steps onto solid ground in the last
+  // fraction of a second is genuinely safe. Resolved the other way round, the drop would read
+  // the position they held at the top of the frame and kill people who had already made it.
+  if (round.mode === MODE_CALLS) checkFooting(round);
 
   agePrints(round, dt);
   checkOver(round);
@@ -484,7 +642,7 @@ function stepPing(round, p, dt) {
   // No echolocation in survival. It exists to find things hidden on the floor, and an arena
   // hides nothing — the machines are lit, moving, and the only thing worth looking at. Leaving
   // it in meant a ring sweeping the room every 1.6 seconds that revealed bare ground.
-  if (round.mode === MODE_SURVIVAL) { p.ping = null; return; }
+  if (round.mode !== MODE_ESCAPE) { p.ping = null; return; }
 
   if (p.ping) {
     p.ping.r += level.sonarSpeed * dt;
@@ -677,12 +835,12 @@ function stepRoombas(round, dt) {
       nx = Math.max(lo, Math.min(hiX, nx));
       // heading is atan2(sin, cos) with x = sin, so mirroring x is negating the angle.
       r.heading = -r.heading;
-      wallKick(round, r, nx, nz);
+      wallKick(r);
     }
     if (nz < lo || nz > hiZ) {
       nz = Math.max(lo, Math.min(hiZ, nz));
       r.heading = Math.PI - r.heading;
-      wallKick(round, r, nx, nz);
+      wallKick(r);
     }
 
     r.x = nx;
@@ -697,16 +855,20 @@ function stepRoombas(round, dt) {
 }
 
 /**
- * Kick a machine off a wall with a little scatter, and tell the renderer about it.
+ * Kick a machine off a wall with a little scatter.
  *
  * The randomness is the point. A perfectly elastic bounce is deterministic: a saw entering a
  * corner at a known angle leaves at a known angle, and a room of them settles into stable
  * repeating orbits that players simply memorise. A few degrees of noise on every bounce keeps
  * the floor from ever resolving into a pattern.
+ *
+ * Deliberately silent. This used to raise a soft `clang` event, but nothing consumes it: the
+ * ring that once drew here is gone and only hard machine-on-machine hits kick the camera. With
+ * a dozen machines it was pushing dead events onto the queue several times a second for the
+ * drain loop to walk past.
  */
-function wallKick(round, r, x, z) {
+function wallKick(r) {
   r.heading += (Math.random() - 0.5) * WALL_SCATTER;
-  round.events.push({ type: "clang", x, z, hard: false });
 }
 
 /**
@@ -822,6 +984,147 @@ function down(round, p, cause) {
   p.survivedFor = round.t;
   round.downOrder.push(p.id);
   kill(round, p, cause);
+}
+
+/* -------------------------------------------------------------- calls: floor */
+
+/**
+ * Drive the call cycle: show a symbol, drop the losers, hang, bring the floor back shuffled.
+ *
+ * A four-state machine on a single countdown rather than a set of timers, so there is exactly
+ * one place a phase can change and no way for two of them to be live at once.
+ */
+function stepCalls(round, dt) {
+  const { level } = round;
+
+  // Tiles that are on their way down or back up keep moving regardless of the phase clock —
+  // their motion is what the renderer draws, and it must not stall between phases.
+  animateTiles(round, dt);
+
+  round.callLeft -= dt;
+  if (round.callLeft > 0) return;
+
+  if (round.callPhase === CALL_RISING) {
+    // The floor is back and settled. Call the next symbol.
+    round.callRound++;
+    round.called = Math.random() < 0.5 ? SYM_X : SYM_O;
+    round.callPhase = CALL_SHOWING;
+    round.callLeft = round.callTime;
+    round.events.push({
+      type: "call",
+      symbol: round.called,
+      seconds: round.callTime,
+      round: round.callRound,
+    });
+    return;
+  }
+
+  if (round.callPhase === CALL_SHOWING) {
+    // Time is up. Everything not bearing the called symbol lets go.
+    let dropped = 0;
+    const n = level.cols * level.rows;
+    for (let i = 0; i < n; i++) {
+      if (round.tileSym[i] === round.called) continue;
+      round.tileState[i] = TILE_FALLING;
+      dropped++;
+    }
+    round.callPhase = CALL_DROPPING;
+    // Long enough for a tile to clear the crusher depth at its fall rate.
+    round.callLeft = Math.max(0.35, level.crusherDepth / level.tileFall);
+    round.events.push({ type: "drop", symbol: round.called, dropped });
+    return;
+  }
+
+  if (round.callPhase === CALL_DROPPING) {
+    // Everything that fell is now gone, and anyone who went with it is already dead — the
+    // footing check killed them on the frame the tile started moving.
+    const n = level.cols * level.rows;
+    for (let i = 0; i < n; i++) {
+      if (round.tileState[i] === TILE_FALLING) round.tileState[i] = TILE_GONE;
+    }
+    round.callPhase = CALL_HANGING;
+    round.callLeft = level.hangTime;
+    return;
+  }
+
+  // CALL_HANGING → the floor comes back, freshly shuffled, and the clock tightens.
+  shuffleTiles(round);
+  round.called = null;
+  round.callTime = Math.max(level.callTimeMin, round.callTime - level.callTimeStep);
+  round.callPhase = CALL_RISING;
+  round.callLeft = level.settleTime;
+  round.events.push({ type: "rise", callTime: round.callTime });
+}
+
+/** Move falling tiles down and returning tiles back up. Presentation only. */
+function animateTiles(round, dt) {
+  const { level } = round;
+  const n = level.cols * level.rows;
+
+  for (let i = 0; i < n; i++) {
+    const s = round.tileState[i];
+    if (s === TILE_FALLING) {
+      round.tileDrop[i] += level.tileFall * dt;
+    } else if (s === TILE_GONE) {
+      round.tileDrop[i] = level.crusherDepth;
+    } else if (s === TILE_RISING) {
+      round.tileDrop[i] = Math.max(0, round.tileDrop[i] - level.tileFall * dt);
+      if (round.tileDrop[i] <= 0) round.tileState[i] = TILE_SOLID;
+    }
+  }
+}
+
+/**
+ * Kill anyone standing where the floor no longer is.
+ *
+ * Checked every frame rather than once at the moment of the drop, because a player can walk
+ * off a solid tile onto a falling one during the drop phase — stepping into the hole after the
+ * call has resolved has to be just as fatal as being caught on the wrong square.
+ */
+function checkFooting(round) {
+  const { cols, rows } = round.level;
+
+  for (const p of round.players.values()) {
+    if (p.state !== ALIVE) continue;
+
+    const tx = Math.floor(p.x);
+    const tz = Math.floor(p.z);
+
+    // Off the grid entirely — walked past the edge. The stage is a platform in mid-air, so
+    // there is nothing out there either.
+    if (tx < 0 || tz < 0 || tx >= cols || tz >= rows) {
+      down(round, p, "fell");
+      continue;
+    }
+
+    const state = round.tileState[tz * cols + tx];
+    if (state === TILE_FALLING || state === TILE_GONE) down(round, p, "fell");
+  }
+}
+
+/** Which symbol a tile carries. Read by the renderer. */
+export function tileSymbolAt(round, tx, tz) {
+  if (!round.tileSym) return SYM_X;
+  if (tx < 0 || tz < 0 || tx >= round.level.cols || tz >= round.level.rows) return SYM_X;
+  return round.tileSym[tz * round.level.cols + tx];
+}
+
+/** A tile's drop state and how far it has fallen. Read by the renderer. */
+export function tileStateAt(round, tx, tz) {
+  if (!round.tileState) return TILE_SOLID;
+  if (tx < 0 || tz < 0 || tx >= round.level.cols || tz >= round.level.rows) return TILE_GONE;
+  return round.tileState[tz * round.level.cols + tx];
+}
+
+export function tileDropAt(round, tx, tz) {
+  if (!round.tileDrop) return 0;
+  if (tx < 0 || tz < 0 || tx >= round.level.cols || tz >= round.level.rows) return 0;
+  return round.tileDrop[tz * round.level.cols + tx];
+}
+
+/** How many calls have been survived. This is the score in calls mode. */
+export function callRound(round) {
+  return round.callRound;
 }
 
 /** How many machines are on the floor. Read by the HUD. */
@@ -1029,10 +1332,10 @@ function checkOver(round) {
     if (p.state === ALIVE) { stillPlaying++; lastAlive = p; }
   }
 
-  if (round.mode === MODE_SURVIVAL) {
-    // Survival ends when there is nobody left to hunt, or one person left to hunt with nobody
-    // to hunt them for. A solo game is the exception: with one player seated there is no "last
-    // one standing" to reach, so it runs until that player is down.
+  // Survival and calls share a win condition: last one standing. It ends when there is nobody
+  // left, or one person left with nobody to beat. A solo game is the exception — with one
+  // player seated there is no "last one standing" to reach, so it runs until they are down.
+  if (round.mode === MODE_SURVIVAL || round.mode === MODE_CALLS) {
     const contested = countContenders(round) > 1;
     if (stillPlaying > (contested ? 1 : 0)) return;
 
@@ -1054,6 +1357,8 @@ function checkOver(round) {
       winner: round.winner,
       lastStand: round.lastStand,
       wave: round.wave,
+      // Calls scores in rounds survived rather than seconds; the screen picks which to show.
+      calls: round.mode === MODE_CALLS ? round.callRound : 0,
     });
     return;
   }

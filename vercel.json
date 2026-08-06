@@ -2,11 +2,26 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "buildCommand": "pnpm build",
   "outputDirectory": "dist",
+  "//cleanUrls": "Deliberately off. cleanUrls is site-wide with no path scoping: it would also 308 /games/<id>/screen.html and controller.html to extensionless paths, and those URLs are load-bearing - iframes load them literally (public/session.js) and the Firestore catalog stores them as data (screenUrl/controllerUrl). The rewrites below give the six real pages extensionless URLs without touching anything under public/.",
   "cleanUrls": false,
   "trailingSlash": false,
+  "rewrites": [
+    { "source": "/play", "destination": "/play.html" },
+    { "source": "/docs", "destination": "/docs.html" },
+    { "source": "/signup", "destination": "/signup.html" },
+    { "source": "/admin", "destination": "/admin.html" },
+    { "source": "/diag", "destination": "/diag.html" }
+  ],
   "headers": [
     {
       "source": "/:_path(.*\\.(?:js|mjs|html))",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-cache, must-revalidate" }
+      ]
+    },
+    {
+      "//": "headers match the *incoming* request path, before rewrites, so the rule above - which needs a literal .html - never fires for the extensionless URLs. Without this they would fall back to Vercel's default caching, which is the stale-ES-module trap: a browser holds one module while fetching a fresh one that imports it, and the mismatched pair fails to link.",
+      "source": "/(play|docs|signup|admin|diag)",
       "headers": [
         { "key": "Cache-Control", "value": "no-cache, must-revalidate" }
       ]

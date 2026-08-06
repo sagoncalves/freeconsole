@@ -15,7 +15,11 @@ import vercel from "@astrojs/vercel";
  *   - ./relay.js etc. are imported by relative URL from inlined page scripts
  *
  * `output: "static"` with `trailingSlash: false` keeps '/play.html' as '/play.html' so QR
- * codes and the ?room= query keep working.
+ * codes and the ?room= query keep working. The prettier '/play' URL is layered on top by
+ * rewrites in vercel.json rather than by Vercel's cleanUrls: cleanUrls is a site-wide
+ * switch that would also 308 '/games/<id>/screen.html' to an extensionless path, and those
+ * URLs are load-bearing - iframes load them literally and the Firestore catalog stores them
+ * as data. Rewrites let the six src/pages URLs go extensionless while public/ is untouched.
  */
 export default defineConfig({
   site: "https://freeconsole.app",

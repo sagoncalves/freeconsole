@@ -437,7 +437,7 @@ const description =
             </p>
             <div class="hero-actions reveal" style="--i:3">
               <button class="btn btn-primary btn-lg" id="startRoom">Start a room</button>
-              <a class="btn btn-ghost btn-lg" href="/play.html" data-astro-reload>I have a code</a>
+              <a class="btn btn-ghost btn-lg" href="/play" data-astro-reload>I have a code</a>
             </div>
          <!--    <ul class="hero-steps reveal" style="--i:4">
               <li><span class="n">1</span> Open a room</li>
@@ -569,7 +569,7 @@ const description =
         empty.innerHTML = `
           <h3>No games yet</h3>
           <p class="muted" style="margin:8px 0 18px">Add one from the admin page to get started.</p>
-          <a class="btn btn-ghost" href="/admin.html" data-astro-reload>Open admin</a>`;
+          <a class="btn btn-ghost" href="/admin" data-astro-reload>Open admin</a>`;
         host.appendChild(empty);
         return;
       }
@@ -639,7 +639,7 @@ const description =
         document.body.classList.add("in-room");
         $("roomCode").textContent = roomCode;
 
-        const joinUrl = `${location.origin}/play.html?room=${roomCode}`;
+        const joinUrl = `${location.origin}/play?room=${roomCode}`;
         $("joinUrl").textContent = joinUrl.replace(/^https?:\/\//, "");
         $("qr").innerHTML = "";
         $("qr").appendChild(renderQR(joinUrl, 48));
@@ -734,7 +734,7 @@ const description =
       if (master === undefined) {
         $("storeEyebrow").textContent = "Store";
         $("storeTitle").textContent = "Waiting for players";
-        $("storeSub").textContent = `Scan the code, or enter it at ${location.host}/play.html`;
+        $("storeSub").textContent = `Scan the code, or enter it at ${location.host}/play`;
       } else {
         $("storeEyebrow").textContent = "Choosing a game";
         $("storeTitle").textContent = `${masterDevice?.nickname || `Player ${master}`} is picking`;

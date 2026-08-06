@@ -38,7 +38,14 @@ const COL = {
  * into the dark. That framing is the whole reason to do this in 3D: in the top-down version
  * you could see the shape of the whole field at once, and here you cannot.
  */
-export function createScene(canvas, level, Q, survival = false) {
+/**
+ * @param {"escape"|"survival"|"calls"} mode Which game this scene is for. Was a boolean
+ *   `survival` flag until a third mode arrived; a string keeps the call sites honest rather
+ *   than growing a second boolean nobody can read at the call site.
+ */
+export function createScene(canvas, level, Q, mode = "escape") {
+  const survival = mode === "survival";
+  const calls = mode === "calls";
   const renderer = new THREE.WebGLRenderer({
     canvas,
     antialias: Q.antialias,
@@ -58,7 +65,11 @@ export function createScene(canvas, level, Q, survival = false) {
   // Survival pushes it back. That camera sits above the whole room rather than down a
   // corridor, so aisle-tuned fog closes over the far wall and hides the machines crossing
   // toward you — and a saw you cannot see coming is the one thing this mode must never have.
-  if (Q.fog) {
+  //
+  // Calls turns it off entirely. That stage is a small lit platform hanging in the dark with a
+  // screen behind it; fog would grey out the screen — the one thing every player must be able
+  // to read — and there is no hidden ground for it to protect.
+  if (Q.fog && !calls) {
     const far = Math.max(level.cols, level.rows);
     scene.fog = survival
       ? new THREE.Fog(0x03040a, far * 0.9, far * 2.1)
@@ -69,7 +80,11 @@ export function createScene(canvas, level, Q, survival = false) {
 
   // Ambient is deliberately almost nothing. The aisle is meant to be dark enough that the
   // sonar is the only real light source; anything more and players can simply see the mines.
-  scene.add(new THREE.AmbientLight(0x2a3550, 0.22));
+  //
+  // Calls is the exception and needs real light: nothing is hidden there, and the entire mode
+  // is reading a symbol on a tile and a symbol on a wall. At aisle ambient the stage renders as
+  // a black rectangle with two glowing shapes floating on it.
+  scene.add(new THREE.AmbientLight(0x2a3550, calls ? 1.35 : 0.22));
 
   // A cold key light from above the gate, so there is a sense of "out there" to walk toward
   // without it illuminating the ground you are standing on.
@@ -95,22 +110,43 @@ export function createScene(canvas, level, Q, survival = false) {
   const world = new THREE.Group();
   scene.add(world);
 
-  const floor = buildFloor(level, Q);
-  world.add(floor.mesh);
-  if (Q.shadows) floor.mesh.receiveShadow = true;
+  // Calls builds its floor as 24 independent tiles instead of one vertex-coloured mesh, since
+  // every tile moves on its own. That is only affordable because the grid is 6×4 — the same
+  // approach on a 22×22 arena would be 484 draw calls.
+  const floor = calls ? null : buildFloor(level, Q);
+  if (floor) {
+    world.add(floor.mesh);
+    if (Q.shadows) floor.mesh.receiveShadow = true;
+  }
+
+  let tiles = null;
+  let board = null;
+  if (calls) {
+    tiles = buildCallTiles(level, Q);
+    world.add(tiles.group);
+    board = buildCallBoard(level);
+    world.add(board.group);
+    world.add(buildCrusher(level));
+  }
 
   // Survival is a sealed room: four walls, no doorway. The gate is still constructed so every
   // caller of setGateOpen keeps working, but it is left out of the scene entirely — a lit exit
   // in a mode with no exit is the single most misleading thing the screen could show.
+  //
+  // Calls gets no walls at all: the stage is a platform in the void, and the drop off its edge
+  // has to be visibly a drop.
   const gate = buildGate(level);
   if (survival) {
     world.add(buildArenaWalls(level));
-  } else {
+  } else if (!calls) {
     world.add(buildWalls(level));
     world.add(gate.group);
   }
 
-  return { renderer, scene, camera, world, floor, gate, level, Q, survival };
+  return {
+    renderer, scene, camera, world, floor, gate, level, Q,
+    mode, survival, calls, tiles, board,
+  };
 }
 
 /**
@@ -545,6 +581,291 @@ export function updateArenaCamera(ctx, dt) {
   // reverted: it tilts the whole arena up in frame and takes the near wall — the one the
   // players are most often backed against — off the bottom of the screen.
   camera.lookAt(level.cols / 2, 0, level.rows / 2);
+}
+
+/* -------------------------------------------------------------------- calls */
+
+const CALL_COL = {
+  x: new THREE.Color("#35f0e0"),
+  o: new THREE.Color("#ff2e88"),
+  tile: new THREE.Color("#141a2c"),
+  tileLit: new THREE.Color("#26314f"),
+};
+
+/**
+ * A drawn X and a drawn O, as flat geometry on the tile's top face.
+ *
+ * Built from boxes rather than from a canvas texture: at 24 tiles a texture per symbol would
+ * mean an atlas and UVs for a shape that is two crossed bars, and the bars read more crisply
+ * from this camera angle than a low-res glyph would.
+ */
+function buildSymbol(sym, colorHex) {
+  const group = new THREE.Group();
+  const mat = new THREE.MeshBasicMaterial({ color: colorHex });
+
+  if (sym === 0) {
+    for (const rot of [Math.PI / 4, -Math.PI / 4]) {
+      const bar = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.02, 0.11), mat);
+      bar.rotation.y = rot;
+      group.add(bar);
+    }
+  } else {
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(0.22, 0.055, 8, 20), mat);
+    ring.rotation.x = -Math.PI / 2;
+    group.add(ring);
+  }
+
+  return { group, mat };
+}
+
+/**
+ * The 6×4 grid, as independent tiles.
+ *
+ * Each tile is its own group so it can drop on its own clock. Both symbols are built onto every
+ * tile up front and toggled with `.visible` — re-creating geometry on each shuffle would mean
+ * 24 allocations and disposals every couple of seconds, which is exactly the kind of churn that
+ * causes a GC hitch at the worst possible moment.
+ */
+export function buildCallTiles(level, Q) {
+  const group = new THREE.Group();
+  const list = [];
+
+  for (let z = 0; z < level.rows; z++) {
+    for (let x = 0; x < level.cols; x++) {
+      const holder = new THREE.Group();
+      holder.position.set(x + 0.5, 0, z + 0.5);
+
+      const mat = new THREE.MeshStandardMaterial({
+        color: CALL_COL.tile, roughness: 0.85, metalness: 0.1,
+      });
+      const slab = new THREE.Mesh(new THREE.BoxGeometry(0.94, 0.22, 0.94), mat);
+      slab.position.y = -0.11;
+      if (Q.shadows) slab.receiveShadow = true;
+      holder.add(slab);
+
+      // A rim light around the top edge, so the grid reads as a grid of separate platforms
+      // rather than as one painted surface with lines on it.
+      const edgeMat = new THREE.MeshBasicMaterial({
+        color: 0x2a4266, transparent: true, opacity: 0.5, depthWrite: false,
+      });
+      const edge = new THREE.Mesh(new THREE.TorusGeometry(0.62, 0.012, 4, 4), edgeMat);
+      edge.rotation.x = -Math.PI / 2;
+      edge.rotation.z = Math.PI / 4;
+      edge.position.y = 0.005;
+      holder.add(edge);
+
+      const xSym = buildSymbol(0, CALL_COL.x.getHex());
+      const oSym = buildSymbol(1, CALL_COL.o.getHex());
+      xSym.group.position.y = 0.012;
+      oSym.group.position.y = 0.012;
+      holder.add(xSym.group);
+      holder.add(oSym.group);
+
+      group.add(holder);
+      list.push({ holder, slab, mat, edgeMat, xSym, oSym, x, z });
+    }
+  }
+
+  return { group, list, cols: level.cols };
+}
+
+/** Sync every tile to the sim: which symbol it shows, how far it has dropped, how lit it is. */
+export function updateCallTiles(tiles, round, sim, dt) {
+  for (const t of tiles.list) {
+    const i = t.z * tiles.cols + t.x;
+    const sym = round.tileSym[i];
+    const state = round.tileState[i];
+
+    t.xSym.group.visible = sym === sim.SYM_X;
+    t.oSym.group.visible = sym === sim.SYM_O;
+
+    t.holder.position.y = -round.tileDrop[i];
+
+    // A tile bearing the called symbol lights up: that is the answer, and it must be readable
+    // from the floor as well as off the wall screen — a player looking down at their own feet
+    // should be able to tell whether they are safe.
+    const safe = round.called !== null && sym === round.called &&
+      (state === sim.TILE_SOLID || state === sim.TILE_RISING);
+    const target = safe ? CALL_COL.tileLit : CALL_COL.tile;
+    t.mat.color.lerp(target, Math.min(1, dt * 8));
+
+    // Falling tiles tumble, so the drop reads as the floor giving way rather than as a lift
+    // going down.
+    if (state === sim.TILE_FALLING) {
+      t.holder.rotation.x += dt * 1.6;
+      t.holder.rotation.z += dt * 1.1;
+    } else if (state === sim.TILE_SOLID) {
+      t.holder.rotation.x = 0;
+      t.holder.rotation.z = 0;
+    }
+  }
+}
+
+/**
+ * The screen on the back wall — the thing every player is actually reading.
+ *
+ * Deliberately enormous and self-lit. This is the only source of information in the mode, it
+ * has to be legible from the far row at a glance and while running, and it is the one object
+ * on screen that must never be ambiguous.
+ */
+export function buildCallBoard(level) {
+  const group = new THREE.Group();
+
+  const w = level.cols * 0.82;
+  const h = 3.6;
+  const cx = level.cols / 2;
+  const z = -1.4;
+
+  // The bezel.
+  const frameMat = new THREE.MeshStandardMaterial({
+    color: 0x0a0d16, roughness: 0.9, metalness: 0.3,
+  });
+  const frame = new THREE.Mesh(new THREE.BoxGeometry(w + 0.5, h + 0.5, 0.3), frameMat);
+  frame.position.set(cx, h / 2 + 0.9, z - 0.16);
+  group.add(frame);
+
+  // The panel itself, dark until a symbol is called.
+  const panelMat = new THREE.MeshBasicMaterial({ color: 0x05070f });
+  const panel = new THREE.Mesh(new THREE.PlaneGeometry(w, h), panelMat);
+  panel.position.set(cx, h / 2 + 0.9, z);
+  group.add(panel);
+
+  // Both symbols, huge, one shown at a time.
+  const symX = buildSymbol(0, CALL_COL.x.getHex());
+  const symO = buildSymbol(1, CALL_COL.o.getHex());
+  for (const s of [symX, symO]) {
+    // The symbol builders draw flat on the ground plane; stand them up to face the room.
+    s.group.rotation.x = Math.PI / 2;
+    s.group.scale.setScalar(4.2);
+    s.group.position.set(cx, h / 2 + 0.9, z + 0.06);
+    s.group.visible = false;
+    group.add(s.group);
+  }
+
+  // A bar under the panel that drains as the clock runs down — the same information as the
+  // number on the HUD, but where the players are already looking.
+  const barMat = new THREE.MeshBasicMaterial({ color: 0x35f0e0 });
+  const bar = new THREE.Mesh(new THREE.PlaneGeometry(w, 0.22), barMat);
+  bar.position.set(cx, 0.72, z + 0.02);
+  group.add(bar);
+
+  const lamp = new THREE.PointLight(0xffffff, 0, 16, 2);
+  lamp.position.set(cx, h / 2 + 0.9, z + 2.2);
+  group.add(lamp);
+
+  return { group, panel, panelMat, symX, symO, bar, barMat, lamp, width: w };
+}
+
+/** Show the called symbol and drain the timer bar. */
+export function updateCallBoard(board, round, sim) {
+  const called = round.called;
+  const showing = called !== null && round.callPhase === sim.CALL_SHOWING;
+
+  board.symX.group.visible = showing && called === sim.SYM_X;
+  board.symO.group.visible = showing && called === sim.SYM_O;
+
+  const hue = called === sim.SYM_O ? CALL_COL.o : CALL_COL.x;
+
+  if (showing) {
+    const frac = Math.max(0, Math.min(1, round.callLeft / Math.max(0.001, round.callTime)));
+    board.bar.scale.x = frac;
+    // The bar drains from both ends toward the middle, which reads faster than a bar that
+    // empties from one side — the remaining time is a symmetric shape, not a length to measure.
+    board.bar.visible = true;
+    board.barMat.color.copy(hue);
+    // Panic colour in the last stretch, so the deadline is felt without reading a number.
+    if (frac < 0.28) board.barMat.color.copy(CALL_COL.o);
+
+    board.panelMat.color.copy(hue).multiplyScalar(0.12);
+    board.lamp.color.copy(hue);
+    board.lamp.intensity = 1.6 + (1 - frac) * 2.2;
+  } else {
+    board.bar.visible = false;
+    board.panelMat.color.setHex(0x05070f);
+    board.lamp.intensity = 0;
+  }
+}
+
+/**
+ * The crusher under the stage.
+ *
+ * Never seen clearly and not meant to be — it is a glow and a set of turning teeth below the
+ * grid, so that a hole in the floor reads as a drop into something rather than into nothing.
+ */
+function buildCrusher(level) {
+  const group = new THREE.Group();
+  const cx = level.cols / 2;
+  const cz = level.rows / 2;
+  const depth = (level.crusherDepth || 5) + 0.6;
+
+  const glowMat = new THREE.MeshBasicMaterial({
+    color: 0xff2e88, transparent: true, opacity: 0.3,
+    blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+  });
+  const pool = new THREE.Mesh(new THREE.PlaneGeometry(level.cols + 2, level.rows + 2), glowMat);
+  pool.rotation.x = -Math.PI / 2;
+  pool.position.set(cx, -depth, cz);
+  group.add(pool);
+
+  const toothMat = new THREE.MeshStandardMaterial({
+    color: 0x2a3550, roughness: 0.5, metalness: 0.8,
+  });
+  // Two counter-turning rollers, suggested rather than modelled.
+  for (let r = 0; r < 2; r++) {
+    const roller = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.55, 0.55, level.cols + 1, 8),
+      toothMat
+    );
+    roller.rotation.z = Math.PI / 2;
+    roller.position.set(cx, -depth + 0.5, cz + (r === 0 ? -1.1 : 1.1));
+    group.add(roller);
+  }
+
+  const lamp = new THREE.PointLight(0xff2e88, 2.4, depth * 2.2, 2);
+  lamp.position.set(cx, -depth + 1.4, cz);
+  group.add(lamp);
+
+  return group;
+}
+
+/**
+ * Frame the stage and the screen together.
+ *
+ * Unlike the arena camera this must keep something *vertical* in shot — the board is the whole
+ * point and it stands above the far edge — so the fit is computed against the board's top
+ * rather than against the floor's extent, and the tilt is shallower so the screen faces the
+ * camera rather than being seen edge-on from above.
+ */
+export function updateCallCamera(ctx, dt) {
+  const { camera, level } = ctx;
+
+  const fov = (camera.fov * Math.PI) / 180;
+  // Steeper than the first pass. At 34° the board and the grid overlapped in frame and the
+  // players stood *in front of* the screen rather than visibly on the squares — and which
+  // square someone is on is the only fact this mode communicates.
+  const tiltRad = (46 * Math.PI) / 180;
+
+  // What has to fit vertically: the grid's projected depth plus the full height of the board
+  // standing at the back of it.
+  const boardTop = 5.4;
+  const needV = (level.rows * Math.sin(tiltRad) + boardTop * Math.cos(tiltRad)) * 0.5;
+  const needH = (level.cols * 0.5) / (camera.aspect || 16 / 9);
+  // A generous margin: the board is only six tiles wide, so fitting it tightly fills the frame
+  // with a grid the size of a postage stamp surrounded by nothing.
+  const dist = (Math.max(needV, needH) * 1.75) / Math.tan(fov / 2);
+
+  const wantX = level.cols / 2;
+  const wantY = Math.sin(tiltRad) * dist + 1.2;
+  const wantZ = level.rows / 2 + Math.cos(tiltRad) * dist;
+
+  const k = 1 - Math.exp(-dt * 2.2);
+  camera.position.x += (wantX - camera.position.x) * k;
+  camera.position.y += (wantY - camera.position.y) * k;
+  camera.position.z += (wantZ - camera.position.z) * k;
+
+  // Aim above the floor's midpoint so the board sits in the upper half of frame and the grid
+  // in the lower — both fully readable, neither crowding the other.
+  camera.lookAt(level.cols / 2, 1.5, level.rows / 2 - 1.0);
 }
 
 /* --------------------------------------------------------------------- gate */
@@ -1404,26 +1725,13 @@ export function createRoombaMesh(Q, colorHex = 0xff2e88) {
   eye.position.set(0, 0.2, -0.44);
   group.add(eye);
 
-  // A streak of light on the floor ahead of the machine, along its line of travel.
-  //
-  // Read carefully as a *trail*, not as a headlamp: a cone thrown forward implies something is
-  // looking down it, and nothing here is looking at anything. Its job is to make the line a
-  // saw is currently on visible a beat before the saw gets there, because sidestepping that
-  // line is the only defence the mode offers.
-  // Deliberately a warm near-white rather than the machine's own dim hazard pink: the trail is
-  // the single piece of forewarning the mode gives, and in the machines' own colour it sat at
-  // the same value as the unlit floor and read as a smear rather than as a heading.
-  const beamMat = new THREE.MeshBasicMaterial({
-    color: 0xffc9a8, transparent: true, opacity: 0.1,
-    blending: THREE.AdditiveBlending, depthWrite: false,
-  });
-  const beam = new THREE.Mesh(new THREE.PlaneGeometry(0.5, 3.4), beamMat);
-  beam.rotation.x = -Math.PI / 2;
-  beam.position.set(0, 0.03, -1.7);
-  group.add(beam);
+  // No trail streak on the floor ahead of the machine. One was tried and removed: the arena
+  // floor is lit now, so a saw is plainly visible without a marker leading it, and a dozen
+  // streaks sweeping the room read as clutter laid over the machines rather than as
+  // information about them. The bumper bar above already says which way this one is pointing.
 
-  // A pool of light under the machine so it is never invisible on unlit floor. Without it a
-  // saw outside everyone's sonar is a silent, unreadable killer.
+  // A pool of light under the machine, so it reads as an object sitting on the floor rather
+  // than as a sprite hovering over it.
   const glowMat = new THREE.MeshBasicMaterial({
     color: colorHex, transparent: true, opacity: 0.22,
     blending: THREE.AdditiveBlending, depthWrite: false,
@@ -1442,7 +1750,7 @@ export function createRoombaMesh(Q, colorHex = 0xff2e88) {
     group.add(lamp);
   }
 
-  return { group, body, blade, rim, eye, beam, beamMat, glow, glowMat, lamp };
+  return { group, body, blade, rim, eye, glow, glowMat, lamp };
 }
 
 /**
@@ -1461,7 +1769,6 @@ export function updateRoombaMesh(mesh, r, dt) {
   // How wound-up this machine is, 0..1, from its accumulated tempo.
   const hot = Math.max(0, Math.min(1, (r.tempo - 0.9) / 1.0));
 
-  mesh.beamMat.opacity += ((0.1 + hot * 0.22) - mesh.beamMat.opacity) * Math.min(1, dt * 6);
   mesh.glowMat.opacity += ((0.2 + hot * 0.2) - mesh.glowMat.opacity) * Math.min(1, dt * 6);
   if (mesh.lamp) mesh.lamp.intensity = 1.4 + hot * 1.4;
 
@@ -1474,48 +1781,15 @@ export function updateRoombaMesh(mesh, r, dt) {
   mesh.group.rotation.z = Math.sin(mesh.wobble) * 0.05 * hot;
 }
 
-/**
- * The flash where two machines slam into each other.
+/*
+ * Collisions used to throw an expanding shock ring here. It was removed: with a dozen machines
+ * on a lit floor the rings fired constantly and became a layer of pulsing geometry sitting on
+ * top of the thing they were annotating. The collision is already legible from the machines
+ * themselves — two of them meet and both visibly change direction — and the camera still kicks
+ * on a hard hit, so the event is felt rather than drawn.
  *
- * Deliberately loud. The collisions ARE the mode — they are the moment the room stops being
- * predictable — so they need to announce themselves, and a player who was not looking at that
- * corner still has to learn that two blades just changed direction.
+ * The sim's `clang` event is still emitted; screen.html reads it for that camera kick.
  */
-export function createClang(hard) {
-  const group = new THREE.Group();
-
-  const mat = new THREE.MeshBasicMaterial({
-    color: hard ? 0xfff0b0 : 0x9fd8ff,
-    transparent: true,
-    opacity: hard ? 0.85 : 0.4,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-  });
-  const ring = new THREE.Mesh(new THREE.RingGeometry(0.18, 0.32, 16), mat);
-  ring.rotation.x = -Math.PI / 2;
-  ring.position.y = 0.28;
-  group.add(ring);
-
-  let light = null;
-  if (hard) {
-    light = new THREE.PointLight(0xffd070, 3.5, 4, 2);
-    light.position.y = 0.5;
-    group.add(light);
-  }
-
-  return { group, ring, mat, light, life: 1, hard };
-}
-
-/** Advance a clang. Returns false once it is done. */
-export function stepClang(fx, dt) {
-  fx.life -= dt * (fx.hard ? 3.4 : 5.5);
-  if (fx.life <= 0) return false;
-  const a = fx.life;
-  fx.ring.scale.setScalar(1 + (1 - a) * (fx.hard ? 3.4 : 1.8));
-  fx.mat.opacity = a * a * (fx.hard ? 0.85 : 0.4);
-  if (fx.light) fx.light.intensity = a * a * 3.5;
-  return true;
-}
 
 /* ------------------------------------------------------------------- sonar */
 

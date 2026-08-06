@@ -229,3 +229,82 @@ export const ARENAS = [
 export function getArena(index) {
   return ARENAS[Math.max(0, Math.min(ARENAS.length - 1, index | 0))];
 }
+
+/* ---------------------------------------------------------------------- calls */
+
+/**
+ * Call mode — "X or O".
+ *
+ * A 6×4 grid of tiles, every one stamped X or O. A screen on the back wall calls one of the
+ * two symbols, a clock runs down, and when it hits zero every tile bearing the *other* symbol
+ * drops away into the crusher underneath. Be standing on a called tile or go down with it.
+ *
+ * The three modes now form a clean set, and this one is the reaction test. Escape is a
+ * navigation problem you solve by reading the ground; survival is a spatial problem you solve
+ * by reading movement. Calls is neither — the correct answer is on the wall in letters a metre
+ * high, and the entire difficulty is getting your body there before the clock runs out. That
+ * is why the grid is small and the timer is the only real dial.
+ *
+ * Fallen tiles come back. The floor does not shrink toward a single square — it drops, hangs
+ * empty for a moment, then rises again with a freshly shuffled set of symbols. That is what
+ * keeps memory worthless: a tile that was X last round is a coin flip this round, so nobody
+ * can camp a corner they have learned. The escalation is the clock tightening, not the ground
+ * running out.
+ *
+ * @typedef {object} Stage
+ * @property {string} name
+ * @property {string} tagline
+ * @property {number} cols          Tiles across. Six, by design.
+ * @property {number} rows          Tiles deep. Four, by design.
+ * @property {number} callTime      Seconds between the symbol appearing and the drop.
+ * @property {number} callTimeMin   The floor that callTime decays toward.
+ * @property {number} callTimeStep  Seconds shaved off each round.
+ * @property {number} hangTime      Seconds the dropped tiles stay gone before returning.
+ * @property {number} settleTime    Seconds after tiles return before the next symbol is called.
+ * @property {number} tileFall      Tiles/second a dropping tile accelerates away at.
+ * @property {number} crusherDepth  How far below the floor the crusher sits, in tiles.
+ */
+
+/** @type {Stage[]} */
+export const STAGES = [
+  {
+    name: "X or O",
+    tagline: "Read the wall. Be standing on the right letter.",
+    // Six by four is the whole game and is not a dial. Wider and the far columns are a sprint
+    // nobody can make in time; deeper and the grid stops reading as a single glanceable board.
+    cols: 6,
+    rows: 4,
+
+    // Four seconds is comfortably enough to cross the grid at walking speed from anywhere,
+    // which is the point: the opening rounds must be winnable by everyone so that the ones
+    // that are not feel like the clock closing rather than like the game being unfair.
+    callTime: 4.0,
+    callTimeMin: 1.15,
+    callTimeStep: 0.28,
+
+    hangTime: 1.5,
+    settleTime: 0.9,
+    tileFall: 9,
+    crusherDepth: 5,
+  },
+  {
+    name: "Snap Call",
+    tagline: "Same board. Half the time to think about it.",
+    cols: 6,
+    rows: 4,
+    // Starts where the first stage ends up around round ten, and keeps going lower.
+    callTime: 2.4,
+    callTimeMin: 0.8,
+    callTimeStep: 0.22,
+    // A shorter hang as well, so there is less recovery between calls than there is call.
+    hangTime: 1.1,
+    settleTime: 0.6,
+    tileFall: 11,
+    crusherDepth: 5,
+  },
+];
+
+/** Stages are addressed by index exactly as levels and arenas are. */
+export function getStage(index) {
+  return STAGES[Math.max(0, Math.min(STAGES.length - 1, index | 0))];
+}
