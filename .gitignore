@@ -25,3 +25,8 @@ pubsub-debug.log
 .DS_Store
 
 dist/
+
+# Meshy exports are 7MB build inputs, not shipped assets — their clips are merged into
+# public/games/minefield3d/ninja.glb by scripts/merge-ninja-clips.mjs.
+art/source/
+*.orig.glb
