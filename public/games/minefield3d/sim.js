@@ -950,7 +950,15 @@ export function isDown(p) {
  */
 export function shoveProgress(p) {
   if (!p.shoveFor || p.shoveFor <= 0) return 0;
-  return 1 - p.shoveFor / PUSH_ANIM_TIME;
+  /*
+   * Nudged off zero on the very first frame.
+   *
+   * Straight `1 - shoveFor/PUSH_ANIM_TIME` is exactly 0 before the first step, and 0 is the
+   * value that means "not shoving" — so a shove read on the frame it was thrown looked like
+   * no shove at all, and the renderer skipped its opening frame. The floor is far below the
+   * first real sample, so it shifts nothing that is actually visible.
+   */
+  return Math.max(1e-4, 1 - p.shoveFor / PUSH_ANIM_TIME);
 }
 
 /**
@@ -963,7 +971,15 @@ export function shoveProgress(p) {
  */
 export function shoveLunge(p) {
   if (!p.shoveGap) return 0;
-  return Math.max(0, Math.min(1.15, p.shoveGap - 0.62));
+  /*
+   * Stop a body's width short rather than closing the whole gap.
+   *
+   * Travelling the full distance puts the shover exactly where the target was standing, and
+   * since the target is briefly held in place for the contact they visibly interpenetrate —
+   * the shove ends with one player standing inside the other. Leaving that width is what
+   * makes it read as arms meeting a chest instead of two meshes overlapping.
+   */
+  return Math.max(0, Math.min(0.95, p.shoveGap - 0.85));
 }
 
 /* ------------------------------------------------------------------ lifecycle */

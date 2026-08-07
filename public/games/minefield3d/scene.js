@@ -1942,10 +1942,25 @@ function poseShove(mesh, p, states) {
   }
   if (!bones || !rest) return;
 
-  // Both arms drive forward and straighten — positive rotation.x brings a hand down and
-  // forward on this rig, the same convention poseSniper measured.
-  if (bones.RightArm) bones.RightArm.rotation.x = rest.RightArm.rot.x + e * 1.5;
-  if (bones.LeftArm) bones.LeftArm.rotation.x = rest.LeftArm.rot.x + e * 1.5;
+  /*
+   * Both arms drive forward and straighten — positive rotation.x brings a hand down and
+   * forward on this rig, the same convention poseSniper measured.
+   *
+   * The z term matters as much as the x. These games are watched from a camera high above
+   * the aisle, and a purely forward thrust is almost entirely foreshortened from up there:
+   * the arms measurably swing while the silhouette barely changes. Spreading the hands apart
+   * as they go out gives the motion a component across the view, which is what the shape
+   * actually reads from — without it the shove animates correctly and still looks like
+   * nothing happened.
+   */
+  if (bones.RightArm) {
+    bones.RightArm.rotation.x = rest.RightArm.rot.x + e * 1.5;
+    bones.RightArm.rotation.z = rest.RightArm.rot.z + e * 0.55;
+  }
+  if (bones.LeftArm) {
+    bones.LeftArm.rotation.x = rest.LeftArm.rot.x + e * 1.5;
+    bones.LeftArm.rotation.z = rest.LeftArm.rot.z - e * 0.55;
+  }
   // Elbows extend as the hands go out, so the arms end straight rather than still folded.
   if (bones.RightForeArm) bones.RightForeArm.rotation.x = rest.RightForeArm.rot.x + e * 0.5;
   if (bones.LeftForeArm) bones.LeftForeArm.rotation.x = rest.LeftForeArm.rot.x + e * 0.5;
