@@ -1100,23 +1100,27 @@ export function updateSniperCamera(camera, round, sim, dt) {
   };
 
   const scoped = round.scoped;
-  // Behind and above the muzzle, and offset to the shooter's shoulder.
-  //
-  // The lateral offset is what makes this a third-person view rather than a look down the
-  // inside of the barrel. Sat directly behind the rifle the barrel occludes the whole frame —
-  // measured, and it rendered as a pink smear across the entire right half of the screen.
-  // Scoping slides onto the sight line, which is what the zoom is for.
-  const back = scoped ? 1.1 : 4.2;
-  const up = scoped ? 0.18 : 1.5;
-  const side = scoped ? 0 : 1.0;
 
-  // Right vector, perpendicular to the aim in the ground plane.
+  // The camera sits behind the shooter's shoulder, and "behind" is measured along the ground
+  // bearing rather than along the aim vector.
+  //
+  // Backing off along the aim itself was tried and is wrong: the rifle points steeply down
+  // into the aisle, so retreating along that line lifts the camera high above the nest and
+  // leaves it staring across the gantry instead of down the range. Splitting the offset into
+  // a flat pull-back plus a fixed rise keeps the shot behind the shooter at every pitch.
+  const back = scoped ? 0.9 : 3.4;
+  const up = scoped ? 0.15 : 1.1;
+  const side = scoped ? 0 : 0.85;
+
+  // Flat bearing and its perpendicular, both in the ground plane.
+  const bx = Math.sin(round.aimYaw);
+  const bz = Math.cos(round.aimYaw);
   const rx = Math.cos(round.aimYaw);
   const rz = -Math.sin(round.aimYaw);
 
-  const wantX = from.x - dir.x * back + rx * side;
-  const wantY = from.y - dir.y * back + up;
-  const wantZ = from.z - dir.z * back + rz * side;
+  const wantX = from.x - bx * back + rx * side;
+  const wantY = from.y + up;
+  const wantZ = from.z - bz * back + rz * side;
 
   const k = 1 - Math.exp(-dt * (scoped ? 14 : 9));
   camera.position.x += (wantX - camera.position.x) * k;
