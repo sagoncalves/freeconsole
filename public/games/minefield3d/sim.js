@@ -189,35 +189,16 @@ const TEMPO_MAX = 1.9;
  * survival it is into a blade; in escape it is onto ground nobody has lit.
  *
  * The reach is deliberately short. A long grab would let a player farm shoves from safety;
- * at under two tiles you have to close, which means putting yourself in the same danger you
- * are trying to inflict.
- *
- * It is nevertheless generous, and that is the point: players pass through each other, so
- * there is no contact, no blocked step, nothing that tells a thumb "you are close enough
- * now". The only feedback is whether the shove lands. Tuned tight, the button reads as
- * broken rather than as missed — you cannot tell being out of range from a dead control.
+ * at just over a body's width you have to close, which means putting yourself in the same
+ * danger you are trying to inflict.
  */
-const PUSH_REACH = 1.9;
+const PUSH_REACH = 1.15;
 
-/**
- * How wide the arc in front of you counts as a shove — a cone, not a full circle.
- *
- * Just over a right angle each side. Wide enough that "roughly towards them" connects, since
- * heading comes from a thumb on glass and is never precise, but short of the full circle
- * that would make facing irrelevant and turn the shove into a proximity aura.
- */
-const PUSH_ARC = Math.PI * 1.1;
+/** How wide the arc in front of you counts as a shove — a cone, not a full circle. */
+const PUSH_ARC = Math.PI * 0.55;
 
 /** Seconds between shoves, so it cannot be spammed into a stunlock. */
 const PUSH_COOLDOWN = 1.1;
-
-/**
- * How long the shove's arm-thrust plays for.
- *
- * Well under PUSH_COOLDOWN so the animation is always finished before the button comes back
- * — an action still visibly playing when it is ready again reads as input lag.
- */
-const PUSH_ANIM_TIME = 0.34;
 
 /** Seconds a shoved player spends on the floor before starting to get up. */
 const PUSH_DOWN_TIME = 1.5;
@@ -738,12 +719,6 @@ export function addPlayer(round, deviceId) {
     pushedBy: null,
     /** Seconds before this player can shove again. */
     pushCooldown: 0,
-    /** Seconds left of the shove's own arm-thrust, for the renderer to pose against. */
-    shoveFor: 0,
-    /** How far the last connecting shove had to reach, so the renderer can lunge that far. */
-    shoveGap: 0,
-    /** Seconds a knocked player waits before sliding, so the shove lands before they move. */
-    slideDelay: 0,
 
     /**
      * Calls: how far this player has fallen through the floor, in world units.
@@ -842,29 +817,12 @@ export function push(round, deviceId) {
   if (p.pushCooldown > 0 || p.downFor > 0 || p.stun > 0) return false;
 
   p.pushCooldown = PUSH_COOLDOWN;
-  // Start the shove's own animation clock. Set on every tap, hit or miss: a shove that
-  // misses still has to look like a shove, or the button feels dead exactly when a player
-  // most needs to know it fired.
-  p.shoveFor = PUSH_ANIM_TIME;
-  // Cleared up front so a miss cannot inherit the lunge distance of the last shove that
-  // connected; a hit sets it again below.
-  p.shoveGap = 0;
 
   const fx = Math.sin(p.heading);
   const fz = Math.cos(p.heading);
 
-  /**
-   * Pick the target by how squarely it sits in front, not by distance alone.
-   *
-   * With a narrow cone the two agree often enough not to matter. With this one they do not:
-   * somebody brushing past your shoulder can be nearer than the player you are walking
-   * straight at, and picking on distance would shove the bystander while the phone was
-   * pointed at someone else. Score is the facing dot scaled down by distance, so a target
-   * dead ahead beats a closer one off to the side, and among equals the nearer wins.
-   */
-  const minDot = Math.cos(PUSH_ARC / 2);
   let best = null;
-  let bestScore = -Infinity;
+  let bestD = PUSH_REACH;
   for (const q of round.players.values()) {
     if (q === p || q.state !== ALIVE) continue;
     // Somebody already on the floor cannot be shoved again — that is the anti-stunlock rule,
@@ -874,31 +832,16 @@ export function push(round, deviceId) {
     const dx = q.x - p.x;
     const dz = q.z - p.z;
     const d = Math.hypot(dx, dz);
-    if (d > PUSH_REACH || d < 1e-4) continue;
+    if (d > bestD || d < 1e-4) continue;
     // Inside the forward arc?
     const dot = (dx / d) * fx + (dz / d) * fz;
-    if (dot < minDot) continue;
-    const score = dot - d / PUSH_REACH * 0.5;
-    if (score <= bestScore) continue;
-    bestScore = score;
+    if (dot < Math.cos(PUSH_ARC / 2)) continue;
+    bestD = d;
     best = { q, dx, dz, d };
   }
 
   round.events.push({ type: "push", id: p.id, x: p.x, z: p.z, hit: !!best });
   if (!best) return false;
-
-  /*
-   * Turn to face whoever is actually being shoved, and record how far away they were.
-   *
-   * Both exist for the renderer. The reach is nearly two tiles but a pair of arms spans well
-   * under one, so a shove thrown at the edge of range played out with the hands nowhere near
-   * the target — it read as pushing thin air, which is exactly how it was reported. The
-   * renderer uses `shoveGap` to lunge the body across the difference, and it can only do
-   * that honestly if the shover is also turned to face the target rather than left pointing
-   * wherever the stick happened to be.
-   */
-  p.heading = Math.atan2(best.dx, best.dz);
-  p.shoveGap = best.d;
 
   knockDown(round, best.q, best.dx / best.d, best.dz / best.d, p.id);
   return true;
@@ -913,17 +856,6 @@ export function push(round, deviceId) {
  */
 function knockDown(round, q, nx, nz, byId) {
   q.downFor = PUSH_DOWN_TIME;
-  /*
-   * Hold the target still until the shove has actually landed on them.
-   *
-   * The thrust peaks a quarter of the way through PUSH_ANIM_TIME. Sliding from frame one
-   * means the target is already travelling before the hands arrive, so the gap between the
-   * two only ever grows and the shove visibly touches nothing — the arms reach for a body
-   * that has left. Waiting for contact costs under a tenth of a second and is what makes the
-   * hit read as a hit. The stagger applies to the slide only; downFor runs immediately, so
-   * they are off their feet the whole time.
-   */
-  q.slideDelay = PUSH_ANIM_TIME * 0.25;
   q.slideX = nx * PUSH_SLIDE;
   q.slideZ = nz * PUSH_SLIDE;
   q.pushedBy = byId ?? null;
@@ -940,46 +872,6 @@ function knockDown(round, q, nx, nz, byId) {
 /** Is this player on the floor from a shove? Read by the renderer and the controller. */
 export function isDown(p) {
   return p.downFor > 0;
-}
-
-/**
- * How far through their own shove this player is, 0 to 1, or 0 when not shoving.
- *
- * Exposed as normalised progress rather than as the raw countdown so the renderer never has
- * to know PUSH_ANIM_TIME — retuning the duration here cannot desynchronise the pose.
- */
-export function shoveProgress(p) {
-  if (!p.shoveFor || p.shoveFor <= 0) return 0;
-  /*
-   * Nudged off zero on the very first frame.
-   *
-   * Straight `1 - shoveFor/PUSH_ANIM_TIME` is exactly 0 before the first step, and 0 is the
-   * value that means "not shoving" — so a shove read on the frame it was thrown looked like
-   * no shove at all, and the renderer skipped its opening frame. The floor is far below the
-   * first real sample, so it shifts nothing that is actually visible.
-   */
-  return Math.max(1e-4, 1 - p.shoveFor / PUSH_ANIM_TIME);
-}
-
-/**
- * How far the renderer should carry the shover forward, in world units.
- *
- * The arms alone cannot span the reach — it is nearly two tiles and a pair of arms is well
- * under one — so the body has to travel the remainder or the shove visibly touches nothing.
- * A body's own width is subtracted because the two never need to occupy the same point, and
- * the result is clamped so a shove at maximum range does not turn into a flying tackle.
- */
-export function shoveLunge(p) {
-  if (!p.shoveGap) return 0;
-  /*
-   * Stop a body's width short rather than closing the whole gap.
-   *
-   * Travelling the full distance puts the shover exactly where the target was standing, and
-   * since the target is briefly held in place for the contact they visibly interpenetrate —
-   * the shove ends with one player standing inside the other. Leaving that width is what
-   * makes it read as arms meeting a chest instead of two meshes overlapping.
-   */
-  return Math.max(0, Math.min(0.95, p.shoveGap - 0.85));
 }
 
 /* ------------------------------------------------------------------ lifecycle */
@@ -1010,7 +902,10 @@ export function startRound(round) {
   // The nest is assigned BEFORE anyone is seated, because resetPlayer spreads the runners
   // across the aisle and needs to know how many there actually are — counting the sniper
   // among them leaves a gap on the spawn line where nobody is standing.
-  assignNest(round);
+  if (round.mode === MODE_SNIPER) {
+    if (!ids.length) round.sniperId = null;
+    else if (!round.players.has(round.sniperId)) round.sniperId = ids[0];
+  }
 
   const runners = round.mode === MODE_SNIPER
     ? ids.filter((id) => id !== round.sniperId)
@@ -1117,9 +1012,6 @@ function resetPlayer(round, p, index, total) {
   p.slideZ = 0;
   p.pushedBy = null;
   p.pushCooldown = 0;
-  p.shoveFor = 0;
-  p.shoveGap = 0;
-  p.slideDelay = 0;
 
   // Stagger the first ping across the roster so the aisle does not strobe in unison. Each
   // player then runs free on their own period.
@@ -1541,22 +1433,6 @@ export function nestPos(round) {
   };
 }
 
-/**
- * Settle who holds the rifle, keeping the current holder if they are still in the room.
- *
- * Callable outside startRound on purpose. The nest used to be chosen only as the round
- * began, which left `sniperId` null for the whole countdown — so the phone about to be the
- * sniper was told nothing during the exact window a player looks down to see what they are.
- * The screen now calls this the moment the mode is entered, and startRound calls it again
- * because players can join or leave in between.
- */
-export function assignNest(round) {
-  if (round.mode !== MODE_SNIPER) return;
-  const ids = [...round.players.keys()].sort((a, b) => a - b);
-  if (!ids.length) round.sniperId = null;
-  else if (!round.players.has(round.sniperId)) round.sniperId = ids[0];
-}
-
 /** Is this device the one in the nest? */
 export function isSniper(round, deviceId) {
   return round.mode === MODE_SNIPER && round.sniperId === deviceId;
@@ -1588,20 +1464,7 @@ export function aim(round, deviceId, dx, dz, dt) {
   // Scoping trades swing speed for precision, which is the whole reason to ever un-scope.
   const rate = (level.turnSpeed || 1.15) * (round.scoped ? (level.zoomTurn || 0.38) : 1);
 
-  /*
-   * Both axes are negated, and the signs are not guesswork — they follow from the geometry.
-   *
-   * The nest looks down the aisle toward +z, so the camera's right-hand vector is -x. Raising
-   * aimYaw therefore swings the muzzle toward the viewer's LEFT, which means a stick pushed
-   * right has to lower it. That inversion is what made the rifle feel backwards.
-   *
-   * Pitch is already correct and is left alone: the pad's z grows downward, so subtracting it
-   * sends the barrel down when the thumb goes down, which is the direct mapping.
-   *
-   * Getting either backwards is not subtly wrong, it is unusable — you chase the target away
-   * from where you meant to go, on the one control that has to feel exact.
-   */
-  round.aimYaw -= dx * rate * dt;
+  round.aimYaw += dx * rate * dt;
   round.aimPitch -= dz * rate * dt;
 
   // Yaw: enough to cover the aisle's width from the nest, and no further.
@@ -1943,11 +1806,6 @@ export function roombaCount(round) {
 
 function stepPlayer(round, p, dt) {
   if (p.state !== ALIVE) return;
-
-  // Ahead of the sniper's early return, so a shove thrown on the last frame before taking
-  // the rifle still runs its animation out instead of freezing mid-swing.
-  if (p.shoveFor > 0) p.shoveFor = Math.max(0, p.shoveFor - dt);
-
   // The sniper is bolted into the nest. Their stick aims the rifle instead of walking, which
   // is handled by aim() straight off the wire.
   if (round.mode === MODE_SNIPER && p.id === round.sniperId) { p.dx = 0; p.dz = 0; return; }
@@ -1963,14 +1821,6 @@ function stepPlayer(round, p, dt) {
   // free ride across hazards.
   if (p.downFor > 0) {
     p.downFor -= dt;
-
-    // Wait for the shover's hands to arrive before travelling. See knockDown.
-    if (p.slideDelay > 0) {
-      p.slideDelay = Math.max(0, p.slideDelay - dt);
-      p.dx = 0;
-      p.dz = 0;
-      return;
-    }
 
     const speed = Math.hypot(p.slideX, p.slideZ);
     if (speed > 0.01) {

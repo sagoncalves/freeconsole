@@ -1282,101 +1282,6 @@ console.log("\npushing");
     far.b.x = 6.0;
     ok("a shove out of reach misses", sim.push(far.r, 1) === false);
 
-    /*
-     * The animation, which is the difference between a shove that reads and one that does
-     * not. These are sim-side because the renderer poses straight off these numbers.
-     */
-    {
-      const anim = pair(sim.MODE_CALLS, 29);
-      ok("nobody is mid-shove to begin with", sim.shoveProgress(anim.a) === 0);
-      sim.push(anim.r, 1);
-      const t0 = sim.shoveProgress(anim.a);
-      ok("a shove starts its animation", t0 > 0 && t0 < 1, "(" + t0.toFixed(2) + ")");
-      run(anim.r, 0.5);
-      ok("the animation finishes", sim.shoveProgress(anim.a) === 0);
-      // It must finish well before the button comes back, or the action visibly lags input.
-      ok("it ends before the cooldown does", anim.a.pushCooldown > 0);
-
-      // A miss still animates: a dead-looking button is worse than a visible miss.
-      const missed = pair(sim.MODE_CALLS, 31);
-      missed.a.heading = Math.atan2(-1, 0);
-      sim.push(missed.r, 1);
-      ok("a missed shove still animates", sim.shoveProgress(missed.a) > 0);
-      ok("a missed shove does not lunge", sim.shoveLunge(missed.a) === 0);
-
-      /*
-       * The lunge and the stagger together are what make the hands meet the body.
-       *
-       * Reach is nearly two tiles and arms span well under one, so without the body
-       * travelling — and without the target waiting for it — the thrust completes while the
-       * target is already gone, which is exactly the "never really touches" report.
-       */
-      const lunged = pair(sim.MODE_CALLS, 33);
-      lunged.b.x = lunged.a.x + 1.7;
-      sim.push(lunged.r, 1);
-      ok("a long shove lunges further than a short one",
-         sim.shoveLunge(lunged.a) > 0.5, "(" + sim.shoveLunge(lunged.a).toFixed(2) + ")");
-
-      const staggered = pair(sim.MODE_CALLS, 35);
-      staggered.b.x = staggered.a.x + 1.5;
-      const bx0 = staggered.b.x;
-      sim.push(staggered.r, 1);
-      run(staggered.r, 1 / 60);
-      ok("the target holds still while the shove lands", staggered.b.x === bx0);
-      run(staggered.r, 0.3);
-      ok("the target travels once contact is made", staggered.b.x > bx0 + 0.3,
-         "(" + bx0.toFixed(2) + " -> " + staggered.b.x.toFixed(2) + ")");
-
-      // Facing the target matters for the lunge: the body has to travel toward whoever it
-      // actually hit, not wherever the stick happened to be pointing.
-      const turned = pair(sim.MODE_CALLS, 37);
-      turned.b.x = turned.a.x + 0.9;
-      turned.b.z = turned.a.z + 0.9;
-      sim.push(turned.r, 1);
-      const wantHeading = Math.atan2(0.9, 0.9);
-      ok("the shover turns to face who they hit",
-         Math.abs(turned.a.heading - wantHeading) < 0.01);
-    }
-
-    /*
-     * The envelope has to be forgiving, because nothing else tells a player they are close
-     * enough.
-     *
-     * Players pass through each other — there is no contact and no blocked step — so the
-     * only feedback a shove gives is whether it landed. Tuned tight it reads as a dead
-     * button rather than as a miss, which is exactly how it was reported. These pin the
-     * range and the angle that make it feel connected; they are deliberately assertions
-     * about generosity, not about precision.
-     */
-    {
-      const nearly = pair(sim.MODE_CALLS, 21);
-      nearly.b.x = nearly.a.x + 1.6;
-      ok("a shove reaches most of two tiles", sim.push(nearly.r, 1) === true);
-
-      const wide = pair(sim.MODE_CALLS, 23);
-      // 45 degrees off the shover's heading, which a thumb on glass produces constantly.
-      wide.b.x = wide.a.x + 0.85;
-      wide.b.z = wide.a.z + 0.85;
-      ok("a shove 45 degrees off still connects", sim.push(wide.r, 1) === true);
-
-      // Wide arcs make "nearest" and "in front of" disagree, so the pick must favour facing.
-      const pickR = sim.createRound(0, 27, sim.MODE_CALLS);
-      for (const id of [1, 2, 3]) sim.addPlayer(pickR, id);
-      sim.startRound(pickR);
-      pickR.callPhase = sim.CALL_SHOWING;
-      pickR.callLeft = 999;
-      pickR.called = null;
-      const pa = pickR.players.get(1);
-      const ahead = pickR.players.get(2);
-      const beside = pickR.players.get(3);
-      pa.x = 2.5; pa.z = 2.5; pa.heading = Math.atan2(1, 0);   // facing +x
-      ahead.x = 3.7; ahead.z = 2.5;                            // dead ahead, further
-      beside.x = 2.5; beside.z = 3.3;                          // off the shoulder, nearer
-      sim.push(pickR, 1);
-      ok("the shove takes who you faced, not who was closest",
-         sim.isDown(ahead) && !sim.isDown(beside));
-    }
-
     const twice = pair(sim.MODE_CALLS, 19);
     sim.push(twice.r, 1);
     sim.addPlayer(twice.r, 3);
@@ -1434,37 +1339,6 @@ console.log("\nsniper: the nest");
     sim.startRound(r);
     return r;
   };
-
-  /*
-   * The nest must be settled before the round runs.
-   *
-   * It used to be chosen only inside startRound, so `sniperId` stayed null for the whole
-   * countdown and the phone about to hold the rifle was told nothing during the exact window
-   * a player looks down to see what they are. The screen now settles it when the mode is
-   * entered and when players join, which only works if it is callable on its own.
-   */
-  {
-    const pre = sim.createRound(0, 11, sim.MODE_SNIPER);
-    sim.addPlayer(pre, 4);
-    sim.addPlayer(pre, 7);
-    ok("no nest before anyone claims it", pre.sniperId === null);
-    sim.assignNest(pre);
-    ok("the nest is assignable without starting a round", pre.sniperId === 4,
-       "(" + pre.sniperId + ")");
-    // A second call must not reshuffle it — the holder keeps it while they are still here.
-    sim.assignNest(pre);
-    ok("re-settling keeps the current holder", pre.sniperId === 4);
-    // ...but must hand it on when they leave.
-    sim.removePlayer(pre, 4);
-    sim.assignNest(pre);
-    ok("the nest passes on when its holder leaves", pre.sniperId === 7,
-       "(" + pre.sniperId + ")");
-    // And it is inert in the modes that have no nest at all.
-    const esc = sim.createRound(0, 13, sim.MODE_ESCAPE);
-    sim.addPlayer(esc, 1);
-    sim.assignNest(esc);
-    ok("escape never gets a nest", esc.sniperId === null);
-  }
 
   const r0 = beginS(0, 5);
   ok("the round knows it is sniper", r0.mode === sim.MODE_SNIPER);
@@ -1542,35 +1416,6 @@ console.log("\nsniper: the nest");
     ok("a runner cannot aim the rifle", r.aimYaw === yaw0);
     sim.aim(r, r.sniperId, 1, 0, 0.1);
     ok("the sniper can aim", r.aimYaw !== yaw0);
-
-    /*
-     * Which WAY the rifle swings, not merely that it moves.
-     *
-     * The nest looks down the aisle toward +z, so the viewer's right is -x. Pushing the
-     * stick right therefore has to walk the laser toward LOWER x, and the stick's z grows
-     * downward so pushing down has to drop the beam SHORTER down the aisle. Both were
-     * inverted in the first cut, which is unusable rather than merely imprecise — you chase
-     * a target away from where you meant to go.
-     *
-     * Asserted against where the beam actually lands rather than against the sign of aimYaw,
-     * since the whole bug was that the internal angle and the screen disagreed.
-     */
-    const rDir = beginS(0, 71, 2);
-    rDir.cover.fill(0);
-    rDir.aimYaw = 0;
-    rDir.aimPitch = -0.5;
-    const beam0 = sim.traceShot(rDir);
-    for (let i = 0; i < 10; i++) sim.aim(rDir, rDir.sniperId, 1, 0, 0.05);
-    const beamRight = sim.traceShot(rDir);
-    ok("stick right walks the laser to screen-right", beamRight.x < beam0.x,
-       "(" + beam0.x.toFixed(2) + " -> " + beamRight.x.toFixed(2) + ")");
-
-    rDir.aimYaw = 0;
-    rDir.aimPitch = -0.5;
-    for (let i = 0; i < 10; i++) sim.aim(rDir, rDir.sniperId, 0, 1, 0.05);
-    const beamDown = sim.traceShot(rDir);
-    ok("stick down aims shorter down the aisle", beamDown.z < beam0.z,
-       "(" + beam0.z.toFixed(2) + " -> " + beamDown.z.toFixed(2) + ")");
 
     // The swing is clamped so the nest cannot look behind itself.
     for (let i = 0; i < 200; i++) sim.aim(r, r.sniperId, 1, 0, 0.1);

@@ -161,10 +161,6 @@ export function createScene(canvas, level, Q, mode = "escape") {
   let laser = null;
   if (sniper) {
     sniperCam = new THREE.PerspectiveCamera(58, 16 / 9, 0.1, 400);
-    // The sniper sees the default layer and NOT the gantry they are standing on; the aisle
-    // camera is opted in to both, so the runners still see the platform overhead.
-    sniperCam.layers.set(0);
-    camera.layers.enable(LAYER_NEST_STRUCT);
     nest = buildNest(level);
     world.add(nest.group);
     laser = buildLaser();
@@ -1006,16 +1002,6 @@ export function buildNest(level) {
   rifle.position.set(cx, h + 0.35, -1.2);
   group.add(rifle);
 
-  // Everything built above this point is the platform itself — deck, legs, rail. Move it to
-  // the structure layer so the sniper's camera can skip it while the aisle still sees it.
-  // Done by subtraction rather than by tagging each mesh: the rifle and the lamp are the
-  // only two things that must stay in both views, and naming the exceptions here means a
-  // strut added later is hidden correctly without anyone having to remember this.
-  for (const child of group.children) {
-    if (child === rifle || child === lamp) continue;
-    child.layers.set(LAYER_NEST_STRUCT);
-  }
-
   return { group, rifle, lamp, height: h };
 }
 
@@ -1115,17 +1101,16 @@ export function updateSniperCamera(camera, round, sim, dt) {
 
   const scoped = round.scoped;
 
-  /*
-   * Hip-fire and scoped want opposite things from the same rifle, so they are solved apart.
-   *
-   * Hip-fire pulls BACK along the flat ground bearing. Retreating along the aim vector was
-   * tried and is wrong: the rifle points steeply down into the aisle, so that line lifts the
-   * camera above the nest to stare across the gantry. It also has to rise a body's height —
-   * level with the muzzle it looks straight into the deck it stands on and the rail in front
-   * of it, and the gantry becomes a ceiling across the shot.
-   *
-   * Scoped pushes FORWARD along the aim vector instead, for the reason given below.
-   */
+  // The camera sits behind the shooter's shoulder, and "behind" is measured along the ground
+  // bearing rather than along the aim vector.
+  //
+  // Backing off along the aim itself was tried and is wrong: the rifle points steeply down
+  // into the aisle, so retreating along that line lifts the camera high above the nest and
+  // leaves it staring across the gantry instead of down the range. Splitting the offset into
+  // a flat pull-back plus a fixed rise keeps the shot behind the shooter at every pitch.
+  const back = scoped ? 0.9 : 3.4;
+  const up = scoped ? 0.15 : 1.1;
+  const side = scoped ? 0 : 0.85;
 
   // Flat bearing and its perpendicular, both in the ground plane.
   const bx = Math.sin(round.aimYaw);
@@ -1133,68 +1118,18 @@ export function updateSniperCamera(camera, round, sim, dt) {
   const rx = Math.cos(round.aimYaw);
   const rz = -Math.sin(round.aimYaw);
 
-  let wantX, wantY, wantZ;
-  if (scoped) {
-    /*
-     * Scoped, the camera moves ONTO the sight line and past the muzzle.
-     *
-     * Held behind the breech it sat inside the stock — an opaque box centimetres from the
-     * lens — and the magnified view went black while the laser was visibly on a target in
-     * the other half. The advance is along the AIM vector, not the flat bearing: the barrel
-     * pitches with the shot, so only the aim line is guaranteed to run out of the weapon at
-     * every angle. A flat push clears the rifle level and buries the lens in it steeply down.
-     */
-    const clear = 1.9;
-    wantX = from.x + dir.x * clear;
-    wantY = from.y + dir.y * clear + 0.12;
-    wantZ = from.z + dir.z * clear;
-  } else {
-    // Hip-fire sits behind and above the shoulder, where "behind" is the ground bearing —
-    // see the note above about why this must not follow the aim vector.
-    const back = 3.0;
-    const up = 2.0;
-    const side = 0.85;
-    wantX = from.x - bx * back + rx * side;
-    wantY = from.y + up;
-    wantZ = from.z - bz * back + rz * side;
-  }
+  const wantX = from.x - bx * back + rx * side;
+  const wantY = from.y + up;
+  const wantZ = from.z - bz * back + rz * side;
 
   const k = 1 - Math.exp(-dt * (scoped ? 14 : 9));
   camera.position.x += (wantX - camera.position.x) * k;
   camera.position.y += (wantY - camera.position.y) * k;
   camera.position.z += (wantZ - camera.position.z) * k;
 
-  /*
-   * Aim the look at a point on the FLOOR down the aim line, not at a fixed distance along it.
-   *
-   * A fixed multiple of the aim vector drifts with pitch: tipped down it lands short and
-   * under the deck, tipped up it lands in empty air above the aisle, so the framing changes
-   * every time the rifle moves. Solving for where the line actually meets the ground keeps
-   * the target on the range at every angle — which is the point the sniper is looking at
-   * anyway. The fallback distance covers a barrel that is level or rising, where there is no
-   * intersection to solve for.
-   */
-  /*
-   * The centre of frame is the point the beam stopped at, raised to chest height when that
-   * point is bare floor.
-   *
-   * traceShot already returns a runner's chest when the line reaches one, so lifting
-   * unconditionally aims the camera a metre over the head of whoever is being tracked — the
-   * scope goes empty at the exact moment it should hold a target. The lift is only right for
-   * a floor hit, where centring literally on the ground would put the crosshair on a runner's
-   * feet and leave them aiming by the shadow.
-   */
-  const hit = round.laser;
-  let tx, ty, tz;
-  if (hit) {
-    tx = hit.x; ty = hit.hit ? hit.y : hit.y + 1.0; tz = hit.z;
-  } else if (dir.y < -0.02) {
-    const dist = Math.min(45, from.y / -dir.y);
-    tx = from.x + dir.x * dist; ty = 1.0; tz = from.z + dir.z * dist;
-  } else {
-    tx = from.x + dir.x * 30; ty = from.y + dir.y * 30; tz = from.z + dir.z * 30;
-  }
-  camera.lookAt(tx, ty, tz);
+  // Look well down the aim line rather than at the muzzle, so the barrel sits at the edge of
+  // frame pointing at what the camera is centred on.
+  camera.lookAt(from.x + dir.x * 30, from.y + dir.y * 30, from.z + dir.z * 30);
 
   const wantFov = scoped ? 14 : 58;
   if (Math.abs(camera.fov - wantFov) > 0.01) {
@@ -1375,29 +1310,6 @@ export function setAvatarHeight(h) {
   if (h > 0) AVATAR_HEIGHT = h;
 }
 export function getAvatarHeight() { return AVATAR_HEIGHT; }
-
-/**
- * The layer holding the parts of the nest the sniper is standing on and behind.
- *
- * The aisle camera has to see the gantry — it is what tells the runners where the shot is
- * coming from. The sniper's own camera must not: it sits on that structure, so the deck
- * becomes a ceiling across the top of the shot and the rail a bar through the middle of it,
- * hiding the range the view exists to show. Both cameras render one shared scene, so the
- * only way to show a thing to one and not the other is a layer.
- *
- * The rifle deliberately stays off this layer. It is the one piece of the nest that belongs
- * in both views, and it is what makes the sniper's half read as over-the-shoulder.
- */
-const LAYER_NEST_STRUCT = 1;
-
-/**
- * Global multiplier on the run cycle's playback rate.
- *
- * The clip is authored slower than these games read at. Kept as one named constant rather
- * than folded into the timeScale expression so the stride can be retuned in one place
- * without re-deriving the speed curve underneath it.
- */
-const RUN_RATE = 1.2;
 
 const BONES = {
   LeftUpLeg: 1, RightUpLeg: 1,
@@ -1679,27 +1591,9 @@ export function createPlayerMesh(colorHex, Q) {
  * The same function serves the model and the capsule fallback, so every offset is expressed
  * relative to the body's own base scale rather than hardcoded to capsule dimensions.
  */
-export function posePlayer(mesh, p, states, dt, round) {
+export function posePlayer(mesh, p, states, dt) {
   const { body, group, lamp, baseScale } = mesh;
   const s = baseScale;
-
-  // The sniper is not on the floor at all, so none of the walking logic below applies to
-  // them. Handled first and returned early: falling through would place them at y=0 under
-  // their own gantry, standing in the gate everyone else is running at, playing the idle
-  // clip — which is exactly the T-posed body behind the door.
-  if (round && states.isSniper && states.isSniper(round, p.id)) {
-    poseSniper(mesh, p, states, dt, round);
-    mesh.wasSniper = true;
-    return;
-  }
-
-  // Whoever held the rifle last round is a runner again. poseSniper moves their whole body
-  // onto the nest layer to keep it out of their own view, and that has to be undone or they
-  // spend the next round invisible to the camera the rest of the room is watching.
-  if (mesh.wasSniper) {
-    mesh.wasSniper = false;
-    group.traverse((o) => o.layers.set(0));
-  }
 
   // A player dropped through the floor keeps falling. Their y is the only thing that moves —
   // x and z are frozen at the tile that vanished, because there is nothing to walk on.
@@ -1847,11 +1741,7 @@ export function posePlayer(mesh, p, states, dt, round) {
       // pushed halfway, or any of the shoving that goes on in an arena — drove the clip down
       // toward a third rate and read as slow motion. Legs that turn over slightly too fast
       // are invisible; legs that turn over too slowly look broken.
-      //
-      // RUN_RATE lifts the whole curve, floor included: scaling only the speed-derived term
-      // would leave everyone below the floor — limpers, crawl-speed stragglers — running at
-      // exactly the old rate, and they are the ones the slow-motion complaint was about.
-      running.timeScale = RUN_RATE * Math.max(1.15, speed / 3.0);
+      running.timeScale = Math.max(1.15, speed / 3.0);
     }
 
     // Keep stepping while either clip still carries weight, so the fade itself plays out.
@@ -1884,93 +1774,6 @@ export function posePlayer(mesh, p, states, dt, round) {
     applyLegs(mesh, p.legs);
     if (p.legs === 1) poseLimp(mesh, moving);
   }
-
-  // The shove goes on last so it overrides the run cycle underneath it — the mixer has
-  // already written the skeleton for this frame, and anything applied before it would be
-  // overwritten rather than blended.
-  poseShove(mesh, p, states);
-}
-
-/**
- * The shove: a two-handed thrust, layered over whatever the body was already doing.
- *
- * Procedural rather than a clip, because the rig has no shove animation and because it has
- * to read while running — a player almost always shoves mid-stride, so this has to be a
- * correction applied on top of the run cycle rather than a replacement for it.
- *
- * The curve is deliberately asymmetric: a fast punch out and a slower recovery, which is how
- * a real shove reads. A symmetric ease looks like a stretch. The whole thing is driven off
- * the sim's own countdown, so it is frame-rate independent and survives a scene rebuild
- * mid-shove — an event-triggered version would lose the pose on a quality switch.
- */
-function poseShove(mesh, p, states) {
-  const t = states.shoveProgress ? states.shoveProgress(p) : 0;
-  if (t <= 0 || t >= 1) return;
-
-  const { bones, rest, body, group } = mesh;
-
-  // Out hard over the first quarter, back over the remaining three.
-  const punch = t < 0.25
-    ? t / 0.25
-    : 1 - (t - 0.25) / 0.75;
-  // Ease so the extremes settle rather than snapping.
-  const e = punch * punch * (3 - 2 * punch);
-
-  /*
-   * Carry the body forward so the hands actually arrive at the target.
-   *
-   * This is the difference between a shove that connects and one that pushes air. The reach
-   * is nearly two tiles; arms span well under one. Without the lunge, a shove thrown at the
-   * edge of range plays a full thrust while the target is still a body's length away and
-   * flies backwards untouched.
-   *
-   * Applied to the group rather than the body, so it moves the lamp and the ground glow with
-   * it — a torso that slides out of its own light reads as a glitch. It is deliberately
-   * transient: the sim's position is authoritative and this offset unwinds to nothing with
-   * the same curve as the arms.
-   */
-  const lunge = (states.shoveLunge ? states.shoveLunge(p) : 0) * e;
-  if (lunge > 0) {
-    group.position.x += Math.sin(p.heading) * lunge;
-    group.position.z += Math.cos(p.heading) * lunge;
-  }
-
-  if (!mesh.isModel) {
-    // Capsule fallback: lean into it, which is all a capsule can say.
-    body.rotation.x = -e * 0.42;
-    return;
-  }
-  if (!bones || !rest) return;
-
-  /*
-   * Both arms drive forward and straighten — positive rotation.x brings a hand down and
-   * forward on this rig, the same convention poseSniper measured.
-   *
-   * The z term matters as much as the x. These games are watched from a camera high above
-   * the aisle, and a purely forward thrust is almost entirely foreshortened from up there:
-   * the arms measurably swing while the silhouette barely changes. Spreading the hands apart
-   * as they go out gives the motion a component across the view, which is what the shape
-   * actually reads from — without it the shove animates correctly and still looks like
-   * nothing happened.
-   */
-  if (bones.RightArm) {
-    bones.RightArm.rotation.x = rest.RightArm.rot.x + e * 1.5;
-    bones.RightArm.rotation.z = rest.RightArm.rot.z + e * 0.55;
-  }
-  if (bones.LeftArm) {
-    bones.LeftArm.rotation.x = rest.LeftArm.rot.x + e * 1.5;
-    bones.LeftArm.rotation.z = rest.LeftArm.rot.z - e * 0.55;
-  }
-  // Elbows extend as the hands go out, so the arms end straight rather than still folded.
-  if (bones.RightForeArm) bones.RightForeArm.rotation.x = rest.RightForeArm.rot.x + e * 0.5;
-  if (bones.LeftForeArm) bones.LeftForeArm.rotation.x = rest.LeftForeArm.rot.x + e * 0.5;
-
-  // The torso commits behind the arms, which is what stops it looking like a wave.
-  if (bones.Spine) bones.Spine.rotation.x = rest.Spine.rot.x + e * 0.30;
-  if (bones.Spine01) bones.Spine01.rotation.x = rest.Spine01.rot.x + e * 0.18;
-  // The head stays up: it counter-rotates against the lean so the player keeps looking at
-  // whoever they are shoving instead of at the floor.
-  if (bones.Head) bones.Head.rotation.x = rest.Head.rot.x - e * 0.30;
 }
 
 /**
@@ -2063,127 +1866,6 @@ function restoreBones(mesh) {
   for (const [name, bone] of Object.entries(bones)) {
     bone.rotation.copy(rest[name].rot);
     bone.position.copy(rest[name].pos);
-  }
-}
-
-/**
- * The sniper, kneeling on the nest deck behind the rifle.
- *
- * Built by hand rather than from a clip because there is no firing animation in the rig, and
- * the pose has to track `aimYaw` continuously — a canned clip would face one fixed direction
- * while the barrel swung somewhere else.
- *
- * The body is turned by yaw only. Pitch is left to the rifle: a kneeling shooter tips the
- * weapon far more than the torso, and rolling the whole body with the barrel makes them lean
- * off the platform at the steep angles this nest mostly shoots at.
- */
-function poseSniper(mesh, p, states, dt, round) {
-  const { body, group, lamp, baseScale, bones, rest } = mesh;
-  const s = baseScale;
-  const from = states.nestPos(round);
-
-  /*
-   * Stand them on the deck, a step behind the rifle so the barrel reads as coming from their
-   * hands.
-   *
-   * The deck's top surface is the level's nestHeight — buildNest centres a 0.3-thick slab at
-   * `h - 0.15`, so its top lands exactly on `h`. Taking the height from the level rather than
-   * from the muzzle keeps this correct if the rifle's own offset is ever retuned; deriving it
-   * from nestPos meant two unrelated constants had to agree for the feet to touch anything.
-   */
-  const deckY = round.level.nestHeight || 6.5;
-  group.position.set(from.x - Math.sin(round.aimYaw) * 0.30, deckY,
-                     from.z - Math.cos(round.aimYaw) * 0.30);
-  group.rotation.y = round.aimYaw;
-
-  lamp.intensity = 0.9;
-  if (mesh.glow) mesh.glow.material.opacity = 0;
-
-  /*
-   * Hide the sniper's own body from the sniper's own camera.
-   *
-   * They are the nearest thing to that camera by a wide margin, so at hip level they fill
-   * the right-hand view and at any downward pitch their shoulders sit across the aisle. The
-   * aisle camera still sees them — the runners have to know somebody is up there — which is
-   * exactly the split the structure layer already draws, so the body rides along on it.
-   *
-   * Re-applied every frame rather than once: a quality switch rebuilds these meshes, and a
-   * body created after the swap would otherwise come back on the default layer.
-   */
-  group.traverse((o) => o.layers.set(LAYER_NEST_STRUCT));
-
-  if (!mesh.isModel) {
-    // Capsule fallback: just stand it on the deck. There is nothing to articulate.
-    body.rotation.set(0, 0, 0);
-    body.position.set(0, 0.62, 0);
-    body.scale.setScalar(s);
-    return;
-  }
-
-  // Every clip has to be silenced before the bones are written, or the mixer overwrites this
-  // pose on the next frame and the sniper flickers between kneeling and standing.
-  if (mesh.actions) {
-    for (const name of ["idle", "running", "behit", "standup"]) {
-      if (mesh.actions[name]) mesh.actions[name].setEffectiveWeight(0);
-    }
-  }
-
-  body.rotation.set(0, 0, 0);
-  body.position.set(0, 0, 0);
-  body.scale.setScalar(s);
-
-  if (!bones || !rest) return;
-  restoreBones(mesh);
-
-  /*
-   * The signs here were measured on the rig, not inferred from the crawl.
-   *
-   * poseCrawl reaches with negative rotation.x, which looks like "negative is forward" — but
-   * that pose has the torso horizontal, so its forward is this pose's up. Driving the arms
-   * the same way stood the sniper up with both arms overhead. Rotating RightArm by -1.2 and
-   * reading the forearm's world position back shows what actually happens: it rises 0.19 and
-   * travels 0.10 BACKWARD. Positive is what brings a hand down and forward onto a weapon.
-   */
-
-  /*
-   * The legs stay under the body rather than kneeling.
-   *
-   * A kneel needs the knee to bend as much as the hip, and this rig exposes no knee — BONES
-   * carries the hip roots and nothing below them. Swinging the hips alone sends the whole
-   * straight leg forward and it comes out through the front of the deck, which is the shape
-   * that was poking through the platform. Held near the bind pose the body reads as crouched
-   * behind the rail, and at this distance the legs are behind the deck anyway.
-   */
-  if (bones.LeftUpLeg) bones.LeftUpLeg.rotation.x = rest.LeftUpLeg.rot.x + 0.18;
-  if (bones.RightUpLeg) bones.RightUpLeg.rotation.x = rest.RightUpLeg.rot.x + 0.10;
-
-  // Fold over the stock. A settled shooter is hunched into the sight, not sitting upright.
-  const breath = Math.sin((round.t || 0) * 1.6);
-  if (bones.Spine) bones.Spine.rotation.x = rest.Spine.rot.x + 0.30 + breath * 0.02;
-  if (bones.Spine01) bones.Spine01.rotation.x = rest.Spine01.rot.x + 0.16;
-  // The head tips back the other way, so the eyeline comes up to the scope instead of
-  // following the chest down into the deck.
-  if (bones.Head) bones.Head.rotation.x = rest.Head.rot.x - 0.40;
-
-  // Both arms down and forward onto the weapon, elbows bent — the trigger hand tighter than
-  // the hand supporting the fore-end.
-  if (bones.RightArm) {
-    bones.RightArm.rotation.x = rest.RightArm.rot.x + 1.15;
-    bones.RightArm.rotation.z = rest.RightArm.rot.z + 0.30;
-  }
-  if (bones.LeftArm) {
-    bones.LeftArm.rotation.x = rest.LeftArm.rot.x + 1.32;
-    bones.LeftArm.rotation.z = rest.LeftArm.rot.z - 0.20;
-  }
-  if (bones.RightForeArm) bones.RightForeArm.rotation.x = rest.RightForeArm.rot.x + 0.75;
-  if (bones.LeftForeArm) bones.LeftForeArm.rotation.x = rest.LeftForeArm.rot.x + 0.55;
-
-  // The bolt: a short shove of the trigger arm while the rifle is out of action, so the
-  // aisle can read the reload off the body as well as off the lamp.
-  if (round.reload > 0 && bones.RightForeArm) {
-    const cycle = Math.sin((1 - round.reload / Math.max(0.01, round.level.reloadTime || 2)) * Math.PI);
-    // Backward, i.e. negative, since the trigger hand comes off the grip to work the bolt.
-    bones.RightForeArm.rotation.x -= cycle * 0.6;
   }
 }
 
