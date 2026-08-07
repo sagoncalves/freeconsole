@@ -161,10 +161,6 @@ export function createScene(canvas, level, Q, mode = "escape") {
   let laser = null;
   if (sniper) {
     sniperCam = new THREE.PerspectiveCamera(58, 16 / 9, 0.1, 400);
-    // The sniper never sees their own body; the aisle camera does. Layer 0 stays enabled on
-    // both, so this hides exactly the one group that opts into SHOOTER_LAYER.
-    sniperCam.layers.disable(SHOOTER_LAYER);
-    camera.layers.enable(SHOOTER_LAYER);
     nest = buildNest(level);
     world.add(nest.group);
     laser = buildLaser();
@@ -901,14 +897,6 @@ export function updateCallCamera(ctx, dt) {
 /* ------------------------------------------------------------------- sniper */
 
 /**
- * The layer holding things the sniper's own camera must not draw — currently just the
- * shooter's body, which the over-the-shoulder camera would otherwise sit inside.
- *
- * Layer 0 is everything, and both cameras draw it; only the sniper camera turns this one off.
- */
-const SHOOTER_LAYER = 1;
-
-/**
  * The cover blocks runners hide behind.
  *
  * One InstancedMesh for the whole aisle. There can be sixty-odd of them and they never move,
@@ -978,10 +966,6 @@ export function buildNest(level) {
   });
   const deck = new THREE.Mesh(new THREE.BoxGeometry(level.cols * 0.5, 0.3, 2.2), strutMat);
   deck.position.set(cx, h - 0.15, -1.2);
-  // The deck joins the shooter on the hidden layer. The camera sits just above it looking
-  // down the aisle, so from the nest's own view the platform is a slab across the lower half
-  // of the frame — it is the floor you are standing on, and you do not look at it.
-  deck.layers.set(SHOOTER_LAYER);
   group.add(deck);
 
   // Legs down to the floor either side of the gate, so the nest is visibly supported rather
@@ -1015,56 +999,10 @@ export function buildNest(level) {
   const stock = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.2, 0.5), barrelMat);
   stock.position.z = -0.2;
   rifle.add(stock);
-  // The shooter, built into the rifle group so the body swings with the aim as one piece.
-  //
-  // Deliberately a blocked-out figure rather than the rigged avatar: the ninja rig has no
-  // clip for "kneeling behind a rifle", so posing it here would mean either a T-pose or
-  // hand-driving every bone each frame for a shape that is a silhouette on a gantry from the
-  // aisle, and mostly off-screen in the sniper's own over-the-shoulder view.
-  const shooter = new THREE.Group();
-  const skinMat = new THREE.MeshStandardMaterial({
-    color: 0x1a2036, roughness: 0.7, metalness: 0.2,
-  });
-
-  const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.19, 0.42, 4, 8), skinMat);
-  // Tipped forward over the stock, so the pose reads as leaning into the shot.
-  torso.rotation.x = 0.42;
-  torso.position.set(0, 0.16, -0.5);
-  shooter.add(torso);
-
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.14, 10, 8), skinMat);
-  head.position.set(0, 0.42, -0.28);
-  shooter.add(head);
-
-  // Arms bracketing the weapon: one forward on the barrel, one back at the grip.
-  for (const [ax, az, len, tilt] of [[-0.17, -0.05, 0.5, 0.95], [0.17, -0.34, 0.34, 0.5]]) {
-    const arm = new THREE.Mesh(new THREE.CapsuleGeometry(0.06, len, 4, 6), skinMat);
-    arm.rotation.x = tilt;
-    arm.position.set(ax, 0.14, az);
-    shooter.add(arm);
-  }
-
-  // A knee down on the deck, which is what puts the figure *on* the platform rather than
-  // hovering over it.
-  const knee = new THREE.Mesh(new THREE.CapsuleGeometry(0.08, 0.3, 4, 6), skinMat);
-  knee.rotation.x = Math.PI / 2;
-  knee.position.set(-0.12, -0.22, -0.72);
-  shooter.add(knee);
-
-  // The shooter goes on layer 1, which the sniper's own camera is told to skip.
-  //
-  // This is the standard over-the-shoulder dodge, and it is not cosmetic: no pull-back short
-  // enough to keep the nest from walling off the aisle is also long enough to clear the
-  // shooter's own torso, so without this the right half of the screen is the inside of a
-  // ribcage. From the aisle camera — which does draw layer 1 — the figure is fully visible,
-  // which is the only view it exists for.
-  shooter.traverse((o) => o.layers.set(SHOOTER_LAYER));
-  rifle.add(shooter);
-
   rifle.position.set(cx, h + 0.35, -1.2);
   group.add(rifle);
 
-  return { group, rifle, shooter, lamp, height: h };
+  return { group, rifle, lamp, height: h };
 }
 
 /**
@@ -1117,11 +1055,6 @@ export function updateSniper(nest, laser, round, sim, dt) {
     nest.rifle.rotation.order = "YXZ";
     nest.rifle.rotation.y = round.aimYaw;
     nest.rifle.rotation.x = round.aimPitch;
-    // The shooter is parented to the rifle so it turns with the yaw, but it must not roll with
-    // the pitch — a body that tips a full 65 degrees with the barrel reads as falling off the
-    // gantry. Cancelling most of the pitch locally leaves the weapon free to tip while the
-    // figure only leans into it.
-    if (nest.shooter) nest.shooter.rotation.x = -round.aimPitch * 0.72;
     // A red pulse on the nest lamp while the bolt is being worked, so the aisle can see the
     // window it has to move in.
     const reloading = round.reload > 0;
@@ -1175,15 +1108,9 @@ export function updateSniperCamera(camera, round, sim, dt) {
   // into the aisle, so retreating along that line lifts the camera high above the nest and
   // leaves it staring across the gantry instead of down the range. Splitting the offset into
   // a flat pull-back plus a fixed rise keeps the shot behind the shooter at every pitch.
-  // Kept short. The shooter's body is on SHOOTER_LAYER and hidden from this camera, so the
-  // pull-back no longer has to clear a torso — it only has to stay short enough that the nest
-  // deck and rail do not wall off the aisle at steep pitch.
-  //
-  // The rise matters more than the distance: lifting the camera above the deck is what makes
-  // it look over the rail rather than through it.
-  const back = scoped ? 0.5 : 1.6;
-  const up = scoped ? 0.22 : 0.72;
-  const side = scoped ? 0 : 0.55;
+  const back = scoped ? 0.9 : 3.4;
+  const up = scoped ? 0.15 : 1.1;
+  const side = scoped ? 0 : 0.85;
 
   // Flat bearing and its perpendicular, both in the ground plane.
   const bx = Math.sin(round.aimYaw);
@@ -1200,21 +1127,9 @@ export function updateSniperCamera(camera, round, sim, dt) {
   camera.position.y += (wantY - camera.position.y) * k;
   camera.position.z += (wantZ - camera.position.z) * k;
 
-  // Centre the frame on where the shot actually lands, not on a fixed distance down the aim
-  // line. The camera sits above and behind the muzzle, so a target at a fixed 30 units sat
-  // well below the lens at steep pitch and pushed the aisle into the bottom of the frame with
-  // empty space above it. Following the trace keeps the laser dot — the thing being aimed —
-  // in the middle of the picture at every pitch.
-  //
-  // Falls back to the aim line when the trace escapes the level entirely, which is the one
-  // case where there is no landing point to look at.
-  const at = round.laser;
-  const lookDist = at ? Math.max(6, at.dist) : 30;
-  camera.lookAt(
-    from.x + dir.x * lookDist,
-    from.y + dir.y * lookDist,
-    from.z + dir.z * lookDist,
-  );
+  // Look well down the aim line rather than at the muzzle, so the barrel sits at the edge of
+  // frame pointing at what the camera is centred on.
+  camera.lookAt(from.x + dir.x * 30, from.y + dir.y * 30, from.z + dir.z * 30);
 
   const wantFov = scoped ? 14 : 58;
   if (Math.abs(camera.fov - wantFov) > 0.01) {
