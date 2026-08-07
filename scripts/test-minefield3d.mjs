@@ -1417,6 +1417,32 @@ console.log("\nsniper: the nest");
     sim.aim(r, r.sniperId, 1, 0, 0.1);
     ok("the sniper can aim", r.aimYaw !== yaw0);
 
+    // Stick-right must move the aim point to the right of frame. The nest looks down +z, so a
+    // camera facing that way has +x on its LEFT — which means pushing right has to *decrease*
+    // world x at the impact point. Asserted on the trace rather than on the yaw's sign,
+    // because the sign is an implementation detail and the direction on screen is not.
+    const rDir = beginS(0, 4242, 2);
+    rDir.cover.fill(0);
+    for (const p of rDir.players.values()) if (sim.isRunner(rDir, p)) p.state = sim.DEAD;
+    rDir.aimYaw = 0;
+    rDir.aimPitch = -0.5;
+    const mid = sim.traceShot(rDir);
+    for (let i = 0; i < 5; i++) sim.aim(rDir, rDir.sniperId, 1, 0, 0.1);
+    const right = sim.traceShot(rDir);
+    ok("stick-right sweeps the aim to screen-right", right.x < mid.x,
+       "(" + mid.x.toFixed(2) + " -> " + right.x.toFixed(2) + ")");
+
+    // And forward on the stick must raise the muzzle, i.e. push the impact further down-range.
+    // Forward is NEGATIVE z on the wire — the stick keeps the runner's screen-space convention
+    // whichever role is holding it, which is why the pitch term subtracts.
+    rDir.aimYaw = 0;
+    rDir.aimPitch = -0.5;
+    const near = sim.traceShot(rDir);
+    for (let i = 0; i < 3; i++) sim.aim(rDir, rDir.sniperId, 0, -1, 0.1);
+    const far = sim.traceShot(rDir);
+    ok("stick-forward pushes the aim down-range", far.z > near.z,
+       "(" + near.z.toFixed(1) + " -> " + far.z.toFixed(1) + ")");
+
     // The swing is clamped so the nest cannot look behind itself.
     for (let i = 0; i < 200; i++) sim.aim(r, r.sniperId, 1, 0, 0.1);
     ok("yaw is clamped", Math.abs(r.aimYaw) < Math.PI / 2, "(" + r.aimYaw.toFixed(2) + ")");

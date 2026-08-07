@@ -174,12 +174,14 @@
     transition: opacity .18s ease-out;
   }
   #scope.show { opacity: 1; }
-  /* The eyepiece: everything outside the circle goes black, which is what actually sells a
-     scope — the narrowed field of view, not the crosshair. */
+  /* The eyepiece. Deliberately a soft vignette rather than a hard black mask: blacking out
+     everything past the circle sells the optic but costs the sniper all peripheral vision of
+     the aisle, and on a split screen that half then reads as switched off. The corners stay
+     dark enough to frame the shot while the aisle around the reticle remains legible. */
   #scope .ring {
     position: absolute; inset: 0;
     background: radial-gradient(circle at 50% 50%,
-      rgba(0,0,0,0) 27%, rgba(0,0,0,.55) 30%, rgba(0,0,0,.98) 38%, #000 100%);
+      rgba(0,0,0,0) 42%, rgba(0,0,0,.18) 62%, rgba(0,0,0,.55) 84%, rgba(0,0,0,.78) 100%);
   }
   #scope .cross {
     position: absolute; background: rgba(255,46,136,.85);
@@ -271,7 +273,7 @@
 <script src="/sdk.js"></script>
 <script type="module">
 import * as THREE from "/vendor/three.js?v=5";
-import * as sim from "/games/minefield3d/sim.js?v=16";
+import * as sim from "/games/minefield3d/sim.js?v=17";
 import { LEVELS, getLevel, ARENAS, getArena, STAGES, getStage, RANGES, getRange } from "/games/minefield3d/levels.js?v=9";
 import {
   createScene, updateCamera, updateArenaCamera, updateCallCamera, updateFloor, setGateOpen, resize,
@@ -281,7 +283,7 @@ import {
   createPlayerMesh, posePlayer, createKillerMesh, loadAvatar, setAvatar, createBloodSplat,
   setAvatarHeight, createRoombaMesh, updateRoombaMesh,
   createPingRing, updatePingRing, createBlast, stepBlast, createPrintMesh,
-} from "/games/minefield3d/scene.js?v=24";
+} from "/games/minefield3d/scene.js?v=32";
 import {
   TIERS, QUALITY_CHOICES, DEFAULT_QUALITY, resolveTier, makeFpsWatchdog,
 } from "/games/minefield3d/quality.js?v=5";
@@ -1208,10 +1210,15 @@ function frame(ts) {
   watchdog.tick(ts);
 
   // Bodies and their personal rings.
+  const nestY = isSniper() ? (modeLevel(levelIndex).nestHeight || 6.5) : 0;
   for (const [id, p] of round.players) {
     const mesh = bodies.get(id) || ensureBody(id);
     mesh.group.visible = p.state !== sim.ESCAPED && p.state !== sim.WAITING;
-    posePlayer(mesh, p, sim, dt);
+    // The sniper stands on the nest deck facing their own aim; everyone else runs the aisle.
+    const inNest = isSniper() && sim.isSniper(round, id)
+      ? { y: nestY, yaw: round.aimYaw }
+      : null;
+    posePlayer(mesh, p, sim, dt, inNest);
 
     const ring = rings.get(id);
     if (ring) updatePingRing(ring, p.ping, round.level);

@@ -161,6 +161,12 @@ export function createScene(canvas, level, Q, mode = "escape") {
   let laser = null;
   if (sniper) {
     sniperCam = new THREE.PerspectiveCamera(58, 16 / 9, 0.1, 400);
+    // Layer AISLE_ONLY carries the parts of the nest that exist to make it readable from the
+    // floor — they sit between the shooter's eye and the range, so the sniper's own camera is
+    // told not to draw them. Enabled here rather than disabled, since a camera has layer 0 on
+    // by default and the aisle camera needs both.
+    sniperCam.layers.set(0);
+    camera.layers.enable(AISLE_ONLY);
     nest = buildNest(level);
     world.add(nest.group);
     laser = buildLaser();
@@ -950,11 +956,27 @@ export function buildCover(round, sim, Q) {
 }
 
 /**
- * The nest: a platform over the gate with the rifle on it.
+ * How far back behind the nest the sniper camera may sit.
  *
- * Built as scenery rather than as an avatar. The sniper is a player, but from the aisle they
- * are a silhouette on a gantry — what the runners need to read is the *rifle's* bearing, and
- * that is carried by the laser rather than by a body they can barely see at that range.
+ * The end wall is only as tall as the gate, so at nest height there is nothing to clip through
+ * — the limit exists to stop the eye drifting so far back that the deck's own far edge starts
+ * eating the bottom of the frame.
+ */
+const NEST_CAM_MIN_Z = -3.2;
+
+/**
+ * Render layer for nest furniture that only the aisle camera should see. The rail and lamp
+ * advertise the nest to the runners looking up at it, but from the shooter's own eye they hang
+ * across the middle of the range exactly where the shot goes.
+ */
+const AISLE_ONLY = 1;
+
+/**
+ * The nest: a platform over the gate with the rifle on it, and the sniper standing at it.
+ *
+ * The rifle is scenery so it can be swung directly by the sim's aim, but the shooter is a real
+ * avatar posed on the deck — with the camera over their shoulder they are the most-looked-at
+ * thing in the right-hand view, and an absent or unposed body reads as a bug immediately.
  */
 export function buildNest(level) {
   const group = new THREE.Group();
@@ -982,10 +1004,12 @@ export function buildNest(level) {
   });
   const rail = new THREE.Mesh(new THREE.BoxGeometry(level.cols * 0.5, 0.05, 0.06), railMat);
   rail.position.set(cx, h + 0.42, -0.2);
+  rail.layers.set(AISLE_ONLY);
   group.add(rail);
 
   const lamp = new THREE.PointLight(0xff2e88, 1.6, 10, 2);
   lamp.position.set(cx, h + 0.6, -1.0);
+  lamp.layers.set(AISLE_ONLY);
   group.add(lamp);
 
   // The rifle itself, parented so the whole thing can be swung by the sim's aim.
@@ -1108,9 +1132,18 @@ export function updateSniperCamera(camera, round, sim, dt) {
   // into the aisle, so retreating along that line lifts the camera high above the nest and
   // leaves it staring across the gantry instead of down the range. Splitting the offset into
   // a flat pull-back plus a fixed rise keeps the shot behind the shooter at every pitch.
-  const back = scoped ? 0.9 : 3.4;
-  const up = scoped ? 0.15 : 1.1;
-  const side = scoped ? 0 : 0.85;
+  // How far back the camera may sit before it leaves the building. The nest is barely a unit
+  // from the back wall, so a naive pull-back puts the eye *outside* the room and the render
+  // becomes the underside of the ceiling with the aisle hidden behind the gate structure.
+  // The offset is therefore mostly lateral: over the shoulder, not behind the back.
+  // `up` clears the deck rather than skimming it. The platform is a solid slab a couple of
+  // units deep sitting just under the muzzle, so an eye only half a unit above it looks
+  // straight into its own floor and the aisle never appears — the deck fills the viewport.
+  // Scoped sits on the sight line but must still clear the deck — dropping the eye to the
+  // muzzle's own height buries the bottom of the view in the platform the rifle rests on.
+  const back = scoped ? 0.35 : 0.9;
+  const up = scoped ? 1.05 : 1.55;
+  const side = scoped ? 0 : 1.5;
 
   // Flat bearing and its perpendicular, both in the ground plane.
   const bx = Math.sin(round.aimYaw);
@@ -1120,7 +1153,9 @@ export function updateSniperCamera(camera, round, sim, dt) {
 
   const wantX = from.x - bx * back + rx * side;
   const wantY = from.y + up;
-  const wantZ = from.z - bz * back + rz * side;
+  // Clamped in front of the wall no matter where the yaw points, so the eye can never end up
+  // on the far side of it.
+  const wantZ = Math.max(NEST_CAM_MIN_Z, from.z - bz * back + rz * side);
 
   const k = 1 - Math.exp(-dt * (scoped ? 14 : 9));
   camera.position.x += (wantX - camera.position.x) * k;
@@ -1590,10 +1625,49 @@ export function createPlayerMesh(colorHex, Q) {
  *
  * The same function serves the model and the capsule fallback, so every offset is expressed
  * relative to the body's own base scale rather than hardcoded to capsule dimensions.
+ *
+ * `nest`, when given, means this player is the sniper: {y, yaw}. They are posed standing at
+ * the rifle instead of running, because the sim leaves them parked at a fixed floor position
+ * with no velocity — which the run path renders as a motionless T-pose behind the gate.
  */
-export function posePlayer(mesh, p, states, dt) {
+export function posePlayer(mesh, p, states, dt, nest) {
   const { body, group, lamp, baseScale } = mesh;
   const s = baseScale;
+
+  if (nest) {
+    // Standing on the deck, turned to face wherever the rifle is pointing.
+    group.position.set(p.x, nest.y, p.z);
+    group.rotation.y = nest.yaw;
+
+    // The shooter is drawn for the aisle camera only.
+    //
+    // The nest is a couple of units deep and the avatar stands at the aisle's own scale, so
+    // from an eye on the same platform the body is always within arm's reach — it fills a
+    // third of the optic scoped and looms over the frame edge unscoped, and no offset fixes
+    // that without pushing the camera somewhere the deck blocks. The third-person read is
+    // carried by the LEFT view, where the sniper is clearly visible up on the gantry.
+    group.traverse((o) => { o.layers.set(AISLE_ONLY); });
+
+    body.rotation.set(0, 0, 0);
+    body.position.set(0, mesh.isModel ? 0 : 0.62, 0);
+    body.scale.setScalar(s);
+    lamp.intensity = 0;
+    if (mesh.glow) mesh.glow.material.opacity = 0;
+
+    // Idle at full weight is what takes the rig out of its bind pose. Without a clip driving
+    // it the model renders arms-out, which is the T-pose.
+    if (mesh.actions) {
+      if (mesh.actions.running) mesh.actions.running.setEffectiveWeight(0);
+      if (mesh.actions.behit) mesh.actions.behit.setEffectiveWeight(0);
+      if (mesh.actions.standup) mesh.actions.standup.setEffectiveWeight(0);
+      if (mesh.actions.idle) {
+        if (!mesh.actions.idle.isRunning()) mesh.actions.idle.play();
+        mesh.actions.idle.setEffectiveWeight(1);
+      }
+    }
+    if (mesh.mixer && dt) mesh.mixer.update(dt);
+    return;
+  }
 
   // A player dropped through the floor keeps falling. Their y is the only thing that moves —
   // x and z are frozen at the tile that vanished, because there is nothing to walk on.

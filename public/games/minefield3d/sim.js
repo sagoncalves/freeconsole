@@ -1464,7 +1464,10 @@ export function aim(round, deviceId, dx, dz, dt) {
   // Scoping trades swing speed for precision, which is the whole reason to ever un-scope.
   const rate = (level.turnSpeed || 1.15) * (round.scoped ? (level.zoomTurn || 0.38) : 1);
 
-  round.aimYaw += dx * rate * dt;
+  // Yaw is subtracted, not added. The nest looks down +z, and from a camera facing that way
+  // +x falls on the *left* of frame — so adding the stick's x swings the rifle away from the
+  // side the player pushed toward. Pitch needs no such flip: stick-forward is already up-range.
+  round.aimYaw -= dx * rate * dt;
   round.aimPitch -= dz * rate * dt;
 
   // Yaw: enough to cover the aisle's width from the nest, and no further.
