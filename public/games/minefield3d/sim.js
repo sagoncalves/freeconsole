@@ -1464,7 +1464,10 @@ export function aim(round, deviceId, dx, dz, dt) {
   // Scoping trades swing speed for precision, which is the whole reason to ever un-scope.
   const rate = (level.turnSpeed || 1.15) * (round.scoped ? (level.zoomTurn || 0.38) : 1);
 
-  round.aimYaw += dx * rate * dt;
+  // The stick's x is negated. The nest looks down +z, and for a camera facing +z the shooter's
+  // own right hand is toward -x — so pushing the stick right has to *decrease* yaw. Feeding dx
+  // in directly mirrors the controls, which is exactly what it did until this sign was added.
+  round.aimYaw -= dx * rate * dt;
   round.aimPitch -= dz * rate * dt;
 
   // Yaw: enough to cover the aisle's width from the nest, and no further.

@@ -1417,6 +1417,21 @@ console.log("\nsniper: the nest");
     sim.aim(r, r.sniperId, 1, 0, 0.1);
     ok("the sniper can aim", r.aimYaw !== yaw0);
 
+    // Stick right must swing the aim to the SHOOTER's right, which is what a player checks in
+    // the first half-second of holding the rifle. Asserted on where the laser actually lands
+    // rather than on the sign of aimYaw: the nest looks down +z, so screen-right is -x, and a
+    // test written against the field would have to encode that convention twice and would
+    // pass just as happily with the controls mirrored.
+    const rDir = beginS(0, 77, 2);
+    rDir.cover.fill(0);
+    rDir.aimYaw = 0;
+    rDir.aimPitch = -0.5;
+    const midX = sim.traceShot(rDir).x;
+    for (let i = 0; i < 6; i++) sim.aim(rDir, rDir.sniperId, 1, 0, 0.05);
+    const rightX = sim.traceShot(rDir).x;
+    ok("stick right aims to the shooter's right",
+      rightX < midX, "(" + midX.toFixed(2) + " -> " + rightX.toFixed(2) + ")");
+
     // The swing is clamped so the nest cannot look behind itself.
     for (let i = 0; i < 200; i++) sim.aim(r, r.sniperId, 1, 0, 0.1);
     ok("yaw is clamped", Math.abs(r.aimYaw) < Math.PI / 2, "(" + r.aimYaw.toFixed(2) + ")");
