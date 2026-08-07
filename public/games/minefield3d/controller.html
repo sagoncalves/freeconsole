@@ -598,7 +598,21 @@
     var was = iAmSniper;
     iAmSniper = false;
     if (sn) {
-      try { iAmSniper = sn.id === freeconsole.getDeviceId(); } catch (err) { iAmSniper = false; }
+      /*
+       * Compare the ids numerically rather than with ===.
+       *
+       * A device id makes a long trip — Firebase, the shell's welcome payload, JSON on the
+       * wire — and anything along that path that hands back "1" instead of 1 makes a strict
+       * comparison silently false. The failure is total and silent: the phone holding the
+       * rifle is never told, so it shows a runner's controls, sends no aim, and the trigger
+       * does nothing, while the screen happily reports that device as the sniper. Number()
+       * on both sides costs nothing and removes the whole class of failure.
+       */
+      try {
+        var mine = Number(freeconsole.getDeviceId());
+        var nest = Number(sn.id);
+        iAmSniper = Number.isFinite(mine) && Number.isFinite(nest) && mine === nest;
+      } catch (err) { iAmSniper = false; }
       rifleReloading = !!sn.reload;
     }
 
@@ -907,7 +921,11 @@
       releaseAll();
       conditionEl.className = "ok";
       conditionEl.textContent = data.levelName || "Level " + (data.level || 1);
-      subEl.textContent = "get ready";
+      // Say who is holding the rifle during the countdown, not only once the round starts.
+      // The nest is assigned before the round runs, and the countdown is exactly when a
+      // player looks down to find out what they are about to be — leaving it until "running"
+      // means the sniper spends the whole briefing believing they are a runner.
+      subEl.textContent = iAmSniper ? "you have the rifle" : "get ready";
     } else if (data.phase === "over") {
       over = true;
       pad.classList.add("locked");

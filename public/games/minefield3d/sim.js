@@ -1010,10 +1010,7 @@ export function startRound(round) {
   // The nest is assigned BEFORE anyone is seated, because resetPlayer spreads the runners
   // across the aisle and needs to know how many there actually are — counting the sniper
   // among them leaves a gap on the spawn line where nobody is standing.
-  if (round.mode === MODE_SNIPER) {
-    if (!ids.length) round.sniperId = null;
-    else if (!round.players.has(round.sniperId)) round.sniperId = ids[0];
-  }
+  assignNest(round);
 
   const runners = round.mode === MODE_SNIPER
     ? ids.filter((id) => id !== round.sniperId)
@@ -1542,6 +1539,22 @@ export function nestPos(round) {
     y: (round.level.nestHeight || 6.5) - MUZZLE_DROP,
     z: -1.2,
   };
+}
+
+/**
+ * Settle who holds the rifle, keeping the current holder if they are still in the room.
+ *
+ * Callable outside startRound on purpose. The nest used to be chosen only as the round
+ * began, which left `sniperId` null for the whole countdown — so the phone about to be the
+ * sniper was told nothing during the exact window a player looks down to see what they are.
+ * The screen now calls this the moment the mode is entered, and startRound calls it again
+ * because players can join or leave in between.
+ */
+export function assignNest(round) {
+  if (round.mode !== MODE_SNIPER) return;
+  const ids = [...round.players.keys()].sort((a, b) => a - b);
+  if (!ids.length) round.sniperId = null;
+  else if (!round.players.has(round.sniperId)) round.sniperId = ids[0];
 }
 
 /** Is this device the one in the nest? */

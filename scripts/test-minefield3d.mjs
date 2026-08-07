@@ -1435,6 +1435,37 @@ console.log("\nsniper: the nest");
     return r;
   };
 
+  /*
+   * The nest must be settled before the round runs.
+   *
+   * It used to be chosen only inside startRound, so `sniperId` stayed null for the whole
+   * countdown and the phone about to hold the rifle was told nothing during the exact window
+   * a player looks down to see what they are. The screen now settles it when the mode is
+   * entered and when players join, which only works if it is callable on its own.
+   */
+  {
+    const pre = sim.createRound(0, 11, sim.MODE_SNIPER);
+    sim.addPlayer(pre, 4);
+    sim.addPlayer(pre, 7);
+    ok("no nest before anyone claims it", pre.sniperId === null);
+    sim.assignNest(pre);
+    ok("the nest is assignable without starting a round", pre.sniperId === 4,
+       "(" + pre.sniperId + ")");
+    // A second call must not reshuffle it — the holder keeps it while they are still here.
+    sim.assignNest(pre);
+    ok("re-settling keeps the current holder", pre.sniperId === 4);
+    // ...but must hand it on when they leave.
+    sim.removePlayer(pre, 4);
+    sim.assignNest(pre);
+    ok("the nest passes on when its holder leaves", pre.sniperId === 7,
+       "(" + pre.sniperId + ")");
+    // And it is inert in the modes that have no nest at all.
+    const esc = sim.createRound(0, 13, sim.MODE_ESCAPE);
+    sim.addPlayer(esc, 1);
+    sim.assignNest(esc);
+    ok("escape never gets a nest", esc.sniperId === null);
+  }
+
   const r0 = beginS(0, 5);
   ok("the round knows it is sniper", r0.mode === sim.MODE_SNIPER);
   ok("it uses the range table", r0.level.name === RANGES[0].name, "(" + r0.level.name + ")");

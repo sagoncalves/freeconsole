@@ -282,7 +282,7 @@
 <script src="/sdk.js"></script>
 <script type="module">
 import * as THREE from "/vendor/three.js?v=5";
-import * as sim from "/games/minefield3d/sim.js?v=21";
+import * as sim from "/games/minefield3d/sim.js?v=22";
 import { LEVELS, getLevel, ARENAS, getArena, STAGES, getStage, RANGES, getRange } from "/games/minefield3d/levels.js?v=9";
 import {
   createScene, updateCamera, updateArenaCamera, updateCallCamera, updateFloor, setGateOpen, resize,
@@ -570,6 +570,9 @@ function joinPlayer(deviceId) {
   ensureBody(deviceId);
   renderRoster();
   renderSlots();
+  // The first phone into an empty room is the sniper by default, and it has to learn that
+  // from the broadcast below rather than a countdown later.
+  if (round.phase !== "running") sim.assignNest(round);
   if (round.phase === "briefing") maybeStart();
   broadcastState(true);
 }
@@ -695,6 +698,9 @@ function setMode(next) {
   // A mode switch always returns to briefing, even from the middle of a live round — the sim
   // it was running no longer exists.
   round.phase = "briefing";
+  // Settle the nest now rather than at startRound, so the broadcast below already names the
+  // sniper and their phone can show the rifle through the countdown instead of after it.
+  sim.assignNest(round);
   showWaiting();
   broadcastState(true);
   maybeStart();
