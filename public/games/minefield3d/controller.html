@@ -614,6 +614,17 @@
       scopedOn = false;
       scopeBtn.classList.remove("on");
     }
+
+    /*
+     * Picking up or losing the rifle has to redraw the status line.
+     *
+     * setCondition is otherwise only called when `legs` or `state` change, and taking the
+     * nest changes neither — you keep two legs and stay alive. So the phone that had just
+     * become the sniper went on reading "Walking / two legs" with no indication it was
+     * holding a rifle at all, which is exactly the "it doesn't tell me I'm the sniper"
+     * report. Redrawn only on the transition, so this cannot fight the normal path.
+     */
+    if (was !== iAmSniper) setCondition(lastLegs, lastState);
   }
 
   /* ---------------------------------------------------------------- ping clock */

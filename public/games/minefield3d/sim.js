@@ -740,6 +740,10 @@ export function addPlayer(round, deviceId) {
     pushCooldown: 0,
     /** Seconds left of the shove's own arm-thrust, for the renderer to pose against. */
     shoveFor: 0,
+    /** How far the last connecting shove had to reach, so the renderer can lunge that far. */
+    shoveGap: 0,
+    /** Seconds a knocked player waits before sliding, so the shove lands before they move. */
+    slideDelay: 0,
 
     /**
      * Calls: how far this player has fallen through the floor, in world units.
@@ -842,6 +846,9 @@ export function push(round, deviceId) {
   // misses still has to look like a shove, or the button feels dead exactly when a player
   // most needs to know it fired.
   p.shoveFor = PUSH_ANIM_TIME;
+  // Cleared up front so a miss cannot inherit the lunge distance of the last shove that
+  // connected; a hit sets it again below.
+  p.shoveGap = 0;
 
   const fx = Math.sin(p.heading);
   const fz = Math.cos(p.heading);
@@ -880,6 +887,19 @@ export function push(round, deviceId) {
   round.events.push({ type: "push", id: p.id, x: p.x, z: p.z, hit: !!best });
   if (!best) return false;
 
+  /*
+   * Turn to face whoever is actually being shoved, and record how far away they were.
+   *
+   * Both exist for the renderer. The reach is nearly two tiles but a pair of arms spans well
+   * under one, so a shove thrown at the edge of range played out with the hands nowhere near
+   * the target — it read as pushing thin air, which is exactly how it was reported. The
+   * renderer uses `shoveGap` to lunge the body across the difference, and it can only do
+   * that honestly if the shover is also turned to face the target rather than left pointing
+   * wherever the stick happened to be.
+   */
+  p.heading = Math.atan2(best.dx, best.dz);
+  p.shoveGap = best.d;
+
   knockDown(round, best.q, best.dx / best.d, best.dz / best.d, p.id);
   return true;
 }
@@ -893,6 +913,17 @@ export function push(round, deviceId) {
  */
 function knockDown(round, q, nx, nz, byId) {
   q.downFor = PUSH_DOWN_TIME;
+  /*
+   * Hold the target still until the shove has actually landed on them.
+   *
+   * The thrust peaks a quarter of the way through PUSH_ANIM_TIME. Sliding from frame one
+   * means the target is already travelling before the hands arrive, so the gap between the
+   * two only ever grows and the shove visibly touches nothing — the arms reach for a body
+   * that has left. Waiting for contact costs under a tenth of a second and is what makes the
+   * hit read as a hit. The stagger applies to the slide only; downFor runs immediately, so
+   * they are off their feet the whole time.
+   */
+  q.slideDelay = PUSH_ANIM_TIME * 0.25;
   q.slideX = nx * PUSH_SLIDE;
   q.slideZ = nz * PUSH_SLIDE;
   q.pushedBy = byId ?? null;
@@ -920,6 +951,19 @@ export function isDown(p) {
 export function shoveProgress(p) {
   if (!p.shoveFor || p.shoveFor <= 0) return 0;
   return 1 - p.shoveFor / PUSH_ANIM_TIME;
+}
+
+/**
+ * How far the renderer should carry the shover forward, in world units.
+ *
+ * The arms alone cannot span the reach — it is nearly two tiles and a pair of arms is well
+ * under one — so the body has to travel the remainder or the shove visibly touches nothing.
+ * A body's own width is subtracted because the two never need to occupy the same point, and
+ * the result is clamped so a shove at maximum range does not turn into a flying tackle.
+ */
+export function shoveLunge(p) {
+  if (!p.shoveGap) return 0;
+  return Math.max(0, Math.min(1.15, p.shoveGap - 0.62));
 }
 
 /* ------------------------------------------------------------------ lifecycle */
@@ -1061,6 +1105,8 @@ function resetPlayer(round, p, index, total) {
   p.pushedBy = null;
   p.pushCooldown = 0;
   p.shoveFor = 0;
+  p.shoveGap = 0;
+  p.slideDelay = 0;
 
   // Stagger the first ping across the roster so the aisle does not strobe in unison. Each
   // player then runs free on their own period.
@@ -1888,6 +1934,14 @@ function stepPlayer(round, p, dt) {
   // free ride across hazards.
   if (p.downFor > 0) {
     p.downFor -= dt;
+
+    // Wait for the shover's hands to arrive before travelling. See knockDown.
+    if (p.slideDelay > 0) {
+      p.slideDelay = Math.max(0, p.slideDelay - dt);
+      p.dx = 0;
+      p.dz = 0;
+      return;
+    }
 
     const speed = Math.hypot(p.slideX, p.slideZ);
     if (speed > 0.01) {

@@ -1907,7 +1907,7 @@ function poseShove(mesh, p, states) {
   const t = states.shoveProgress ? states.shoveProgress(p) : 0;
   if (t <= 0 || t >= 1) return;
 
-  const { bones, rest, body } = mesh;
+  const { bones, rest, body, group } = mesh;
 
   // Out hard over the first quarter, back over the remaining three.
   const punch = t < 0.25
@@ -1915,6 +1915,25 @@ function poseShove(mesh, p, states) {
     : 1 - (t - 0.25) / 0.75;
   // Ease so the extremes settle rather than snapping.
   const e = punch * punch * (3 - 2 * punch);
+
+  /*
+   * Carry the body forward so the hands actually arrive at the target.
+   *
+   * This is the difference between a shove that connects and one that pushes air. The reach
+   * is nearly two tiles; arms span well under one. Without the lunge, a shove thrown at the
+   * edge of range plays a full thrust while the target is still a body's length away and
+   * flies backwards untouched.
+   *
+   * Applied to the group rather than the body, so it moves the lamp and the ground glow with
+   * it — a torso that slides out of its own light reads as a glitch. It is deliberately
+   * transient: the sim's position is authoritative and this offset unwinds to nothing with
+   * the same curve as the arms.
+   */
+  const lunge = (states.shoveLunge ? states.shoveLunge(p) : 0) * e;
+  if (lunge > 0) {
+    group.position.x += Math.sin(p.heading) * lunge;
+    group.position.z += Math.cos(p.heading) * lunge;
+  }
 
   if (!mesh.isModel) {
     // Capsule fallback: lean into it, which is all a capsule can say.
