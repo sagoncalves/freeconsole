@@ -174,12 +174,23 @@
     transition: opacity .18s ease-out;
   }
   #scope.show { opacity: 1; }
-  /* The eyepiece: everything outside the circle goes black, which is what actually sells a
-     scope — the narrowed field of view, not the crosshair. */
+  /* The eyepiece.
+     A vignette, NOT a blackout. Blacking the surround out entirely is the photographic
+     truth of looking through a scope, but on a shared TV it throws away half the screen:
+     the sniper loses every runner not already centred, and the people watching lose the
+     shot entirely. This darkens toward the edge and stops well short of opaque, so the
+     circle still reads as an eyepiece while the aisle around it stays legible. */
   #scope .ring {
     position: absolute; inset: 0;
     background: radial-gradient(circle at 50% 50%,
-      rgba(0,0,0,0) 27%, rgba(0,0,0,.55) 30%, rgba(0,0,0,.98) 38%, #000 100%);
+      rgba(0,0,0,0) 30%, rgba(0,0,0,.18) 44%, rgba(0,0,0,.45) 62%, rgba(0,0,0,.62) 100%);
+  }
+  /* The eyepiece edge, which is what actually reads as "scope" once the blackout is gone. */
+  #scope .ring::after {
+    content: ""; position: absolute; left: 50%; top: 50%;
+    width: 60%; aspect-ratio: 1; transform: translate(-50%,-50%);
+    border-radius: 50%; border: 2px solid rgba(0,0,0,.55);
+    box-shadow: 0 0 0 1px rgba(53,240,224,.22) inset;
   }
   #scope .cross {
     position: absolute; background: rgba(255,46,136,.85);
@@ -271,7 +282,7 @@
 <script src="/sdk.js"></script>
 <script type="module">
 import * as THREE from "/vendor/three.js?v=5";
-import * as sim from "/games/minefield3d/sim.js?v=16";
+import * as sim from "/games/minefield3d/sim.js?v=17";
 import { LEVELS, getLevel, ARENAS, getArena, STAGES, getStage, RANGES, getRange } from "/games/minefield3d/levels.js?v=9";
 import {
   createScene, updateCamera, updateArenaCamera, updateCallCamera, updateFloor, setGateOpen, resize,
@@ -281,7 +292,7 @@ import {
   createPlayerMesh, posePlayer, createKillerMesh, loadAvatar, setAvatar, createBloodSplat,
   setAvatarHeight, createRoombaMesh, updateRoombaMesh,
   createPingRing, updatePingRing, createBlast, stepBlast, createPrintMesh,
-} from "/games/minefield3d/scene.js?v=24";
+} from "/games/minefield3d/scene.js?v=33";
 import {
   TIERS, QUALITY_CHOICES, DEFAULT_QUALITY, resolveTier, makeFpsWatchdog,
 } from "/games/minefield3d/quality.js?v=5";
@@ -1211,7 +1222,7 @@ function frame(ts) {
   for (const [id, p] of round.players) {
     const mesh = bodies.get(id) || ensureBody(id);
     mesh.group.visible = p.state !== sim.ESCAPED && p.state !== sim.WAITING;
-    posePlayer(mesh, p, sim, dt);
+    posePlayer(mesh, p, sim, dt, round);
 
     const ring = rings.get(id);
     if (ring) updatePingRing(ring, p.ping, round.level);

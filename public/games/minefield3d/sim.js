@@ -189,13 +189,24 @@ const TEMPO_MAX = 1.9;
  * survival it is into a blade; in escape it is onto ground nobody has lit.
  *
  * The reach is deliberately short. A long grab would let a player farm shoves from safety;
- * at just over a body's width you have to close, which means putting yourself in the same
- * danger you are trying to inflict.
+ * at under two tiles you have to close, which means putting yourself in the same danger you
+ * are trying to inflict.
+ *
+ * It is nevertheless generous, and that is the point: players pass through each other, so
+ * there is no contact, no blocked step, nothing that tells a thumb "you are close enough
+ * now". The only feedback is whether the shove lands. Tuned tight, the button reads as
+ * broken rather than as missed — you cannot tell being out of range from a dead control.
  */
-const PUSH_REACH = 1.15;
+const PUSH_REACH = 1.9;
 
-/** How wide the arc in front of you counts as a shove — a cone, not a full circle. */
-const PUSH_ARC = Math.PI * 0.55;
+/**
+ * How wide the arc in front of you counts as a shove — a cone, not a full circle.
+ *
+ * Just over a right angle each side. Wide enough that "roughly towards them" connects, since
+ * heading comes from a thumb on glass and is never precise, but short of the full circle
+ * that would make facing irrelevant and turn the shove into a proximity aura.
+ */
+const PUSH_ARC = Math.PI * 1.1;
 
 /** Seconds between shoves, so it cannot be spammed into a stunlock. */
 const PUSH_COOLDOWN = 1.1;
@@ -821,8 +832,18 @@ export function push(round, deviceId) {
   const fx = Math.sin(p.heading);
   const fz = Math.cos(p.heading);
 
+  /**
+   * Pick the target by how squarely it sits in front, not by distance alone.
+   *
+   * With a narrow cone the two agree often enough not to matter. With this one they do not:
+   * somebody brushing past your shoulder can be nearer than the player you are walking
+   * straight at, and picking on distance would shove the bystander while the phone was
+   * pointed at someone else. Score is the facing dot scaled down by distance, so a target
+   * dead ahead beats a closer one off to the side, and among equals the nearer wins.
+   */
+  const minDot = Math.cos(PUSH_ARC / 2);
   let best = null;
-  let bestD = PUSH_REACH;
+  let bestScore = -Infinity;
   for (const q of round.players.values()) {
     if (q === p || q.state !== ALIVE) continue;
     // Somebody already on the floor cannot be shoved again — that is the anti-stunlock rule,
@@ -832,11 +853,13 @@ export function push(round, deviceId) {
     const dx = q.x - p.x;
     const dz = q.z - p.z;
     const d = Math.hypot(dx, dz);
-    if (d > bestD || d < 1e-4) continue;
+    if (d > PUSH_REACH || d < 1e-4) continue;
     // Inside the forward arc?
     const dot = (dx / d) * fx + (dz / d) * fz;
-    if (dot < Math.cos(PUSH_ARC / 2)) continue;
-    bestD = d;
+    if (dot < minDot) continue;
+    const score = dot - d / PUSH_REACH * 0.5;
+    if (score <= bestScore) continue;
+    bestScore = score;
     best = { q, dx, dz, d };
   }
 
@@ -1464,7 +1487,20 @@ export function aim(round, deviceId, dx, dz, dt) {
   // Scoping trades swing speed for precision, which is the whole reason to ever un-scope.
   const rate = (level.turnSpeed || 1.15) * (round.scoped ? (level.zoomTurn || 0.38) : 1);
 
-  round.aimYaw += dx * rate * dt;
+  /*
+   * Both axes are negated, and the signs are not guesswork — they follow from the geometry.
+   *
+   * The nest looks down the aisle toward +z, so the camera's right-hand vector is -x. Raising
+   * aimYaw therefore swings the muzzle toward the viewer's LEFT, which means a stick pushed
+   * right has to lower it. That inversion is what made the rifle feel backwards.
+   *
+   * Pitch is already correct and is left alone: the pad's z grows downward, so subtracting it
+   * sends the barrel down when the thumb goes down, which is the direct mapping.
+   *
+   * Getting either backwards is not subtly wrong, it is unusable — you chase the target away
+   * from where you meant to go, on the one control that has to feel exact.
+   */
+  round.aimYaw -= dx * rate * dt;
   round.aimPitch -= dz * rate * dt;
 
   // Yaw: enough to cover the aisle's width from the nest, and no further.
