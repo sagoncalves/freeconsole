@@ -747,6 +747,14 @@
    * They carry the `q` class as well as `m` on purpose: the pad's pointerdown handler skips
    * anything with class `q`, and without it a tap on a mode button also plants a joystick.
    */
+  /** Light exactly one button in the mode row. */
+  function markMode(current) {
+    for (var i = 0; i < mbtns.children.length; i++) {
+      var el = mbtns.children[i];
+      el.classList.toggle("on", el.dataset.mode === current);
+    }
+  }
+
   function renderModes(m) {
     if (!m || !isMasterController()) return;
 
@@ -758,15 +766,23 @@
         b.dataset.mode = choice;
         b.textContent = MODE_LABELS[choice] || choice;
         b.addEventListener("click", function () {
+          /*
+           * Move the highlight on the tap, not on the reply.
+           *
+           * A mode change tears down the round and rebuilds the level on the screen, so the
+           * confirming broadcast is a long way off — and until it lands the row still lights
+           * whatever was running before, which reads as "it ignored me and stayed on escape".
+           * The screen remains the authority: its next broadcast re-marks the row, so a
+           * change it refuses (a non-master phone, an unknown mode) is corrected rather than
+           * left showing a lie.
+           */
+          markMode(choice);
           freeconsole.message(FreeConsole.SCREEN, { t: "mode", mode: choice });
         });
         mbtns.appendChild(b);
       });
     }
-    for (var i = 0; i < mbtns.children.length; i++) {
-      var el = mbtns.children[i];
-      el.classList.toggle("on", el.dataset.mode === m.current);
-    }
+    markMode(m.current);
   }
 
   function isMasterController() {

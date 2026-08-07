@@ -1390,6 +1390,15 @@ export function getAvatarHeight() { return AVATAR_HEIGHT; }
  */
 const LAYER_NEST_STRUCT = 1;
 
+/**
+ * Global multiplier on the run cycle's playback rate.
+ *
+ * The clip is authored slower than these games read at. Kept as one named constant rather
+ * than folded into the timeScale expression so the stride can be retuned in one place
+ * without re-deriving the speed curve underneath it.
+ */
+const RUN_RATE = 1.2;
+
 const BONES = {
   LeftUpLeg: 1, RightUpLeg: 1,
   LeftArm: 1, RightArm: 1,
@@ -1838,7 +1847,11 @@ export function posePlayer(mesh, p, states, dt, round) {
       // pushed halfway, or any of the shoving that goes on in an arena — drove the clip down
       // toward a third rate and read as slow motion. Legs that turn over slightly too fast
       // are invisible; legs that turn over too slowly look broken.
-      running.timeScale = Math.max(1.15, speed / 3.0);
+      //
+      // RUN_RATE lifts the whole curve, floor included: scaling only the speed-derived term
+      // would leave everyone below the floor — limpers, crawl-speed stragglers — running at
+      // exactly the old rate, and they are the ones the slow-motion complaint was about.
+      running.timeScale = RUN_RATE * Math.max(1.15, speed / 3.0);
     }
 
     // Keep stepping while either clip still carries weight, so the fade itself plays out.
@@ -1871,6 +1884,59 @@ export function posePlayer(mesh, p, states, dt, round) {
     applyLegs(mesh, p.legs);
     if (p.legs === 1) poseLimp(mesh, moving);
   }
+
+  // The shove goes on last so it overrides the run cycle underneath it — the mixer has
+  // already written the skeleton for this frame, and anything applied before it would be
+  // overwritten rather than blended.
+  poseShove(mesh, p, states);
+}
+
+/**
+ * The shove: a two-handed thrust, layered over whatever the body was already doing.
+ *
+ * Procedural rather than a clip, because the rig has no shove animation and because it has
+ * to read while running — a player almost always shoves mid-stride, so this has to be a
+ * correction applied on top of the run cycle rather than a replacement for it.
+ *
+ * The curve is deliberately asymmetric: a fast punch out and a slower recovery, which is how
+ * a real shove reads. A symmetric ease looks like a stretch. The whole thing is driven off
+ * the sim's own countdown, so it is frame-rate independent and survives a scene rebuild
+ * mid-shove — an event-triggered version would lose the pose on a quality switch.
+ */
+function poseShove(mesh, p, states) {
+  const t = states.shoveProgress ? states.shoveProgress(p) : 0;
+  if (t <= 0 || t >= 1) return;
+
+  const { bones, rest, body } = mesh;
+
+  // Out hard over the first quarter, back over the remaining three.
+  const punch = t < 0.25
+    ? t / 0.25
+    : 1 - (t - 0.25) / 0.75;
+  // Ease so the extremes settle rather than snapping.
+  const e = punch * punch * (3 - 2 * punch);
+
+  if (!mesh.isModel) {
+    // Capsule fallback: lean into it, which is all a capsule can say.
+    body.rotation.x = -e * 0.42;
+    return;
+  }
+  if (!bones || !rest) return;
+
+  // Both arms drive forward and straighten — positive rotation.x brings a hand down and
+  // forward on this rig, the same convention poseSniper measured.
+  if (bones.RightArm) bones.RightArm.rotation.x = rest.RightArm.rot.x + e * 1.5;
+  if (bones.LeftArm) bones.LeftArm.rotation.x = rest.LeftArm.rot.x + e * 1.5;
+  // Elbows extend as the hands go out, so the arms end straight rather than still folded.
+  if (bones.RightForeArm) bones.RightForeArm.rotation.x = rest.RightForeArm.rot.x + e * 0.5;
+  if (bones.LeftForeArm) bones.LeftForeArm.rotation.x = rest.LeftForeArm.rot.x + e * 0.5;
+
+  // The torso commits behind the arms, which is what stops it looking like a wave.
+  if (bones.Spine) bones.Spine.rotation.x = rest.Spine.rot.x + e * 0.30;
+  if (bones.Spine01) bones.Spine01.rotation.x = rest.Spine01.rot.x + e * 0.18;
+  // The head stays up: it counter-rotates against the lean so the player keeps looking at
+  // whoever they are shoving instead of at the floor.
+  if (bones.Head) bones.Head.rotation.x = rest.Head.rot.x - e * 0.30;
 }
 
 /**

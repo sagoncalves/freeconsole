@@ -211,6 +211,14 @@ const PUSH_ARC = Math.PI * 1.1;
 /** Seconds between shoves, so it cannot be spammed into a stunlock. */
 const PUSH_COOLDOWN = 1.1;
 
+/**
+ * How long the shove's arm-thrust plays for.
+ *
+ * Well under PUSH_COOLDOWN so the animation is always finished before the button comes back
+ * — an action still visibly playing when it is ready again reads as input lag.
+ */
+const PUSH_ANIM_TIME = 0.34;
+
 /** Seconds a shoved player spends on the floor before starting to get up. */
 const PUSH_DOWN_TIME = 1.5;
 
@@ -730,6 +738,8 @@ export function addPlayer(round, deviceId) {
     pushedBy: null,
     /** Seconds before this player can shove again. */
     pushCooldown: 0,
+    /** Seconds left of the shove's own arm-thrust, for the renderer to pose against. */
+    shoveFor: 0,
 
     /**
      * Calls: how far this player has fallen through the floor, in world units.
@@ -828,6 +838,10 @@ export function push(round, deviceId) {
   if (p.pushCooldown > 0 || p.downFor > 0 || p.stun > 0) return false;
 
   p.pushCooldown = PUSH_COOLDOWN;
+  // Start the shove's own animation clock. Set on every tap, hit or miss: a shove that
+  // misses still has to look like a shove, or the button feels dead exactly when a player
+  // most needs to know it fired.
+  p.shoveFor = PUSH_ANIM_TIME;
 
   const fx = Math.sin(p.heading);
   const fz = Math.cos(p.heading);
@@ -895,6 +909,17 @@ function knockDown(round, q, nx, nz, byId) {
 /** Is this player on the floor from a shove? Read by the renderer and the controller. */
 export function isDown(p) {
   return p.downFor > 0;
+}
+
+/**
+ * How far through their own shove this player is, 0 to 1, or 0 when not shoving.
+ *
+ * Exposed as normalised progress rather than as the raw countdown so the renderer never has
+ * to know PUSH_ANIM_TIME — retuning the duration here cannot desynchronise the pose.
+ */
+export function shoveProgress(p) {
+  if (!p.shoveFor || p.shoveFor <= 0) return 0;
+  return 1 - p.shoveFor / PUSH_ANIM_TIME;
 }
 
 /* ------------------------------------------------------------------ lifecycle */
@@ -1035,6 +1060,7 @@ function resetPlayer(round, p, index, total) {
   p.slideZ = 0;
   p.pushedBy = null;
   p.pushCooldown = 0;
+  p.shoveFor = 0;
 
   // Stagger the first ping across the roster so the aisle does not strobe in unison. Each
   // player then runs free on their own period.
@@ -1842,6 +1868,11 @@ export function roombaCount(round) {
 
 function stepPlayer(round, p, dt) {
   if (p.state !== ALIVE) return;
+
+  // Ahead of the sniper's early return, so a shove thrown on the last frame before taking
+  // the rifle still runs its animation out instead of freezing mid-swing.
+  if (p.shoveFor > 0) p.shoveFor = Math.max(0, p.shoveFor - dt);
+
   // The sniper is bolted into the nest. Their stick aims the rifle instead of walking, which
   // is handled by aim() straight off the wire.
   if (round.mode === MODE_SNIPER && p.id === round.sniperId) { p.dx = 0; p.dz = 0; return; }
