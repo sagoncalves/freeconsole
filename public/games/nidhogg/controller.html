@@ -386,16 +386,30 @@
   document.addEventListener("pointerup", release);
   document.addEventListener("pointercancel", release);
 
+  /** Drops every held key and clears the pad. One definition, three callers. */
+  function releaseEverything(force) {
+    stickEnd();
+    // `force` resends the release even for keys this phone already believes are up: after a
+    // reconnect the screen's belief is the one that is wrong, because the release sent while
+    // the phone was asleep may never have arrived. sendHold() suppresses a no-op change, so
+    // a forced release has to go around it rather than through it.
+    for (var k in held) {
+      if (held[k]) sendHold(k, false);
+      else if (force) freeconsole.message(FreeConsole.SCREEN, { t: "hold", k: k, v: false });
+    }
+    for (var id in active) delete active[id];
+    var downs = document.querySelectorAll(".key.down, .gkey.down");
+    for (var i = 0; i < downs.length; i++) downs[i].classList.remove("down");
+  }
+
   // A backgrounded phone must not leave a key stuck down on the screen.
   document.addEventListener("visibilitychange", function () {
-    if (document.hidden) {
-      stickEnd();
-      for (var k in held) if (held[k]) sendHold(k, false);
-      for (var id in active) delete active[id];
-      var downs = document.querySelectorAll(".key.down, .gkey.down");
-      for (var i = 0; i < downs.length; i++) downs[i].classList.remove("down");
-    }
+    if (document.hidden) releaseEverything(false);
   });
+
+  // Back from a screen lock. Force the releases through: this device and the screen have had
+  // no contact for the length of the lock, so nothing local can be trusted to match the TV.
+  freeconsole.onReconnect = function () { releaseEverything(true); };
 
   function restart() {
     over = false;

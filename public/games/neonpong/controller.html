@@ -114,6 +114,48 @@
     color: var(--glow); text-shadow: var(--bloom-glow);
   }
   #banner .sub { color: var(--text-dim); font-size: 14px; max-width: 32ch; }
+
+  /* Graphics settings. Only the master controller gets the gear, because the setting belongs
+     to the shared TV rather than to a player — one phone decides what the whole room sees. */
+  #gear {
+    width: 26px; height: 26px; flex-shrink: 0;
+    border-radius: 8px; border: 1px solid var(--line);
+    background: rgba(255,255,255,.06); color: var(--text-dim);
+    font-size: 13px; line-height: 1; padding: 0;
+    display: none; place-items: center;
+  }
+  #gear.show { display: grid; }
+  #gear:active { background: rgba(255,255,255,.14); transform: scale(.93); }
+
+  #settings {
+    position: fixed; inset: 0; z-index: 30;
+    display: none; flex-direction: column; align-items: center; justify-content: center;
+    gap: 14px; background: rgba(5,6,13,.96); text-align: center;
+    padding:
+      calc(20px + env(safe-area-inset-top))
+      calc(20px + env(safe-area-inset-right))
+      calc(20px + env(safe-area-inset-bottom))
+      calc(20px + env(safe-area-inset-left));
+  }
+  #settings.show { display: flex; }
+  #settings h2 { font-size: 17px; }
+  #settings .why { font-size: 12px; color: var(--text-faint); max-width: 34ch; line-height: 1.5; }
+
+  /* Stacked rows: this controller is portrait, so three side-by-side cards would be too
+     narrow to read the note under each name. */
+  .set-list { display: flex; flex-direction: column; gap: 8px; width: 100%; max-width: 340px; }
+  .set-opt {
+    border: 1px solid var(--line); border-radius: 14px;
+    background: rgba(255,255,255,.05); color: var(--text);
+    padding: 11px 14px; text-align: left;
+    display: flex; flex-direction: column; gap: 3px;
+    transition: border-color .15s, background .15s, transform .1s;
+  }
+  .set-opt.on { border-color: var(--line-bright); background: rgba(53,240,224,.14); }
+  .set-opt:active { transform: scale(.97); }
+  .set-name { font-size: 14px; font-weight: 700; }
+  .set-note { font-size: 11px; color: var(--text-dim); line-height: 1.3; }
+  #setResolved { margin: 0; font-size: 11px; color: var(--text-faint); min-height: 14px; }
 </style>
 </head>
 <body>
@@ -122,6 +164,7 @@
   <span class="seat" id="seat">—</span>
   <span id="status">Connecting…</span>
   <span class="lives" id="lives"></span>
+  <button id="gear" aria-label="Graphics settings">⚙</button>
 </div>
 
 <div id="pad" class="locked">
@@ -133,6 +176,14 @@
 <div id="banner">
   <div class="big" id="bannerBig">—</div>
   <div class="sub" id="bannerSub"></div>
+</div>
+
+<div id="settings">
+  <h2>Graphics</h2>
+  <p class="why">Lower this if the TV looks choppy. It changes how the game is drawn, never how it plays.</p>
+  <div class="set-list" id="setList"></div>
+  <p id="setResolved"></p>
+  <button class="btn" id="setClose">Done</button>
 </div>
 
 <script src="/sdk.js"></script>
@@ -380,6 +431,107 @@
     send(0);
   }
 
+  /* -------------------------------------------------------- graphics settings */
+
+  /**
+   * Call an SDK method that may not be ready yet.
+   *
+   * The settings panel is built from SDK state (who the master is, this device's id) that is
+   * unavailable before the shell connects, and a throw there would take the whole controller
+   * down — including the paddle, which has nothing to do with graphics.
+   */
+  function safeCall(fn, fallback) {
+    try { return fn(); } catch (err) { return fallback; }
+  }
+
+  /**
+   * What the screen last told us about its own rendering.
+   *
+   * The phone holds no opinion about what the tiers are — it renders whatever list the screen
+   * sends. One definition of the tiers (quality.js, on the screen), and a phone on a stale
+   * cached page cannot offer a setting the screen no longer understands.
+   */
+  var quality = { choice: null, tier: null, tiers: [] };
+
+  var gearEl = document.getElementById("gear");
+  var settingsEl = document.getElementById("settings");
+  var setListEl = document.getElementById("setList");
+  var setResolvedEl = document.getElementById("setResolved");
+
+  /**
+   * Whether this phone is the room's admin.
+   *
+   * Derived from the SDK rather than stored, so it follows the master controller: if that
+   * phone leaves, the next one simply IS the master and its gear appears with no handover.
+   */
+  function isMaster() {
+    var me = safeCall(function () { return freeconsole.getDeviceId(); }, -1);
+    var master = safeCall(function () { return freeconsole.getMasterControllerDeviceId(); }, undefined);
+    return master !== undefined && me === master;
+  }
+
+  function renderSettings() {
+    // The gear is only meaningful for the admin, and only once the screen has said what the
+    // options are — showing it earlier would open an empty sheet.
+    var show = isMaster() && quality.tiers.length > 0;
+    gearEl.classList.toggle("show", show);
+    if (!show) {
+      settingsEl.classList.remove("show");
+      return;
+    }
+
+    setListEl.replaceChildren();
+    quality.tiers.forEach(function (tier) {
+      var btn = document.createElement("button");
+      btn.className = "set-opt" + (tier.value === quality.choice ? " on" : "");
+      var name = document.createElement("span");
+      name.className = "set-name";
+      name.textContent = tier.label;
+      var note = document.createElement("span");
+      note.className = "set-note";
+      note.textContent = tier.note;
+      btn.append(name, note);
+      btn.addEventListener("click", function () {
+        // Optimistic: light the chosen option now rather than waiting for the round trip, so
+        // a tap always feels answered. The screen's reply is authoritative and corrects this
+        // if the choice was refused.
+        quality.choice = tier.value;
+        renderSettings();
+        safeCall(function () {
+          freeconsole.message(FreeConsole.SCREEN, { t: "set-quality", choice: tier.value });
+        });
+        safeCall(function () { freeconsole.vibrate(8); });
+      });
+      setListEl.appendChild(btn);
+    });
+
+    // "Auto" alone does not say what the device settled on, and that is exactly what the
+    // admin needs to know before deciding to override it.
+    setResolvedEl.textContent =
+      quality.choice === "auto" && quality.tier ? "Auto selected: " + quality.tier : "";
+  }
+
+  gearEl.addEventListener("click", function () {
+    settingsEl.classList.add("show");
+    // Ask on open rather than trusting what we hold: this phone may have connected after the
+    // screen's boot broadcast, or the tier may have changed since.
+    safeCall(function () { freeconsole.message(FreeConsole.SCREEN, { t: "get-quality" }); });
+  });
+
+  document.getElementById("setClose").addEventListener("click", function () {
+    settingsEl.classList.remove("show");
+  });
+
+  // Master is derived from who is connected, so it changes without this phone doing
+  // anything: the admin leaves, and the next controller inherits the gear.
+  freeconsole.onConnect = function () { renderSettings(); };
+  freeconsole.onDisconnect = function () {
+    renderSettings();
+    if (isMaster() && !quality.tiers.length) {
+      safeCall(function () { freeconsole.message(FreeConsole.SCREEN, { t: "get-quality" }); });
+    }
+  };
+
   /* ------------------------------------------------------------------ shell */
 
   freeconsole.onReady = function () {
@@ -388,12 +540,38 @@
     document.body.style.setProperty("--me", freeconsole.getPlayerColor());
     statusEl.textContent = "Waiting for the round…";
     renderHealth(WALL_HP, false);
+    renderSettings();
+    safeCall(function () { freeconsole.message(FreeConsole.SCREEN, { t: "get-quality" }); });
+  };
+
+  /**
+   * Back from a screen lock: stop the paddle, whatever either side believes.
+   *
+   * send() suppresses a value equal to the last one it sent, so calling padEnd() alone can
+   * legitimately transmit nothing while the screen is still gliding the paddle on a stale
+   * vector. Resetting `sent` to a value no real input produces forces the zero through.
+   */
+  freeconsole.onReconnect = function () {
+    padId = null;
+    pad.classList.remove("active");
+    knob.classList.remove("hot");
+    knob.style.transform = "translate(0px,0px)";
+    sent = NaN;                 // any comparison against this is false, so the next send lands
+    send(0);
+    safeCall(function () { freeconsole.message(FreeConsole.SCREEN, { t: "get-quality" }); });
   };
 
   freeconsole.onMessage = function (deviceId, data) {
     // Only the screen is authoritative.
     if (deviceId !== FreeConsole.SCREEN || !data) return;
     var me = freeconsole.getDeviceId();
+
+    // The screen's graphics state, which only the master phone can act on.
+    if (data.type === "quality") {
+      quality = { choice: data.choice, tier: data.tier, tiers: data.tiers || [] };
+      renderSettings();
+      return;
+    }
 
     if (data.sides && me in data.sides) applySeat(data.sides[me], data.sideCount, data.wide);
     var isOut = !!(data.out && data.out[me]);

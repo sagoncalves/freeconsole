@@ -6,7 +6,8 @@
  * behaviour, so navigation semantics can't drift between the two.
  */
 import { attachGameFrame } from "./relay.js?v=202608012300";
-import { connectPeer, measureClock } from "./peer.js?v=2";
+import { connectPeer, measureClock } from "./peer.js?v=3";
+import { keepScreenAwake } from "./wakelock.js?v=1";
 import {
   SCREEN,
   STORE_LOCATION,
@@ -16,6 +17,7 @@ import {
   setCustomState,
   navigate,
   watchRoom,
+  watchConnection,
   watchMessages,
   sendMessage,
   setActivePlayers,
@@ -23,7 +25,7 @@ import {
   controllerIds,
   masterControllerId,
   gameUrl,
-} from "./room.js?v=202608012200";
+} from "./room.js?v=202608012300";
 
 /**
  * @param {object} opts
@@ -123,6 +125,14 @@ export async function startSession(opts) {
 
     for (const [slot, peer] of peers) {
       if (!wanted.has(slot)) { peer.close(); peers.delete(slot); }
+      // A connection that has failed for good is worse than no connection: it stays in the
+      // map, so the loop below never redials, and every message quietly takes the slow path
+      // forever. Drop it here and it is rebuilt in the same pass.
+      else if (peer.isDead()) {
+        console.info(`[transport] slot ${slot}: connection died, redialling`);
+        peer.close();
+        peers.delete(slot);
+      }
     }
 
     for (const slot of wanted) {
@@ -190,6 +200,59 @@ export async function startSession(opts) {
 
   await attachDevice(roomCode, deviceId, { location: STORE_LOCATION, nickname });
 
+  /* ------------------------------------------------------------- staying alive */
+
+  // Controllers are held, looked at, and tapped every few seconds - which is exactly the
+  // pattern a phone's idle timer reads as "unused". Without this the screen locks mid-game.
+  // The screen device is a TV or laptop that is already playing video; it does not need it.
+  const wakeLock = isScreen ? null : keepScreenAwake();
+
+  /**
+   * Puts this device back together after the socket drops.
+   *
+   * A screen lock is not a page reload: the tab survives, every watcher resumes, and the game
+   * frame still holds its state - so nothing visibly restarts. What does NOT come back on its
+   * own is the presence record. `onDisconnect` fired while the phone was asleep and wrote
+   * `connected: false`, and Firebase then DISCARDED that handler, because onDisconnect is a
+   * one-shot. So a returning phone is simultaneously marked offline (the screen thinks the
+   * player left, the crown migrates, setActivePlayers drops their seat) and unprotected (the
+   * next lock would never mark them offline at all).
+   *
+   * Re-running attachDevice fixes both halves: it rewrites `connected: true` and arms a fresh
+   * onDisconnect. Cheap, idempotent, and safe to run on a connect that was never lost.
+   */
+  let everConnected = false;
+
+  const unwatchConnection = watchConnection((connected) => {
+    if (!connected) {
+      // Purely informational. Do not tear anything down here: the SDK reconnects by itself,
+      // and the queued writes it replays are what make the recovery seamless.
+      console.info("[session] database connection lost");
+      return;
+    }
+
+    // The first fire is the initial connection, already handled by the attachDevice above.
+    if (!everConnected) { everConnected = true; return; }
+
+    console.info("[session] reconnected — restoring presence");
+
+    // `loadedUrl` is where this device actually is, which is what presence must report. It
+    // tracks room.home in the steady state, but during a navigation that landed while we were
+    // offline the two differ, and claiming the new location before the frame exists would put
+    // this device in a game it is not yet running.
+    attachDevice(roomCode, deviceId, { location: loadedUrl || room.home, nickname })
+      .catch((err) => console.error("[session] presence restore failed", err));
+
+    // The WebRTC connection almost never survives a lock; rebuild whatever died so the fast
+    // path comes back instead of silently degrading to the database for the rest of the game.
+    syncPeers();
+
+    // Tell the game the shell is healthy again. A controller that was mid-input when the
+    // screen locked is holding buttons the screen no longer knows about, and this is the
+    // hook the games already use to clear that.
+    if (bridge && bridge.pushReconnect) bridge.pushReconnect();
+  });
+
   const session = {
     /** Which transport each peer is on, for diagnosing latency on a real device. */
     transport: () => reportTransport(),
@@ -204,6 +267,10 @@ export async function startSession(opts) {
     detach() {
       if (unwatchRoom) unwatchRoom();
       if (unwatchMessages) unwatchMessages();
+      if (unwatchConnection) unwatchConnection();
+      if (wakeLock) wakeLock.release();
+      for (const peer of peers.values()) peer.close();
+      peers.clear();
       if (bridge) bridge.detach();
     },
   };

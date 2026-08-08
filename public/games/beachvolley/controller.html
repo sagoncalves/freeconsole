@@ -350,6 +350,9 @@ jumpEl.addEventListener("pointerdown", (e) => {
 // which is what leaves a player walking into the sideline on their own.
 addEventListener("blur", releaseAll);
 document.addEventListener("visibilitychange", () => releaseAll());
+// Back from a screen lock: the screen may still be walking this player in a direction whose
+// release never made it across the gap. send() carries no diff guard, so this always lands.
+freeconsole.onReconnect = () => releaseAll();
 function releaseAll() {
   for (const id of ["left", "right"]) send(id, false);
 }

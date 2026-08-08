@@ -130,6 +130,21 @@ export async function attachDevice(roomCode, slot, { location, nickname = null }
   throw lastError;
 }
 
+/**
+ * Watches this client's own connection to the database.
+ *
+ * `.info/connected` is local state, not a room field: it flips false the moment the socket
+ * drops and true again once the SDK has re-established it. It is the only reliable signal
+ * that a phone has come back from a screen lock - visibilitychange fires for a notification
+ * shade or an app switch that never dropped anything, and a dropped socket on a flaky network
+ * fires no visibility event at all.
+ *
+ * @param {(connected: boolean) => void} callback
+ */
+export function watchConnection(callback) {
+  return onValue(ref(db, ".info/connected"), (snap) => callback(snap.val() === true));
+}
+
 /** Moves this device to a new location (i.e. loads a different game). */
 export async function setLocation(roomCode, slot, location) {
   await update(ref(db, `rooms/${roomCode}/devices/${slot}`), { location });
@@ -264,6 +279,25 @@ export function watchMessages(roomCode, mySlot, callback) {
   // Record the keys that already exist, THEN subscribe. Anything with a key we haven't
   // recorded is new, regardless of any clock. Deterministic: no timing window where a
   // real message could be mistaken for history.
+  // While the socket is down, messages keep piling up server-side. On reconnect Firebase
+  // replays that backlog through onChildAdded, and every one of them is new to the `seen`
+  // set - so a phone coming back from a screen lock would deliver a burst of inputs that
+  // were sent while it was asleep, as though the player had just pressed them all at once.
+  //
+  // Gameplay messages are only meaningful when they are fresh, so the backlog is dropped.
+  // The test is our OWN connection state, never a timestamp inside the message: `at` is the
+  // sender's Date.now(), and trusting it is the bug documented above.
+  let offlineSince = 0;
+  const stopConnectionWatch = onValue(ref(db, ".info/connected"), (snap) => {
+    if (snap.val() === true) {
+      // Anything already queued is from the gap. Give the replay a moment to drain, then
+      // treat traffic as live again.
+      if (offlineSince) setTimeout(() => { offlineSince = 0; }, 400);
+    } else {
+      offlineSince = Date.now();
+    }
+  });
+
   get(messagesRef).then((snap) => {
     if (stopped) return;
     snap.forEach((child) => { seen.add(child.key); });
@@ -271,6 +305,9 @@ export function watchMessages(roomCode, mySlot, callback) {
     unsubscribe = onChildAdded(query(messagesRef, limitToLast(60)), (childSnap) => {
       if (seen.has(childSnap.key)) return;
       seen.add(childSnap.key);
+      // Backlog from a gap we were absent for: record the key so it is never re-delivered,
+      // but do not hand it to the game.
+      if (offlineSince) return;
       // The set only needs to cover the trim window; drop the oldest so it can't grow
       // without bound over a long session.
       if (seen.size > 400) {
@@ -288,6 +325,7 @@ export function watchMessages(roomCode, mySlot, callback) {
 
   return () => {
     stopped = true;
+    stopConnectionWatch();
     if (unsubscribe) unsubscribe();
   };
 }

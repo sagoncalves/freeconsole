@@ -460,6 +460,12 @@
     releaseAll();
   };
 
+  // The phone locked mid-game and came back. The frame kept running, so this device may
+  // still believe a stick is held and the screen has long since stopped hearing about it.
+  // Same recovery as a fresh session, minus the copy changes: drop the input and let the
+  // next touch start clean.
+  freeconsole.onReconnect = releaseAll;
+
   var lastLegs = 2;
 
   freeconsole.onMessage = function (deviceId, data) {

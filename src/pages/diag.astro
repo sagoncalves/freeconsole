@@ -84,6 +84,31 @@ const title = "FreeConsole — diagnostics";
         "exports: " + Object.keys(m).sort().join(", "));
     } catch (e) { line("import('/session.js') FAILED", "bad", e.message); }
 
+    // 5. Screen wake lock. This is the one fix that cannot be verified by reading the code
+    //    on a desktop: support is per-browser and per-OS-version, and a phone that refuses
+    //    the lock (low battery, power saving) looks identical to one that never asked.
+    try {
+      // Assembled at runtime so the bundler treats this as a browser fetch of the real
+      // deployed file, which is the thing this page exists to verify, rather than trying to
+      // resolve and inline it at build time.
+      const m = await import(/* @vite-ignore */ "/wakelock" + ".js");
+      if (!m.wakeLockSupported()) {
+        line("Screen Wake Lock: NOT supported", "warn",
+          "The phone will auto-lock during a game. iOS needs 16.4+; on older versions there " +
+          "is no API to ask. Everything else still works.");
+      } else {
+        const held = m.keepScreenAwake();
+        // request() is async, so give it a moment before reporting.
+        await new Promise((r) => setTimeout(r, 350));
+        line("Screen Wake Lock: " + (held.isActive() ? "ACTIVE" : "supported but not granted"),
+          held.isActive() ? "ok" : "warn",
+          held.isActive()
+            ? "The screen will stay awake in a room on this device."
+            : "The browser refused the lock — usually low battery or a power-saving mode.");
+        await held.release();
+      }
+    } catch (e) { line("wakelock.js FAILED", "bad", e.message); }
+
     document.getElementById("fix").addEventListener("click", async () => {
       if ("serviceWorker" in navigator) {
         for (const r of await navigator.serviceWorker.getRegistrations()) await r.unregister();

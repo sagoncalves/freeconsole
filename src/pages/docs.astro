@@ -100,6 +100,22 @@ freeconsole.<span class="fn">onActivePlayersChange</span> = <span class="kw">fun
 
 const codeNav = `freeconsole.<span class="fn">navigateTo</span>(<span class="st">"/games/roperaid/screen.html"</span>);  <span class="cm">// all devices follow</span>
 freeconsole.<span class="fn">navigateHome</span>();                            <span class="cm">// back to the catalog</span>`;
+
+const codeReconnect = `<span class="cm">// controller: one function that means "I am not pressing anything".</span>
+<span class="kw">function</span> <span class="fn">releaseAll</span>() {
+  held = <span class="kw">false</span>;
+  <span class="cm">// Send unconditionally. Do NOT skip this because the local flag is</span>
+  <span class="cm">// already false — after a lock it is the SCREEN's belief that is wrong.</span>
+  freeconsole.<span class="fn">message</span>(FreeConsole.SCREEN, { hold: <span class="kw">false</span> });
+}
+
+freeconsole.<span class="fn">onReconnect</span> = releaseAll;
+
+<span class="cm">// ...and the routes that fire before the phone actually sleeps.</span>
+<span class="fn">addEventListener</span>(<span class="st">"blur"</span>, releaseAll);
+document.<span class="fn">addEventListener</span>(<span class="st">"visibilitychange"</span>, <span class="kw">function</span> () {
+  <span class="kw">if</span> (document.hidden) <span class="fn">releaseAll</span>();
+});`;
 ---
 
 <BaseLayout title={title}>
@@ -214,6 +230,7 @@ freeconsole.<span class="fn">navigateHome</span>();                            <
         <a href="#players">Active players</a>
         <a href="#nav">Navigation</a>
         <a href="#callbacks">Callbacks</a>
+        <a href="#lifecycle">Locking & reconnects</a>
         <a href="#reference">Full reference</a>
         <a href="#publish">Publishing</a>
         <a href="#testing">Testing</a>
@@ -437,7 +454,71 @@ freeconsole.<span class="fn">navigateHome</span>();                            <
           <tr><td><code>onDeviceStateChange(device_id, data)</code></td><td><p>Any device's state changed.</p></td></tr>
           <tr><td><code>onCustomDeviceStateChange(device_id, custom)</code></td><td><p>A device published new custom state.</p></td></tr>
           <tr><td><code>onActivePlayersChange(player_number)</code></td><td><p>This device's player number changed.</p></td></tr>
+          <tr><td><code>onReconnect()</code></td><td><p>The connection dropped and came back — usually the phone's screen locking mid-game. Release held input here. See <a href="#lifecycle">Locking &amp; reconnects</a>.</p></td></tr>
         </table></div>
+
+        <h2 id="lifecycle">Locking &amp; reconnects</h2>
+
+        <p>
+          A phone screen locking mid-game is the single most common way a controller breaks, and
+          it is worth understanding what the platform handles for you and what it cannot.
+        </p>
+
+        <h3>The screen is kept awake for you</h3>
+
+        <p>
+          Every controller holds a <a href="https://developer.mozilla.org/en-US/docs/Web/API/Screen_Wake_Lock_API"
+          rel="noopener">Screen Wake Lock</a> for as long as it is in a room. You do not need to
+          request one, and you should not: the shell re-acquires it on every return to visibility,
+          which a one-shot request in your game would not do. Games do not get a wake lock of their
+          own on the screen device, which is typically a TV or laptop that never idles this way.
+        </p>
+
+        <div class="note warn">
+          <p><strong>It is not a guarantee.</strong> iOS only shipped the API in 16.4, and any phone
+          may refuse the lock on low battery or in a power-saving mode. Assume a lock can still
+          happen and handle <code>onReconnect</code> — that is what makes it recoverable rather than
+          fatal. <code>/diag.html</code> reports whether the lock was actually granted on a given
+          device.</p>
+        </div>
+
+        <h3>What happens when a phone does lock</h3>
+
+        <p>
+          The page is <em>not</em> reloaded. Your game keeps its variables, the socket drops, and
+          then everything comes back — so <code>onReady</code> does not fire a second time. In the
+          gap, the shell repairs itself: presence is rewritten, the direct peer connection is
+          rebuilt, and messages that piled up while the phone was asleep are discarded rather than
+          replayed at you as a burst of stale input.
+        </p>
+
+        <p>
+          The one thing the shell cannot fix is <em>your</em> game state, because only your game
+          knows what it means. That is what <code>onReconnect</code> is for.
+        </p>
+
+        <pre><code set:html={codeReconnect}></code></pre>
+
+        <div class="note warn">
+          <p><strong>Send the release unconditionally.</strong> The usual bug is a helper that
+          early-returns when a value has not changed — <code>if (held === next) return;</code>. After
+          a lock, this phone often thinks the button is already up while the screen is still acting
+          on a press whose release never arrived. Diffing against local state means you send nothing
+          and the player stays stuck. On a reconnect, resend the truth even if it looks redundant.</p>
+        </div>
+
+        <div class="note warn">
+          <p><strong><code>requestAnimationFrame</code> does not run while the phone is asleep.</strong>
+          If you coalesce sends with a <code>pending</code> flag cleared inside a rAF callback, that
+          flag stays stuck and every later message is silently dropped. Reset any such latch in
+          <code>onReconnect</code>.</p>
+        </div>
+
+        <p>
+          On the screen side, <code>onReconnect</code> is a good place to rebroadcast whatever a
+          controller needs to redraw itself — a score, a phase, a colour — since the controller may
+          have missed the message that carried it.
+        </p>
 
         <h2 id="reference">Full reference</h2>
 
@@ -540,6 +621,13 @@ freeconsole.<span class="fn">navigateHome</span>();                            <
           a release — and let each side animate locally between them. A value that has not changed
           costs latency for every message queued behind it; interpolating between sparse updates
           looks smoother than streaming dense ones.</p>
+        </div>
+
+        <div class="note warn">
+          <p><strong>Handle <code>onReconnect</code> on any controller with held input.</strong> A
+          phone that locks and wakes keeps running your code but loses the messages in between, so
+          a button can be released on the phone and still held on the screen. Resend the release
+          unconditionally — see <a href="#lifecycle">Locking &amp; reconnects</a>.</p>
         </div>
 
         <div class="note">

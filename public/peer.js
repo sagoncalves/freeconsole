@@ -45,7 +45,7 @@ const CONNECT_TIMEOUT_MS = 8000;
  * @param {number} opts.peerSlot      the slot to connect to
  * @param {(data:*) => void} opts.onMessage   called for each message that arrives
  * @param {(up:boolean) => void} [opts.onStateChange]  fired when the fast path opens/closes
- * @returns {{ send: (data:*) => boolean, isOpen: () => boolean, close: () => void }}
+ * @returns {{ send: (data:*) => boolean, isOpen: () => boolean, isDead: () => boolean, close: () => void }}
  */
 export function connectPeer({ roomCode, mySlot, peerSlot, onMessage, onStateChange }) {
   const polite = mySlot > peerSlot;          // higher slot answers, lower slot offers
@@ -54,6 +54,7 @@ export function connectPeer({ roomCode, mySlot, peerSlot, onMessage, onStateChan
   let channel = null;
   let open = false;
   let closed = false;
+  let dead = false;          // unrecoverable: this object must be rebuilt, not waited on
   const cleanups = [];
 
   const setOpen = (next) => {
@@ -103,7 +104,31 @@ export function connectPeer({ roomCode, mySlot, peerSlot, onMessage, onStateChan
   };
 
   pc.onconnectionstatechange = () => {
-    if (pc.connectionState === "failed" || pc.connectionState === "disconnected") {
+    const state = pc.connectionState;
+    if (state === "disconnected") {
+      // Transient by definition - ICE is still trying. Report the fast path as down so
+      // traffic falls back to the database, but leave the connection alone: it frequently
+      // recovers on its own within a second or two.
+      setOpen(false);
+      return;
+    }
+    if (state === "failed" || state === "closed") {
+      // Terminal. ICE has given up, and an RTCPeerConnection in this state never comes back
+      // by itself - it cannot re-gather candidates or restart negotiation from the inside.
+      // This is the state a phone lands in after the screen locks for more than a moment,
+      // and leaving the corpse in the peers map is what silently pinned every device to the
+      // slow database path for the rest of the session. Mark it so the session layer can
+      // throw it away and dial again.
+      dead = true;
+      setOpen(false);
+    }
+  };
+
+  // A locked phone freezes JavaScript, so the state change above can be delivered late or
+  // coalesced. The ICE layer is the more reliable signal on mobile Safari.
+  pc.oniceconnectionstatechange = () => {
+    if (pc.iceConnectionState === "failed") {
+      dead = true;
       setOpen(false);
     }
   };
@@ -143,9 +168,13 @@ export function connectPeer({ roomCode, mySlot, peerSlot, onMessage, onStateChan
     })();
   }
 
-  // Give up quietly if the connection never establishes.
+  // Give up quietly if the connection never establishes. Marked dead rather than just closed
+  // so a later reconnect retries it instead of inheriting a peer that never opened.
   const timer = setTimeout(() => {
-    if (!open) setOpen(false);
+    if (!open) {
+      dead = true;
+      setOpen(false);
+    }
   }, CONNECT_TIMEOUT_MS);
 
   return {
@@ -160,6 +189,8 @@ export function connectPeer({ roomCode, mySlot, peerSlot, onMessage, onStateChan
       }
     },
     isOpen: () => open,
+    /** True once this connection can only be replaced, never revived. */
+    isDead: () => dead || closed,
     close() {
       if (closed) return;
       closed = true;

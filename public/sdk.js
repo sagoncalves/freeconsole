@@ -211,6 +211,10 @@
         ]);
         break;
 
+      case "reconnect":
+        this._safe(this.onReconnect, []);
+        break;
+
       case "error":
         console.error("[console-sdk]", data.payload && data.payload.message);
         break;
@@ -406,6 +410,16 @@
   FreeConsole.prototype.onCustomDeviceStateChange = function (device_id, custom_data) {};
   /** @param {number|undefined} player_number This device's number, or undefined. */
   FreeConsole.prototype.onActivePlayersChange = function (player_number) {};
+  /**
+   * The shell's connection dropped and has come back — typically the phone's screen locking
+   * mid-game and being woken again.
+   *
+   * The frame was never reloaded, so the game is still holding whatever state it had when the
+   * gap started: most importantly any input it believes is still held. A controller should
+   * release its buttons here; a screen should resend anything a controller needs to redraw.
+   * Not a replacement for onReady, which fires once per frame and does not repeat.
+   */
+  FreeConsole.prototype.onReconnect = function () {};
 
   global.FreeConsole = FreeConsole;
   // Compatibility alias. The API was built to match AirConsole's so their games and docs

@@ -99,6 +99,9 @@ import {
   paddleAt, paddleQuad, sideGeometry, verticesFor, defenderOf, damageColor, sideLabel,
   FIELD, CENTER, RADIUS, BALL_R, PADDLE_THICK, WALL_HP, MAX_PLAYERS,
 } from "/games/neonpong/sim.js?v=2";
+import {
+  TIERS, QUALITY_CHOICES, DEFAULT_QUALITY, resolveTier, makeFpsWatchdog,
+} from "/games/neonpong/quality.js?v=1";
 
 const freeconsole = new FreeConsole();
 
@@ -138,28 +141,43 @@ let fittedSides = -1, fittedWide = null;
 /* ------------------------------------------------------------------- quality */
 
 /**
- * Glow budget, lowered automatically on slow displays.
+ * The rendering tier.
  *
- * Every neon element here is a canvas `shadowBlur`, which is the most expensive thing this
- * renderer does — it is a full gaussian per drawn shape, and on the weak GPUs in smart TVs
- * and streaming sticks a field of eight glowing paddles plus a trail can miss frame after
- * frame. Rather than pick a look per device, the frame loop watches its own timing and drops
- * the glow when it cannot keep up, then leaves it down.
- *
- * `glow` is a multiplier every shadowBlur is scaled by, so tier 0 removes the cost entirely
- * while keeping every shape, colour and position identical. Nothing here touches the sim, so
- * a TV and a laptop still play exactly the same match.
+ * `Q` is the active config from quality.js and every expensive path reads it. The admin's
+ * choice ("auto" or a tier name) is what gets stored, not the resolved tier — "low" and "auto
+ * that happened to pick low" are different intentions, and only the first should survive the
+ * device changing.
  */
-const quality = {
-  glow: 1,
-  /** Frames sampled before the tier may drop, so one slow frame never triggers it. */
-  slowFrames: 0,
-  locked: false,
-};
+const QUALITY_KEY = "neonpong.quality";
 
-/** Blur radius for a shape, already scaled to the display and the current tier. */
-function blur(px) {
-  return px * scale * quality.glow;
+function loadQualityChoice() {
+  try {
+    const stored = localStorage.getItem(QUALITY_KEY);
+    if (stored && QUALITY_CHOICES.includes(stored)) return stored;
+  } catch (err) { /* private mode, or storage disabled */ }
+  return DEFAULT_QUALITY;
+}
+
+function saveQualityChoice(choice) {
+  try { localStorage.setItem(QUALITY_KEY, choice); } catch (err) { /* not fatal */ }
+}
+
+let qualityChoice = loadQualityChoice();
+let { name: tierName, config: Q } = resolveTier(qualityChoice);
+
+/**
+ * Blur radius for one class of object, scaled to the display and the current tier.
+ *
+ * `part` names the class ("walls", "paddles", "ball", "fx") so a tier can keep the glow on the
+ * one ball and drop it from the eight paddles. Returns 0 when this tier does not blur that
+ * part, and every caller checks for that rather than setting `shadowBlur = 0` blindly:
+ * assigning a shadow colour costs something even at radius zero, so the cheap path skips the
+ * shadow setup entirely.
+ */
+function blur(px, part) {
+  if (Q.glow <= 0) return 0;
+  if (part && Q.glowParts && !Q.glowParts[part]) return 0;
+  return px * scale * Q.glow;
 }
 
 /**
@@ -182,10 +200,10 @@ function arenaBounds() {
 
 function resize() {
   const rect = canvas.getBoundingClientRect();
-  // Cap the backing store at 1x on a TV-sized viewport. A 4K set reports dpr 1 and a huge
-  // css size, so the canvas is already enormous; letting dpr double it again quadruples the
-  // fill cost for detail nobody can resolve from a sofa.
-  const dpr = Math.min(devicePixelRatio || 1, rect.width >= 1600 ? 1 : 2);
+  // Backing-store size is the one cost that scales with nothing but pixels, so the cap comes
+  // from the tier. A 4K set reports dpr 1 with a huge css size and is already filling 8M
+  // pixels a frame; letting dpr double that again buys detail nobody can resolve from a sofa.
+  const dpr = Math.min(devicePixelRatio || 1, Q.maxPixelRatio);
   cssW = rect.width;
   cssH = rect.height;
   canvas.width = Math.round(cssW * dpr);
@@ -213,6 +231,9 @@ function resize() {
   offY = (cssH - box.h * scale) / 2 - box.y * scale;
   fittedSides = match.sides;
   fittedWide = match.wide;
+  // The backdrop ramp is in canvas coordinates, so it has to be rebuilt whenever the fit
+  // changes — otherwise it keeps the old layout's centre and radius.
+  buildArenaFill();
 }
 addEventListener("resize", resize);
 
@@ -273,15 +294,47 @@ freeconsole.onReady = function () {
   renderHud();
 };
 
-freeconsole.onConnect = joinPlayer;
-freeconsole.onDisconnect = leavePlayer;
+// A joining or leaving phone can change who the master is, and the new master needs the tier
+// list before it can draw the settings sheet.
+freeconsole.onConnect = function (deviceId) {
+  joinPlayer(deviceId);
+  broadcastQuality();
+};
+freeconsole.onDisconnect = function (deviceId) {
+  leavePlayer(deviceId);
+  broadcastQuality();
+};
 
 /**
  * Controllers send paddle intent only. Nothing here trusts a phone with a paddle position,
  * a bounce, or a hit.
  */
 freeconsole.onMessage = function (deviceId, data) {
-  if (!data || !match.players.has(deviceId)) return;
+  if (!data) return;
+
+  // Graphics settings are handled before the roster check: the master may be a phone that
+  // has no seat yet, and the setting belongs to the shared screen rather than to a player.
+  if (data.t === "get-quality") {
+    broadcastQuality();
+    return;
+  }
+  if (data.t === "set-quality") {
+    // Restricted to the master because this is a room-wide setting on a shared display, not
+    // a per-player preference — otherwise any of the eight could drop the TV to Low mid-match
+    // for everyone. Master is derived (lowest-numbered controller), so it survives that phone
+    // leaving with no handover.
+    const master = safeCall(() => freeconsole.getMasterControllerDeviceId());
+    if (Number(deviceId) !== master) return;
+    if (!QUALITY_CHOICES.includes(data.choice)) return;
+    // An explicit choice retires the watchdog: the admin has spoken, and a later automatic
+    // step-down would silently contradict them.
+    watchdog?.stop();
+    applyQuality(data.choice);
+    if (data.choice === "auto") armWatchdog();
+    return;
+  }
+
+  if (!match.players.has(deviceId)) return;
 
   if (data.t === "move") {
     setInput(match, deviceId, data.v);
@@ -387,23 +440,30 @@ let sideFlash = {};
 
 /** The ball's recent positions, for a motion trail. Cosmetic, capped, oldest first. */
 const trail = [];
-const TRAIL_MAX = 14;
 
+/**
+ * Drain the sim's event log into effects.
+ *
+ * Every spawn here is gated on the tier, so a disabled effect costs nothing at all rather
+ * than being created and then skipped at draw time. Effects that carry *information* — the
+ * ring marking a hit, the wall wash naming who took it — survive at every tier; only the
+ * purely decorative ones (shards, trail) are dropped.
+ */
 function drainEvents() {
   for (const e of match.events) {
     if (e.type === "paddle") {
-      fx.push({ kind: "ring", x: e.x, y: e.y, life: 1, color: colorOf(e.id), r: 26 });
+      if (Q.rings) fx.push({ kind: "ring", x: e.x, y: e.y, life: 1, color: colorOf(e.id), r: 26 });
     } else if (e.type === "hit") {
       sideFlash[e.side] = 1;
       const c = damageColor(e.hp) || "#ff2e88";
-      fx.push({ kind: "ring", x: e.x, y: e.y, life: 1, color: c, r: 54 });
+      if (Q.rings) fx.push({ kind: "ring", x: e.x, y: e.y, life: 1, color: c, r: 54 });
       renderHud();
     } else if (e.type === "destroyed") {
       // A burst of shards along the dead wall, so the side visibly breaks rather than
       // silently vanishing on the next frame.
       const g = sideGeometry(match.sides, e.side, match.wide);
-      for (let i = 0; i < 14; i++) {
-        const f = i / 13;
+      for (let i = 0; i < Q.shards; i++) {
+        const f = Q.shards > 1 ? i / (Q.shards - 1) : 0.5;
         fx.push({
           kind: "shard", life: 1,
           x: g.a.x + g.dx * (g.len * f),
@@ -445,6 +505,26 @@ function draw() {
   drawServeCountdown();
 }
 
+/**
+ * The arena backdrop gradient, built once per layout rather than per frame.
+ *
+ * `createRadialGradient` allocates and rasterises a colour ramp every time it is called, and
+ * this one covers the whole playfield. It only depends on the letterbox, so it is rebuilt in
+ * resize() and reused for every frame in between. Null on tiers with gradients off.
+ */
+let arenaFill = null;
+
+function buildArenaFill() {
+  if (!Q.gradients) { arenaFill = null; return; }
+  const g = ctx.createRadialGradient(
+    tx(CENTER), ty(CENTER), 0,
+    tx(CENTER), ty(CENTER), RADIUS * scale
+  );
+  g.addColorStop(0, "#101425");
+  g.addColorStop(1, "#070912");
+  arenaFill = g;
+}
+
 /** The court interior: a dark plate clipped to the polygon, plus a centre mark. */
 function drawArena() {
   const n = match.sides;
@@ -457,23 +537,21 @@ function drawArena() {
   ctx.closePath();
   ctx.clip();
 
-  const g = ctx.createRadialGradient(
-    tx(CENTER), ty(CENTER), 0,
-    tx(CENTER), ty(CENTER), RADIUS * scale
-  );
-  g.addColorStop(0, "#101425");
-  g.addColorStop(1, "#070912");
-  ctx.fillStyle = g;
+  // A flat fill on Low. The gradient is a backdrop nobody looks at directly, and filling a
+  // 4K canvas from a colour ramp every frame is the second-largest cost in this renderer.
+  ctx.fillStyle = arenaFill || "#0b0f1c";
   ctx.fillRect(tx(0), ty(0), FIELD * scale, FIELD * scale);
 
   // Concentric rings give the ball's speed something to read against; without them a fast
   // ball on a flat plate looks like it is barely moving.
-  ctx.strokeStyle = "rgba(120,160,220,.07)";
-  ctx.lineWidth = 1;
-  for (let i = 1; i <= 4; i++) {
-    ctx.beginPath();
-    ctx.arc(tx(CENTER), ty(CENTER), (RADIUS / 5) * i * scale, 0, Math.PI * 2);
-    ctx.stroke();
+  if (Q.grid) {
+    ctx.strokeStyle = "rgba(120,160,220,.07)";
+    ctx.lineWidth = 1;
+    for (let i = 1; i <= 4; i++) {
+      ctx.beginPath();
+      ctx.arc(tx(CENTER), ty(CENTER), (RADIUS / 5) * i * scale, 0, Math.PI * 2);
+      ctx.stroke();
+    }
   }
   ctx.restore();
 
@@ -504,9 +582,12 @@ function drawWalls() {
 
     ctx.save();
     ctx.strokeStyle = color;
-    ctx.lineWidth = Math.max(2, 6 * scale);
+    // A slightly heavier line when there is no glow to thicken it, so a wall still reads as
+    // solid neon on Low rather than as a hairline.
+    ctx.lineWidth = Math.max(2, (Q.glow > 0 ? 6 : 8) * scale);
     ctx.lineCap = "round";
-    if (keeper) { ctx.shadowColor = color; ctx.shadowBlur = blur(14 + flash * 26); }
+    const wallBlur = keeper ? blur(14 + flash * 26, "walls") : 0;
+    if (wallBlur > 0) { ctx.shadowColor = color; ctx.shadowBlur = wallBlur; }
     ctx.beginPath();
     ctx.moveTo(tx(g.a.x), ty(g.a.y));
     ctx.lineTo(tx(g.b.x), ty(g.b.y));
@@ -514,16 +595,24 @@ function drawWalls() {
 
     // The hit flash washes inward from the wall that took it, so damage is impossible to miss
     // even if you were watching the other side of the arena.
-    if (flash > 0) {
+    if (flash > 0 && Q.wallFlash) {
       const depth = RADIUS * 0.3;
-      const grad = ctx.createLinearGradient(
-        tx(g.mx), ty(g.my),
-        tx(g.mx + g.nx * depth), ty(g.my + g.ny * depth)
-      );
-      grad.addColorStop(0, "rgba(255,46,136," + (flash * 0.34).toFixed(3) + ")");
-      grad.addColorStop(1, "rgba(255,46,136,0)");
+      // On a gradient-free tier the wash is a single flat translucent fill. It still reads as
+      // "this wall was just hit" — which is the information it exists to carry — without
+      // building a colour ramp per damaged wall per frame.
+      let wash;
+      if (Q.gradients) {
+        wash = ctx.createLinearGradient(
+          tx(g.mx), ty(g.my),
+          tx(g.mx + g.nx * depth), ty(g.my + g.ny * depth)
+        );
+        wash.addColorStop(0, "rgba(255,46,136," + (flash * 0.34).toFixed(3) + ")");
+        wash.addColorStop(1, "rgba(255,46,136,0)");
+      } else {
+        wash = "rgba(255,46,136," + (flash * 0.20).toFixed(3) + ")";
+      }
       ctx.shadowBlur = 0;
-      ctx.fillStyle = grad;
+      ctx.fillStyle = wash;
       ctx.beginPath();
       ctx.moveTo(tx(g.a.x), ty(g.a.y));
       ctx.lineTo(tx(g.b.x), ty(g.b.y));
@@ -539,11 +628,11 @@ function drawWalls() {
 function drawPaddle(p) {
   const quad = paddleQuad(match, p);
   const color = colorOf(p.id);
+  const b = blur(22, "paddles");
 
   ctx.save();
   ctx.fillStyle = color;
-  ctx.shadowColor = color;
-  ctx.shadowBlur = blur(22);
+  if (b > 0) { ctx.shadowColor = color; ctx.shadowBlur = b; }
   ctx.beginPath();
   ctx.moveTo(tx(quad[0].x), ty(quad[0].y));
   for (let i = 1; i < quad.length; i++) ctx.lineTo(tx(quad[i].x), ty(quad[i].y));
@@ -552,47 +641,60 @@ function drawPaddle(p) {
   ctx.restore();
 }
 
+/**
+ * The ball's motion trail.
+ *
+ * Skipped entirely on Low. This is the most overdrawn region of the screen — a stack of
+ * translucent arcs redrawn every frame directly on top of each other — and at the top tier
+ * each one also carried its own blur. `Q.trail` caps how many samples are kept, so the cost
+ * is bounded at the source rather than here.
+ */
 function drawTrail() {
+  if (!trail.length) return;
+  ctx.save();
+  ctx.fillStyle = "#eaf2ff";
+  if (Q.trailGlow) { ctx.shadowColor = "#35f0e0"; ctx.shadowBlur = blur(12, "ball"); }
   for (let i = 0; i < trail.length; i++) {
     const t = trail[i];
     const a = (i + 1) / trail.length;
-    ctx.save();
     ctx.globalAlpha = a * 0.35;
-    ctx.fillStyle = "#eaf2ff";
     ctx.beginPath();
     ctx.arc(tx(t.x), ty(t.y), BALL_R * scale * a * 0.9, 0, Math.PI * 2);
     ctx.fill();
-    ctx.restore();
   }
+  ctx.restore();
 }
 
 function drawBall() {
-  const b = match.ball;
+  const ball = match.ball;
+  const b = blur(30, "ball");
   ctx.save();
   ctx.fillStyle = "#eaf2ff";
-  ctx.shadowColor = "#35f0e0";
-  ctx.shadowBlur = blur(30);
+  if (b > 0) { ctx.shadowColor = "#35f0e0"; ctx.shadowBlur = b; }
   ctx.beginPath();
-  ctx.arc(tx(b.x), ty(b.y), BALL_R * scale, 0, Math.PI * 2);
+  // A touch larger without its glow, so the ball stays as findable on a TV as it is with the
+  // bloom around it. This is the one object every player is tracking.
+  ctx.arc(tx(ball.x), ty(ball.y), BALL_R * scale * (b > 0 ? 1 : 1.15), 0, Math.PI * 2);
   ctx.fill();
   ctx.restore();
 }
 
 function drawFx() {
+  if (!fx.length) return;
   for (const f of fx) {
     ctx.save();
     ctx.globalAlpha = Math.max(0, f.life);
     if (f.kind === "shard") {
+      const b = blur(14, "fx");
       ctx.fillStyle = f.color;
-      ctx.shadowColor = f.color;
-      ctx.shadowBlur = blur(14);
+      if (b > 0) { ctx.shadowColor = f.color; ctx.shadowBlur = b; }
       ctx.beginPath();
       ctx.arc(tx(f.x), ty(f.y), Math.max(1, 5 * f.life * scale), 0, Math.PI * 2);
       ctx.fill();
     } else {
+      const b = blur(16, "fx");
       ctx.strokeStyle = f.color;
-      ctx.shadowColor = f.color;
-      ctx.shadowBlur = blur(16);
+      if (b > 0) { ctx.shadowColor = f.color; ctx.shadowBlur = b; }
       ctx.lineWidth = Math.max(1, 3 * scale * f.life);
       ctx.beginPath();
       ctx.arc(tx(f.x), ty(f.y), f.r * (1.4 - f.life) * scale, 0, Math.PI * 2);
@@ -610,7 +712,7 @@ function drawServeCountdown() {
   ctx.globalAlpha = 0.75;
   ctx.fillStyle = "#35f0e0";
   ctx.shadowColor = "#35f0e0";
-  ctx.shadowBlur = blur(26);
+  ctx.shadowBlur = blur(26, "ball");
   ctx.font = "700 " + Math.round(120 * scale) + "px " +
     getComputedStyle(document.body).getPropertyValue("--font-display");
   ctx.textAlign = "center";
@@ -623,53 +725,113 @@ function drawServeCountdown() {
 
 let last = 0;
 
+/* ------------------------------------------------------------ quality control */
+
 /**
- * Drop the glow once, on a display that demonstrably cannot afford it.
+ * Switch tier.
  *
- * A TV that is genuinely struggling misses frames continuously, so the test is a sustained
- * run of slow ones rather than any single spike — a garbage collection or a browser hiccup
- * must not permanently dim a machine that was coping fine. Once dropped it stays dropped:
- * flipping the look back and forth as the load varies is far more distracting than simply
- * playing without the bloom.
- *
- * Frames longer than ~40ms are the threshold, which is comfortably past a 30Hz TV's 33.3ms
- * budget, so a set that is locked to 30fps and hitting it perfectly is never penalised.
+ * @param {string} choice   "auto" or a tier name
+ * @param {object} [opts]   `auto: true` when the watchdog chose it, not a person
  */
-function watchPerformance(rawDt) {
-  if (quality.locked) return;
-  // Ignore the first frame and any tab-switch gap; neither says anything about the GPU.
-  if (rawDt <= 0 || rawDt > 0.5) return;
+function applyQuality(choice, { auto = false } = {}) {
+  const resolved = resolveTier(choice);
+  qualityChoice = choice;
+  tierName = resolved.name;
+  Q = resolved.config;
 
-  if (rawDt > 0.040) quality.slowFrames++;
-  else quality.slowFrames = Math.max(0, quality.slowFrames - 1);
+  // A watchdog step-down must not be written back as though the admin asked for it: the
+  // choice stays "auto", so a better device later gets a fresh guess.
+  if (!auto) saveQualityChoice(choice);
 
-  if (quality.slowFrames > 90) {
-    quality.glow = 0;
-    quality.locked = true;
+  // The pixel-ratio cap and the backdrop ramp both live in the canvas layout, so a tier
+  // change has to re-run the fit. Trail samples beyond the new cap are dropped immediately
+  // rather than lingering for a few frames.
+  resize();
+  while (trail.length > Q.trail) trail.shift();
+  if (Q.shards === 0) {
+    for (let i = fx.length - 1; i >= 0; i--) if (fx[i].kind === "shard") fx.splice(i, 1);
   }
+
+  broadcastQuality();
 }
+
+/** Tell the controllers what the screen is running, so the master can show it selected. */
+function broadcastQuality() {
+  safeCall(() => freeconsole.broadcast({
+    type: "quality",
+    choice: qualityChoice,
+    tier: tierName,
+    tiers: QUALITY_CHOICES.map((name) => ({
+      value: name,
+      label: name === "auto" ? "Auto" : TIERS[name].label,
+      note: name === "auto" ? "Match the device" : TIERS[name].note,
+    })),
+  }));
+}
+
+/**
+ * Live view of what the renderer is actually doing, exposed outside test mode — the only way
+ * to confirm from a TV that a tier switch took effect and what a frame really costs.
+ */
+window.__gfxProbe = () => ({
+  choice: qualityChoice,
+  tier: tierName,
+  glow: Q.glow,
+  gradients: Q.gradients,
+  trail: Q.trail,
+  trailLen: trail.length,
+  shards: Q.shards,
+  effects: fx.length,
+  pixelRatio: Math.min(devicePixelRatio || 1, Q.maxPixelRatio),
+  fpsCap: Q.targetFps || 0,
+  sides: match.sides,
+});
+
+/**
+ * Steps the tier down once when the frame rate is persistently bad.
+ * Only armed on "auto" — an explicit choice is an instruction, not a suggestion.
+ */
+let watchdog = null;
+
+function armWatchdog() {
+  watchdog?.stop();
+  watchdog = qualityChoice === "auto" && tierName !== "low"
+    ? makeFpsWatchdog({
+        onDrop: (fps) => {
+          const next = tierName === "high" ? "medium" : "low";
+          console.info(`[neonpong] ${Math.round(fps)}fps sustained; dropping ${tierName} -> ${next}`);
+          applyQuality(next, { auto: true });
+        },
+      })
+    : null;
+}
+
+/** Timestamp the last drawn frame was presented, for the Low tier's frame cap. */
+let lastDrawn = 0;
 
 function frame(ts) {
   requestAnimationFrame(frame);
   if (!last) { last = ts; resize(); }
 
   // Clamp dt so a backgrounded tab does not teleport the ball through a paddle on return.
-  const raw = (ts - last) / 1000;
-  const dt = Math.min(0.05, raw);
+  const dt = Math.min(0.05, (ts - last) / 1000);
   last = ts;
 
-  watchPerformance(raw);
+  watchdog?.tick(ts);
 
   // Refit whenever the arena's shape changes — a join, a departure, or a destroyed wall all
   // reach here by different paths, and one check covers every one of them.
   if (match.sides !== fittedSides || match.wide !== fittedWide) resize();
 
+  // The sim always steps at the real frame rate; only *drawing* is capped below. It is fully
+  // dt-driven with a clamp, so a 30Hz display plays the identical match to a 60Hz one — and
+  // skipping the sim instead would make the ball's behaviour depend on the tier.
   step(match, dt);
   drainEvents();
 
-  if (match.phase === "rally") {
+  if (match.phase === "rally" && Q.trail > 0) {
     trail.push({ x: match.ball.x, y: match.ball.y });
-    if (trail.length > TRAIL_MAX) trail.shift();
+    while (trail.length > Q.trail) trail.shift();
   }
 
   for (const f of fx) {
@@ -679,11 +841,24 @@ function frame(ts) {
   for (let i = fx.length - 1; i >= 0; i--) if (fx[i].life <= 0) fx.splice(i, 1);
   for (const k in sideFlash) if (sideFlash[k] > 0) sideFlash[k] = Math.max(0, sideFlash[k] - dt * 1.8);
 
+  // Frame cap. On Low the display is repainted at 30fps rather than as fast as the browser
+  // asks, which halves the fill and blur cost on exactly the hardware that cannot afford it.
+  // A TV locked to 30Hz is already there and loses nothing; a struggling one gets a steady
+  // 30 instead of an erratic 40-ish, and steady reads as far smoother than fast-but-uneven.
+  if (Q.targetFps > 0) {
+    const minGap = 1000 / Q.targetFps - 1;   // -1ms so a 33.3ms budget is not missed by rounding
+    if (ts - lastDrawn < minGap) { broadcastState(); return; }
+  }
+  lastDrawn = ts;
+
   draw();
   broadcastState();
 }
 
 resize();
+buildArenaFill();
+armWatchdog();
+broadcastQuality();
 requestAnimationFrame(frame);
 renderHud();
 

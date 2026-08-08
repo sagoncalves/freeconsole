@@ -435,6 +435,23 @@
     renderSettings();
   };
 
+  /**
+   * Back from a screen lock. The rope may be stuck out.
+   *
+   * setHold() cannot be trusted to fix this on its own: it early-returns when `holding` is
+   * already false, and the common case is that this phone released locally while the screen
+   * never got the message. So the release is sent UNCONDITIONALLY, and only then is the
+   * local flag reconciled - the screen's belief is what actually needs correcting.
+   */
+  freeconsole.onReconnect = function () {
+    holding = false;
+    document.body.classList.remove("holding");
+    labelEl.textContent = "HOLD";
+    sent++;
+    freeconsole.message(FreeConsole.SCREEN, { hold: false });
+    log("reconnect — forced release sent#" + sent);
+  };
+
   // Master is derived from who is connected, so it changes without this phone doing
   // anything: the admin leaves, and the next controller inherits the gear.
   freeconsole.onConnect = function () { renderSettings(); };

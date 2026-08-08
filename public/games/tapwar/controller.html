@@ -98,6 +98,19 @@
     pad.disabled = false;
   };
 
+  /**
+   * Back from a screen lock.
+   *
+   * requestAnimationFrame does not fire while the phone is asleep, so a tap that happened to
+   * schedule a flush right before the lock leaves `pending` stuck at true - and schedule()
+   * then early-returns on every future tap, silently dropping the rest of the game. Clearing
+   * it and resending the current seq re-syncs the screen with this phone's real count.
+   */
+  freeconsole.onReconnect = function () {
+    pending = false;
+    if (!over) freeconsole.message(FreeConsole.SCREEN, { seq: seq });
+  };
+
   // Local count updates instantly for feel; the screen stays authoritative and its
   // broadcast overrides this whenever it arrives.
   function tap() {

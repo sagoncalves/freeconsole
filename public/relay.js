@@ -142,5 +142,15 @@ export function attachGameFrame(frame, opts) {
     pushActivePlayers(ids) {
       if (ready) post("activePlayers", ids);
     },
+    /**
+     * Tells the game the shell has just recovered its connection.
+     *
+     * The frame is never reloaded across a screen lock, so the game keeps running with state
+     * it formed before the gap - including any button it believes is still held down. This is
+     * the signal to drop that and resynchronise.
+     */
+    pushReconnect() {
+      if (ready) post("reconnect", null);
+    },
   };
 }
