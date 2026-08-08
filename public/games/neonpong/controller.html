@@ -154,22 +154,30 @@
   var over = false;
   var mySide = null;      // which side of the polygon this phone defends
   var sideCount = 4;      // how many sides the arena currently has
+  var sideWide = true;    // true while the arena is the wide 1-2 player rectangle
   var WALL_HP = 3;
 
   /**
    * The direction this player's side runs, as seen on the TV.
    *
-   * Mirrors the sim's own geometry: a regular `n`-gon with side 0 facing left. Only the edge
-   * direction is needed here — the phone maps a thumb slide onto it — so this is the two-line
-   * version of `sideGeometry` rather than the whole thing.
+   * Mirrors the sim's own geometry: a regular `n`-gon with side 0 facing left, flattened
+   * vertically when the arena is the wide 1-2 player rectangle. Only the edge direction is
+   * needed here — the phone maps a thumb slide onto it — so this is the short version of
+   * `sideGeometry` rather than the whole thing.
+   *
+   * `WIDE_STRETCH` has to match the sim's constant exactly. On the rectangle the top and
+   * bottom edges stay horizontal either way, but getting it wrong would still mis-aim the
+   * knob and the rail, so it is kept identical rather than approximated.
    */
-  function sideDirection(n, index) {
+  var WIDE_STRETCH = 1.5;
+
+  function sideDirection(n, index, wide) {
     var base = Math.PI - Math.PI / n;
     var a0 = base + (index * 2 * Math.PI) / n;
     var a1 = base + ((index + 1) * 2 * Math.PI) / n;
-    var ax = Math.cos(a0), ay = Math.sin(a0);
-    var bx = Math.cos(a1), by = Math.sin(a1);
-    var ex = bx - ax, ey = by - ay;
+    var ry = wide ? 1 / WIDE_STRETCH : 1;
+    var ex = Math.cos(a1) - Math.cos(a0);
+    var ey = (Math.sin(a1) - Math.sin(a0)) * ry;
     var len = Math.hypot(ex, ey) || 1;
     return { x: ex / len, y: ey / len };
   }
@@ -212,7 +220,7 @@
    */
   function axisOf() {
     if (mySide === null || mySide < 0) return { x: 1, y: 0 };
-    return sideDirection(sideCount, mySide);
+    return sideDirection(sideCount, mySide, sideWide);
   }
 
   function send(v) {
@@ -346,11 +354,13 @@
    * on a pentagon than on an octagon, so the arena changing shape under you has to re-aim the
    * control even though your seat number never moved.
    */
-  function applySeat(side, count) {
+  function applySeat(side, count, wide) {
     var n = count || sideCount;
-    if (side === mySide && n === sideCount) return;
+    var w = !!wide;
+    if (side === mySide && n === sideCount && w === sideWide) return;
     mySide = side;
     sideCount = n;
+    sideWide = w;
 
     if (side === null || side === undefined || side < 0) {
       seatEl.textContent = "—";
@@ -362,7 +372,7 @@
 
     // Point the rail along the player's own side, so the control on the phone visibly matches
     // the wall on the TV at whatever angle the polygon put it.
-    var d = sideDirection(n, side);
+    var d = sideDirection(n, side, w);
     rail.style.transform = "rotate(" + Math.atan2(d.y, d.x).toFixed(4) + "rad)";
 
     // A seat or shape change mid-round would otherwise leave the last deflection applied to a
@@ -385,7 +395,7 @@
     if (deviceId !== FreeConsole.SCREEN || !data) return;
     var me = freeconsole.getDeviceId();
 
-    if (data.sides && me in data.sides) applySeat(data.sides[me], data.sideCount);
+    if (data.sides && me in data.sides) applySeat(data.sides[me], data.sideCount, data.wide);
     var isOut = !!(data.out && data.out[me]);
     if (data.hp && me in data.hp) renderHealth(data.hp[me], isOut);
 

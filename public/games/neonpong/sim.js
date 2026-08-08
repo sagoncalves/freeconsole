@@ -16,8 +16,9 @@
  * screen letterboxes that square; the sim never knows the pixel size.
  *
  * Geometry note: with fewer than three players there is no polygon to build, so 1- and
- * 2-player games run on a square with the unclaimed sides left open as plain bouncing walls.
- * That keeps two-player Neon Pong the classic head-to-head game it should be.
+ * 2-player games run on a wide rectangle with the unclaimed top and bottom left open as plain
+ * bouncing walls. That keeps two-player Neon Pong the classic head-to-head game it should be,
+ * on the wide court that game is actually played on.
  */
 
 /* ------------------------------------------------------------------- geometry */
@@ -43,21 +44,53 @@ export function sideCountFor(livePlayers) {
 }
 
 /**
- * Vertices of a regular `n`-gon inscribed in the circle, in world space.
+ * How much wider than tall the 1-2 player arena is.
  *
- * The polygon is rotated so that side 0 faces left — with two players that puts the pair on
- * the left and right of a widescreen display, which is the orientation a TV actually has.
- * Every side, normal, and paddle position is derived from this one function, so the shape can
- * never disagree with itself.
+ * Only the fallback square is stretched. Classic head-to-head Pong is played on a wide court,
+ * and a literal square wastes the left and right thirds of a 16:9 television while making the
+ * two paddles travel further apart than they need to. A real polygon is never stretched: a
+ * squashed pentagon has sides of unequal length, which would hand some players a bigger wall
+ * to defend than others purely by seat.
  */
-export function verticesFor(n) {
+const WIDE_STRETCH = 1.5;
+
+/**
+ * True when a roster of `livePlayers` should play on the wide rectangular court.
+ *
+ * Only the 1-2 player fallback qualifies. Four *actual* players get the regular square, so
+ * the shape still tells you at a glance whether the other two sides are live goals or just
+ * scenery.
+ */
+export function isWideArena(livePlayers) {
+  return livePlayers <= 2;
+}
+
+/**
+ * Vertices of the arena with `n` sides, in world space.
+ *
+ * Normally a regular `n`-gon inscribed in the circumcircle, rotated so that side 0 faces left
+ * — with two players that puts the pair on the left and right of a widescreen display, which
+ * is the orientation a TV actually has. Every side, normal, and paddle position is derived
+ * from this one function, so the shape can never disagree with itself.
+ *
+ * `wide` flattens the result into a rectangle, which is the 1-2 player court. It is a pure
+ * scale of the finished polygon, so the sides stay straight and every downstream consumer —
+ * normals, paddle boxes, collision — keeps working with no special case.
+ */
+export function verticesFor(n, wide) {
   const out = [];
   // Side i spans vertex i to vertex i+1. Offsetting by half a step puts the *centre* of side
   // 0 on the -x axis rather than a vertex, which is what makes side 0 a flat left wall.
   const base = Math.PI - Math.PI / n;
+  // Full width, reduced height. Squashing y rather than stretching x keeps the court inside
+  // the square the renderer already letterboxes, so a wide arena cannot overflow the canvas.
+  const ry = wide ? RADIUS / WIDE_STRETCH : RADIUS;
   for (let i = 0; i < n; i++) {
     const a = base + (i * 2 * Math.PI) / n;
-    out.push({ x: CENTER + Math.cos(a) * RADIUS, y: CENTER + Math.sin(a) * RADIUS });
+    out.push({
+      x: CENTER + Math.cos(a) * RADIUS,
+      y: CENTER + Math.sin(a) * ry,
+    });
   }
   return out;
 }
@@ -70,8 +103,8 @@ export function verticesFor(n) {
  * points at the centre. Reflections, goal tests and paddle boxes all read this, so a side is
  * described in exactly one place.
  */
-export function sideGeometry(n, index) {
-  const verts = verticesFor(n);
+export function sideGeometry(n, index, wide) {
+  const verts = verticesFor(n, wide);
   const a = verts[index % n];
   const b = verts[(index + 1) % n];
   const ex = b.x - a.x;
@@ -103,9 +136,14 @@ export function sideLabel(n, index) {
  * and a fixed length would either cover a whole octagon side or leave a triangle wide open.
  * This way every player defends the same share of their own edge no matter how many are
  * playing.
+ *
+ * A quarter of the edge, down from the 0.42 this started at. At 0.42 a centred paddle already
+ * covered so much of its own side that simply parking it in the middle stopped most shots,
+ * which made position a weak decision. A quarter leaves real gaps either side, so where you
+ * put the paddle is the thing that saves you.
  */
-const PADDLE_SPAN = 0.42;
-export const PADDLE_THICK = 18;
+const PADDLE_SPAN = 0.25;
+export const PADDLE_THICK = 14;
 /**
  * Gap between the wall and the paddle's outer face, measured inward.
  *
@@ -118,8 +156,15 @@ export const PADDLE_THICK = 18;
  * their own edge, which is the whole premise of the shape.
  */
 export const PADDLE_INSET = 6;
-/** Paddle travel in edge-lengths per second, so every polygon plays at the same pace. */
-const PADDLE_SPEED_FRAC = 0.95;
+/**
+ * Paddle travel in edge-lengths per second, so every polygon plays at the same pace.
+ *
+ * Raised alongside the smaller paddle. Shrinking the paddle without this would have made
+ * defending strictly harder in two ways at once — less to catch with *and* the same crawl to
+ * reach the far end. The extra speed keeps the edge coverable, so the change lands as "aim
+ * better", not "you lose more".
+ */
+const PADDLE_SPEED_FRAC = 1.25;
 
 export const BALL_R = 13;
 
@@ -195,6 +240,12 @@ export function createMatch(seed) {
     winner: null,
     /** Current polygon side count. Recomputed whenever the live roster changes. */
     sides: 4,
+    /**
+     * Whether the arena is the wide 1-2 player rectangle rather than a regular polygon.
+     * Kept on the match, alongside `sides`, so the shape is described in one place and every
+     * geometry lookup reads the same pair.
+     */
+    wide: true,
     /** Countdown to the next serve, in seconds. Only meaningful in the "serve" phase. */
     serveIn: 0,
     /** Seconds the current rally has been live; the ball cannot score below T_GRACE. */
@@ -287,6 +338,7 @@ export function clearInput(match, deviceId) {
 export function assignSeats(match) {
   const live = [...match.players.values()].filter((p) => !p.out).sort((a, b) => a.id - b.id);
   match.sides = sideCountFor(live.length);
+  match.wide = isWideArena(live.length);
   live.forEach((p, i) => {
     // With 1-2 players on the fallback square, seat them on opposite sides so they face each
     // other rather than sharing a corner.
@@ -307,7 +359,7 @@ export function defenderOf(match, index) {
 
 /** Half the paddle's length, in world units, on the current polygon. */
 function paddleHalf(match) {
-  return (sideGeometry(match.sides, 0).len * PADDLE_SPAN) / 2;
+  return (sideGeometry(match.sides, 0, match.wide).len * PADDLE_SPAN) / 2;
 }
 
 /**
@@ -318,7 +370,7 @@ function paddleHalf(match) {
  * always stays fully on its own edge and never overhangs a vertex into a neighbour's side.
  */
 export function paddleAt(match, p) {
-  const g = sideGeometry(match.sides, p.side);
+  const g = sideGeometry(match.sides, p.side, match.wide);
   const half = paddleHalf(match);
   // Fraction of the edge the paddle's half-length occupies, so clamping is in `t` units.
   const margin = half / g.len;
@@ -389,14 +441,21 @@ export function step(match, dt) {
  */
 function checkEscape(match) {
   const b = match.ball;
-  if (Math.hypot(b.x - CENTER, b.y - CENTER) <= RADIUS + BALL_R * 4) return;
+  // Measured against the arena's own half-extents rather than the circumradius: on the
+  // flattened 1-2 player rectangle the circle is far taller than the court, so a ball lost
+  // through the top would drift a long way before a purely circular test noticed.
+  const ry = match.wide ? RADIUS / WIDE_STRETCH : RADIUS;
+  const slack = BALL_R * 4;
+  const dx = (b.x - CENTER) / (RADIUS + slack);
+  const dy = (b.y - CENTER) / (ry + slack);
+  if (dx * dx + dy * dy <= 1) return;
   match.events.push({ type: "escape", x: b.x, y: b.y });
   queueServe(match);
 }
 
 function stepPaddle(match, p, dt) {
   if (p.out) return;
-  const g = sideGeometry(match.sides, p.side);
+  const g = sideGeometry(match.sides, p.side, match.wide);
   const margin = paddleHalf(match) / g.len;
   const prev = p.t;
   // Speed is in edge-fractions per second, so a short octagon side is crossed as quickly as a
@@ -516,7 +575,7 @@ function resolveSides(match) {
   const n = match.sides;
 
   for (let i = 0; i < n; i++) {
-    const g = sideGeometry(n, i);
+    const g = sideGeometry(n, i, match.wide);
     // Signed distance from the wall plane, positive on the inside.
     const depth = (b.x - g.mx) * g.nx + (b.y - g.my) * g.ny;
     if (depth > BALL_R) continue;
@@ -620,7 +679,7 @@ function beginRally(match) {
   if (alive.length === 0) return;
 
   const target = alive[Math.floor(rand(match) * alive.length) % alive.length];
-  const g = sideGeometry(match.sides, target.side);
+  const g = sideGeometry(match.sides, target.side, match.wide);
 
   // Aim at a point on the target's side, offset along it so the serve is not always dead
   // centre. Kept well inside the vertices so the opening shot is always genuinely theirs.
