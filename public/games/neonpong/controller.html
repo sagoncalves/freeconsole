@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<title>Neon Pong — Controller</title>
+<link rel="stylesheet" href="/console.css" />
+<style>
+  * { -webkit-tap-highlight-color: transparent; user-select: none; -webkit-user-select: none; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    display: flex; flex-direction: column;
+    touch-action: none; overscroll-behavior: none;
+    padding: max(6px, env(safe-area-inset-top)) 8px max(8px, env(safe-area-inset-bottom));
+    gap: 8px;
+  }
+
+  .status {
+    text-align: center; color: var(--text-dim); font-size: 12px;
+    display: flex; align-items: center; justify-content: center; gap: 10px;
+    min-height: 18px;
+  }
+  .status .seat {
+    font-family: var(--font-mono); font-size: 10px; letter-spacing: .12em;
+    text-transform: uppercase; padding: 2px 8px; border-radius: 999px;
+    border: 1px solid var(--line); color: var(--text-faint);
+  }
+  .status .seat.on { color: var(--me, var(--glow)); border-color: var(--me, var(--glow)); }
+
+  /* Lives, mirrored from the screen. The one piece of match state worth carrying on the phone:
+     you look down at your thumb far more than you look up at the TV. */
+  .lives { display: flex; gap: 5px; }
+  .lives .pip {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--me, var(--glow)); box-shadow: 0 0 8px var(--me, var(--glow));
+  }
+  .lives .pip.spent { background: rgba(120,160,220,.2); box-shadow: none; }
+
+  /* The whole remaining area is the pad. There is nothing to aim at: put a thumb down
+     anywhere and slide. Looking at the phone to find a button is looking away from the ball. */
+  #pad {
+    flex: 1; position: relative; border-radius: 18px;
+    border: 1px solid var(--line); background: rgba(10,12,24,.55);
+    overflow: hidden; touch-action: none; min-height: 0;
+  }
+  #pad.locked { opacity: .35; pointer-events: none; }
+
+  /* The rail shows the axis the paddle actually slides along, rotated to match the seat. A
+     top-wall player pushing "right" on the phone must see their paddle go right on the TV,
+     which is only obvious if the control looks like the thing it drives. */
+  #rail {
+    position: absolute; left: 50%; top: 50%;
+    width: 74%; height: 10px; margin: -5px 0 0 -37%;
+    border-radius: 999px; background: rgba(120,160,220,.12);
+    transition: transform .2s ease-out;
+  }
+  #rail.vertical { transform: rotate(90deg); }
+
+  #knob {
+    position: absolute; left: 50%; top: 50%;
+    width: 74px; height: 74px; margin: -37px 0 0 -37px;
+    border-radius: 50%; pointer-events: none;
+    background: rgba(53,240,224,.16);
+    border: 1px solid var(--me, var(--glow));
+    box-shadow: 0 0 26px rgba(53,240,224,.3);
+    will-change: transform;
+  }
+  #knob.hot { background: rgba(53,240,224,.3); }
+
+  #hint {
+    position: absolute; inset: 0; display: grid; place-items: center;
+    font-family: var(--font-mono); font-size: 11px; letter-spacing: .12em;
+    text-transform: uppercase; color: var(--text-faint);
+    text-align: center; line-height: 1.9; pointer-events: none;
+    transition: opacity .15s;
+  }
+  #pad.active #hint { opacity: 0; }
+
+  #banner {
+    position: fixed; inset: 0; z-index: 20;
+    display: none; flex-direction: column; align-items: center; justify-content: center;
+    gap: 10px; background: rgba(5,6,13,.94); text-align: center; padding: 24px;
+  }
+  #banner.show { display: flex; }
+  #banner .big {
+    font-size: clamp(26px, 9vw, 46px); font-weight: 700; line-height: 1.05;
+    color: var(--glow); text-shadow: var(--bloom-glow);
+  }
+  #banner .sub { color: var(--text-dim); font-size: 14px; max-width: 32ch; }
+</style>
+</head>
+<body>
+
+<div class="status">
+  <span class="seat" id="seat">—</span>
+  <span id="status">Connecting…</span>
+  <span class="lives" id="lives"></span>
+</div>
+
+<div id="pad" class="locked">
+  <div id="rail"></div>
+  <div id="knob"></div>
+  <div id="hint">Slide anywhere<br />to move your paddle</div>
+</div>
+
+<div id="banner">
+  <div class="big" id="bannerBig">—</div>
+  <div class="sub" id="bannerSub"></div>
+</div>
+
+<script src="/sdk.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  var freeconsole = new FreeConsole();
+  freeconsole.setOrientation("portrait");
+
+  var pad = document.getElementById("pad");
+  var rail = document.getElementById("rail");
+  var knob = document.getElementById("knob");
+  var statusEl = document.getElementById("status");
+  var seatEl = document.getElementById("seat");
+  var livesEl = document.getElementById("lives");
+  var banner = document.getElementById("banner");
+
+  var over = false;
+  var myWall = null;
+  var LIVES_START = 3;
+
+  /** Wall indices, mirroring the sim. */
+  var BOTTOM = 0, TOP = 1, LEFT = 2, RIGHT = 3;
+  var WALL_LABEL = { 0: "Bottom", 1: "Top", 2: "Left", 3: "Right" };
+
+  /* ------------------------------------------------------------ paddle input */
+
+  /**
+   * A floating slider: the origin is wherever the thumb lands, and deflection from there is
+   * the paddle's velocity. Absolute positioning would be tempting, but the pad and the wall
+   * are different lengths and the mapping breaks the moment a thumb starts near an edge.
+   *
+   * Only the deflection crosses the wire, and only when it changes by enough to matter — the
+   * screen integrates it into a position itself.
+   */
+  var RANGE = 90;        // px of travel for full deflection
+  var DEAD = 6;          // px of slack before the paddle moves at all
+  var STEP = 0.04;       // smallest change worth a message
+
+  var padId = null;      // pointerId that owns the pad, or null
+  var originX = 0, originY = 0;
+  var sent = 0;
+
+  /**
+   * Which screen axis drives the paddle, and in which direction.
+   *
+   * The phone is held in portrait whatever wall you are on, so the mapping has to rotate with
+   * the seat or half the table plays mirrored. Bottom and top slide along the field's x axis,
+   * so they use the phone's x; left and right slide along y, so they use the phone's y. The
+   * sign flips for the walls the camera sees from the far side.
+   */
+  function axisOf() {
+    if (myWall === LEFT || myWall === RIGHT) return { axis: "y", sign: 1 };
+    // The top wall is drawn across the screen the same way round as the bottom one, so both
+    // read left-to-right. No flip: pushing right always moves the paddle right on the TV.
+    return { axis: "x", sign: 1 };
+  }
+
+  function send(v) {
+    // Snap tiny values to zero, so a resting thumb never leaves the paddle creeping.
+    if (Math.abs(v) < 0.02) v = 0;
+    if (Math.abs(v - sent) < STEP && !(v === 0 && sent !== 0)) return;
+    sent = v;
+    freeconsole.message(FreeConsole.SCREEN, { t: "move", v: v });
+  }
+
+  function padStart(e) {
+    var r = pad.getBoundingClientRect();
+    padId = e.pointerId;
+    originX = e.clientX - r.left;
+    originY = e.clientY - r.top;
+    pad.classList.add("active");
+    placeKnob(originX, originY, r);
+    padMove(e);
+  }
+
+  function padMove(e) {
+    var r = pad.getBoundingClientRect();
+    var px = e.clientX - r.left;
+    var py = e.clientY - r.top;
+    var a = axisOf();
+    var delta = a.axis === "x" ? px - originX : py - originY;
+
+    var mag = Math.abs(delta);
+    var v = 0;
+    if (mag > DEAD) {
+      v = ((mag - DEAD) / (RANGE - DEAD)) * (delta < 0 ? -1 : 1) * a.sign;
+      v = Math.max(-1, Math.min(1, v));
+    }
+    send(v);
+
+    // The knob tracks along the driving axis only, so the control visibly ignores the axis
+    // that does nothing rather than sliding under the thumb and implying it matters.
+    var clamped = Math.max(-RANGE, Math.min(RANGE, delta));
+    if (a.axis === "x") placeKnob(originX + clamped, originY, r);
+    else placeKnob(originX, originY + clamped, r);
+
+    knob.classList.toggle("hot", Math.abs(v) > 0.85);
+  }
+
+  function placeKnob(x, y, r) {
+    knob.style.transform = "translate(" + (x - r.width / 2) + "px," + (y - r.height / 2) + "px)";
+  }
+
+  function padEnd() {
+    padId = null;
+    pad.classList.remove("active");
+    knob.classList.remove("hot");
+    knob.style.transform = "translate(0px,0px)";
+    send(0);
+  }
+
+  /**
+   * Pointer routing lives on the document rather than on the pad, and nothing calls
+   * setPointerCapture: on iOS capture retargets pointerup and the paddle sticks at full
+   * deflection with the thumb already lifted. Tracking the pointerId by hand is what keeps a
+   * release honest.
+   */
+  document.addEventListener("pointerdown", function (e) {
+    if (over) { restart(); return; }
+    if (pad.classList.contains("locked")) return;
+    if (padId !== null || !pad.contains(e.target)) return;
+    e.preventDefault();
+    padStart(e);
+  }, { passive: false });
+
+  document.addEventListener("pointermove", function (e) {
+    if (e.pointerId !== padId) return;
+    e.preventDefault();
+    padMove(e);
+  }, { passive: false });
+
+  function release(e) {
+    if (e.pointerId !== padId) return;
+    padEnd();
+  }
+  document.addEventListener("pointerup", release);
+  document.addEventListener("pointercancel", release);
+
+  // A backgrounded phone must not leave the paddle sliding into a corner on the TV.
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden && padId !== null) padEnd();
+  });
+
+  function restart() {
+    over = false;
+    banner.classList.remove("show");
+    freeconsole.message(FreeConsole.SCREEN, { t: "restart" });
+  }
+
+  /* ------------------------------------------------------------------- paint */
+
+  function renderLives(n, isOut) {
+    livesEl.innerHTML = "";
+    for (var i = 0; i < LIVES_START; i++) {
+      var pip = document.createElement("span");
+      pip.className = "pip" + (i < n && !isOut ? "" : " spent");
+      livesEl.appendChild(pip);
+    }
+  }
+
+  function applySeat(wall) {
+    if (wall === myWall) return;
+    myWall = wall;
+    if (wall === null || wall === undefined) {
+      seatEl.textContent = "—";
+      seatEl.classList.remove("on");
+      return;
+    }
+    seatEl.textContent = WALL_LABEL[wall] + " wall";
+    seatEl.classList.add("on");
+    rail.classList.toggle("vertical", wall === LEFT || wall === RIGHT);
+    // A seat change mid-round would otherwise leave the last deflection applied to the new
+    // axis, which sends the paddle off in a direction nobody asked for.
+    send(0);
+  }
+
+  /* ------------------------------------------------------------------ shell */
+
+  freeconsole.onReady = function () {
+    // Paint the phone in this device's own colour, so the paddle on the TV and the control in
+    // your hand are visibly the same player.
+    document.body.style.setProperty("--me", freeconsole.getPlayerColor());
+    statusEl.textContent = "Waiting for the round…";
+    renderLives(LIVES_START, false);
+  };
+
+  freeconsole.onMessage = function (deviceId, data) {
+    // Only the screen is authoritative.
+    if (deviceId !== FreeConsole.SCREEN || !data) return;
+    var me = freeconsole.getDeviceId();
+
+    if (data.walls && me in data.walls) applySeat(data.walls[me]);
+    var isOut = !!(data.out && data.out[me]);
+    if (data.lives && me in data.lives) renderLives(data.lives[me], isOut);
+
+    if (data.phase === "rally" || data.phase === "serve") {
+      over = false;
+      banner.classList.remove("show");
+      pad.classList.toggle("locked", isOut);
+      if (isOut) {
+        statusEl.textContent = "Knocked out — watching";
+      } else {
+        statusEl.textContent = data.phase === "serve" ? "Get ready…" : "Defend your wall";
+      }
+    } else if (data.phase === "waiting") {
+      pad.classList.add("locked");
+      statusEl.textContent = "Waiting for players…";
+    } else if (data.phase === "over") {
+      over = true;
+      pad.classList.add("locked");
+      var won = data.winner === me;
+      document.getElementById("bannerBig").textContent = won ? "You win" : "Knocked out";
+      document.getElementById("bannerSub").textContent = "Tap to play again.";
+      banner.classList.add("show");
+      freeconsole.vibrate(won ? 40 : 12);
+    }
+  };
+})();
+</script>
+</body>
+</html>

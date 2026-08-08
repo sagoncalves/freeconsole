@@ -62,6 +62,18 @@ const GAMES = [
     screenUrl: "/games/nidhogg/screen.html",
     controllerUrl: "/games/nidhogg/controller.html",
   },
+  {
+    id: "neonpong",
+    name: "Neon Pong",
+    description:
+      "Pong on all four walls. Everyone defends their own edge and loses a life when the ball gets past them; the last one standing wins. Hit with the end of your paddle to bend the return.",
+    thumbnailUrl: null,
+    // One player is a solo run against the clock; four fill every wall.
+    minPlayers: 1,
+    maxPlayers: 4,
+    screenUrl: "/games/neonpong/screen.html",
+    controllerUrl: "/games/neonpong/controller.html",
+  },
 ];
 
 async function main() {

@@ -21,6 +21,7 @@
     "deploy:preview": "vercel",
     "deploy:functions": "firebase deploy --only functions && ./scripts/allow-public-invoke.sh",
     "deploy:rules": "firebase deploy --only firestore:rules,database",
+    "test:neonpong": "node scripts/test-neonpong.mjs",
     "test:join": "./scripts/test-join.sh",
     "test:messages": "./scripts/test-messages.sh"
   },
