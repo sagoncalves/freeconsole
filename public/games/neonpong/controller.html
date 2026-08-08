@@ -8,18 +8,37 @@
 <style>
   * { -webkit-tap-highlight-color: transparent; user-select: none; -webkit-user-select: none; }
   html, body { height: 100%; overflow: hidden; }
+  /* Every edge is inset, not just the top and bottom. The pad deliberately fills all the
+     space left over, so on a notched phone held in landscape — which is how you end up
+     holding it the moment the game gets tense — a flat side padding would run the touch
+     surface under the notch and the home indicator. The horizontal insets are zero on a
+     phone without them, so this costs nothing on ordinary hardware. */
   body {
     display: flex; flex-direction: column;
     touch-action: none; overscroll-behavior: none;
-    padding: max(6px, env(safe-area-inset-top)) 8px max(8px, env(safe-area-inset-bottom));
+    padding:
+      max(6px, env(safe-area-inset-top))
+      max(8px, env(safe-area-inset-right))
+      max(8px, env(safe-area-inset-bottom))
+      max(8px, env(safe-area-inset-left));
     gap: 8px;
   }
 
+  /* The lives pips sit at the right end of this row, which is exactly where the shell pins
+     its master-only "♛ Game list" pill (#exitGame in src/pages/play.astro). On the one phone
+     that has the pill it covered them, so the row reserves the pill's width. The reservation
+     is balanced on the left so the status text stays optically centred rather than being
+     shoved off-axis by a gutter only one side has. */
   .status {
     text-align: center; color: var(--text-dim); font-size: 12px;
     display: flex; align-items: center; justify-content: center; gap: 10px;
     min-height: 18px;
+    padding: 0 var(--exit-gutter, 142px);
   }
+  /* Below the pill's own width there is no room to reserve anything: the gutter would eat the
+     entire row and clip the seat chip. A narrow phone drops it and lets the pill overlap the
+     pips, which is the lesser failure — the lives are also on the TV. */
+  @media (max-width: 380px) { .status { padding: 0; } }
   .status .seat {
     font-family: var(--font-mono); font-size: 10px; letter-spacing: .12em;
     text-transform: uppercase; padding: 2px 8px; border-radius: 999px;
@@ -45,16 +64,16 @@
   }
   #pad.locked { opacity: .35; pointer-events: none; }
 
-  /* The rail shows the axis the paddle actually slides along, rotated to match the seat. A
-     top-wall player pushing "right" on the phone must see their paddle go right on the TV,
-     which is only obvious if the control looks like the thing it drives. */
+  /* The rail shows the direction the paddle actually slides, rotated inline by JS to match
+     whatever angle the polygon put this player's side at. On an octagon that is often a
+     diagonal, and sliding the way the wall runs is only obvious if the control looks like the
+     thing it drives. The transition makes a mid-match reshape read as the rail turning. */
   #rail {
     position: absolute; left: 50%; top: 50%;
     width: 74%; height: 10px; margin: -5px 0 0 -37%;
     border-radius: 999px; background: rgba(120,160,220,.12);
-    transition: transform .2s ease-out;
+    transition: transform .25s ease-out;
   }
-  #rail.vertical { transform: rotate(90deg); }
 
   #knob {
     position: absolute; left: 50%; top: 50%;
@@ -76,10 +95,18 @@
   }
   #pad.active #hint { opacity: 0; }
 
+  /* Fixed to the viewport, so it sits outside the body's padding and has to carry its own
+     insets — otherwise the win/lose text centres against the physical screen and can land
+     under a notch. The backdrop still covers edge to edge; only the content is inset. */
   #banner {
     position: fixed; inset: 0; z-index: 20;
     display: none; flex-direction: column; align-items: center; justify-content: center;
-    gap: 10px; background: rgba(5,6,13,.94); text-align: center; padding: 24px;
+    gap: 10px; background: rgba(5,6,13,.94); text-align: center;
+    padding:
+      calc(24px + env(safe-area-inset-top))
+      calc(24px + env(safe-area-inset-right))
+      calc(24px + env(safe-area-inset-bottom))
+      calc(24px + env(safe-area-inset-left));
   }
   #banner.show { display: flex; }
   #banner .big {
@@ -125,12 +152,33 @@
   var banner = document.getElementById("banner");
 
   var over = false;
-  var myWall = null;
-  var LIVES_START = 3;
+  var mySide = null;      // which side of the polygon this phone defends
+  var sideCount = 4;      // how many sides the arena currently has
+  var WALL_HP = 3;
 
-  /** Wall indices, mirroring the sim. */
-  var BOTTOM = 0, TOP = 1, LEFT = 2, RIGHT = 3;
-  var WALL_LABEL = { 0: "Bottom", 1: "Top", 2: "Left", 3: "Right" };
+  /**
+   * The direction this player's side runs, as seen on the TV.
+   *
+   * Mirrors the sim's own geometry: a regular `n`-gon with side 0 facing left. Only the edge
+   * direction is needed here — the phone maps a thumb slide onto it — so this is the two-line
+   * version of `sideGeometry` rather than the whole thing.
+   */
+  function sideDirection(n, index) {
+    var base = Math.PI - Math.PI / n;
+    var a0 = base + (index * 2 * Math.PI) / n;
+    var a1 = base + ((index + 1) * 2 * Math.PI) / n;
+    var ax = Math.cos(a0), ay = Math.sin(a0);
+    var bx = Math.cos(a1), by = Math.sin(a1);
+    var ex = bx - ax, ey = by - ay;
+    var len = Math.hypot(ex, ey) || 1;
+    return { x: ex / len, y: ey / len };
+  }
+
+  function sideLabel(n, index) {
+    if (index === null || index === undefined || index < 0) return "—";
+    if (n === 4) return ["Left", "Top", "Right", "Bottom"][index] || "Side " + (index + 1);
+    return "Side " + (index + 1);
+  }
 
   /* ------------------------------------------------------------ paddle input */
 
@@ -151,18 +199,20 @@
   var sent = 0;
 
   /**
-   * Which screen axis drives the paddle, and in which direction.
+   * The thumb axis that drives the paddle, in phone-screen coordinates.
    *
-   * The phone is held in portrait whatever wall you are on, so the mapping has to rotate with
-   * the seat or half the table plays mirrored. Bottom and top slide along the field's x axis,
-   * so they use the phone's x; left and right slide along y, so they use the phone's y. The
-   * sign flips for the walls the camera sees from the far side.
+   * On a polygon a side can sit at any angle, so there is no "this seat is horizontal" rule
+   * to follow. The honest mapping is to project the thumb's movement onto the direction the
+   * player's own side runs *as drawn on the TV*: slide the way the wall goes and the paddle
+   * follows. A player on a diagonal side of an octagon therefore slides diagonally, which is
+   * exactly what they see in front of them.
+   *
+   * Falls back to a plain horizontal axis before the first state arrives, so an early touch
+   * still does something sensible rather than nothing.
    */
   function axisOf() {
-    if (myWall === LEFT || myWall === RIGHT) return { axis: "y", sign: 1 };
-    // The top wall is drawn across the screen the same way round as the bottom one, so both
-    // read left-to-right. No flip: pushing right always moves the paddle right on the TV.
-    return { axis: "x", sign: 1 };
+    if (mySide === null || mySide < 0) return { x: 1, y: 0 };
+    return sideDirection(sideCount, mySide);
   }
 
   function send(v) {
@@ -188,21 +238,23 @@
     var px = e.clientX - r.left;
     var py = e.clientY - r.top;
     var a = axisOf();
-    var delta = a.axis === "x" ? px - originX : py - originY;
+
+    // Signed distance travelled along the side's own direction. Movement perpendicular to it
+    // is ignored, so a thumb that wanders off the line does not jitter the paddle.
+    var delta = (px - originX) * a.x + (py - originY) * a.y;
 
     var mag = Math.abs(delta);
     var v = 0;
     if (mag > DEAD) {
-      v = ((mag - DEAD) / (RANGE - DEAD)) * (delta < 0 ? -1 : 1) * a.sign;
+      v = ((mag - DEAD) / (RANGE - DEAD)) * (delta < 0 ? -1 : 1);
       v = Math.max(-1, Math.min(1, v));
     }
     send(v);
 
-    // The knob tracks along the driving axis only, so the control visibly ignores the axis
-    // that does nothing rather than sliding under the thumb and implying it matters.
+    // The knob slides along that same direction, so the control visibly moves the way the
+    // wall does rather than under the thumb in a direction that does nothing.
     var clamped = Math.max(-RANGE, Math.min(RANGE, delta));
-    if (a.axis === "x") placeKnob(originX + clamped, originY, r);
-    else placeKnob(originX, originY + clamped, r);
+    placeKnob(originX + a.x * clamped, originY + a.y * clamped, r);
 
     knob.classList.toggle("hot", Math.abs(v) > 0.85);
   }
@@ -259,28 +311,62 @@
 
   /* ------------------------------------------------------------------- paint */
 
-  function renderLives(n, isOut) {
+  /** Damage colours, mirroring the sim so the phone and the wall never disagree. */
+  var DAMAGE_COLORS = ["#9dff4f", "#ffc247", "#ff2e88"];
+
+  /**
+   * Your wall's health, in the same green/yellow/red the TV uses.
+   *
+   * This is the one piece of match state worth carrying on the phone: you look down at your
+   * thumb far more than you look up at the arena, and "one hit left" is the thing you most
+   * need to know without glancing away.
+   */
+  function renderHealth(hp, isOut) {
     livesEl.innerHTML = "";
-    for (var i = 0; i < LIVES_START; i++) {
+    var color = isOut || hp <= 0
+      ? null
+      : DAMAGE_COLORS[Math.max(0, Math.min(DAMAGE_COLORS.length - 1, WALL_HP - hp))];
+    for (var i = 0; i < WALL_HP; i++) {
       var pip = document.createElement("span");
-      pip.className = "pip" + (i < n && !isOut ? "" : " spent");
+      pip.className = "pip";
+      if (i < hp && color) {
+        pip.style.background = color;
+        pip.style.boxShadow = "0 0 8px " + color;
+      } else {
+        pip.classList.add("spent");
+      }
       livesEl.appendChild(pip);
     }
   }
 
-  function applySeat(wall) {
-    if (wall === myWall) return;
-    myWall = wall;
-    if (wall === null || wall === undefined) {
+  /**
+   * Take a seat on the polygon.
+   *
+   * Both the side index and the side count matter: the same index means a different direction
+   * on a pentagon than on an octagon, so the arena changing shape under you has to re-aim the
+   * control even though your seat number never moved.
+   */
+  function applySeat(side, count) {
+    var n = count || sideCount;
+    if (side === mySide && n === sideCount) return;
+    mySide = side;
+    sideCount = n;
+
+    if (side === null || side === undefined || side < 0) {
       seatEl.textContent = "—";
       seatEl.classList.remove("on");
       return;
     }
-    seatEl.textContent = WALL_LABEL[wall] + " wall";
+    seatEl.textContent = sideLabel(n, side);
     seatEl.classList.add("on");
-    rail.classList.toggle("vertical", wall === LEFT || wall === RIGHT);
-    // A seat change mid-round would otherwise leave the last deflection applied to the new
-    // axis, which sends the paddle off in a direction nobody asked for.
+
+    // Point the rail along the player's own side, so the control on the phone visibly matches
+    // the wall on the TV at whatever angle the polygon put it.
+    var d = sideDirection(n, side);
+    rail.style.transform = "rotate(" + Math.atan2(d.y, d.x).toFixed(4) + "rad)";
+
+    // A seat or shape change mid-round would otherwise leave the last deflection applied to a
+    // new direction, which sends the paddle off somewhere nobody asked for.
     send(0);
   }
 
@@ -291,7 +377,7 @@
     // your hand are visibly the same player.
     document.body.style.setProperty("--me", freeconsole.getPlayerColor());
     statusEl.textContent = "Waiting for the round…";
-    renderLives(LIVES_START, false);
+    renderHealth(WALL_HP, false);
   };
 
   freeconsole.onMessage = function (deviceId, data) {
@@ -299,18 +385,22 @@
     if (deviceId !== FreeConsole.SCREEN || !data) return;
     var me = freeconsole.getDeviceId();
 
-    if (data.walls && me in data.walls) applySeat(data.walls[me]);
+    if (data.sides && me in data.sides) applySeat(data.sides[me], data.sideCount);
     var isOut = !!(data.out && data.out[me]);
-    if (data.lives && me in data.lives) renderLives(data.lives[me], isOut);
+    if (data.hp && me in data.hp) renderHealth(data.hp[me], isOut);
 
     if (data.phase === "rally" || data.phase === "serve") {
       over = false;
       banner.classList.remove("show");
       pad.classList.toggle("locked", isOut);
       if (isOut) {
-        statusEl.textContent = "Knocked out — watching";
+        statusEl.textContent = "Wall destroyed — watching";
+      } else if (data.phase === "serve") {
+        statusEl.textContent = "Get ready…";
       } else {
-        statusEl.textContent = data.phase === "serve" ? "Get ready…" : "Defend your wall";
+        // The last hit is the one worth warning about, so the status doubles as the alarm.
+        var hp = data.hp && me in data.hp ? data.hp[me] : WALL_HP;
+        statusEl.textContent = hp <= 1 ? "One hit left!" : "Defend your wall";
       }
     } else if (data.phase === "waiting") {
       pad.classList.add("locked");
@@ -319,7 +409,7 @@
       over = true;
       pad.classList.add("locked");
       var won = data.winner === me;
-      document.getElementById("bannerBig").textContent = won ? "You win" : "Knocked out";
+      document.getElementById("bannerBig").textContent = won ? "You win" : "Wall destroyed";
       document.getElementById("bannerSub").textContent = "Tap to play again.";
       banner.classList.add("show");
       freeconsole.vibrate(won ? 40 : 12);

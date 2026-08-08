@@ -66,11 +66,11 @@ const GAMES = [
     id: "neonpong",
     name: "Neon Pong",
     description:
-      "Pong on all four walls. Everyone defends their own edge and loses a life when the ball gets past them; the last one standing wins. Hit with the end of your paddle to bend the return.",
+      "Pong in the round. Everyone gets one side of the arena — three players make a triangle, eight an octagon. Your wall takes three hits, going green to yellow to red, and then it shatters and the arena closes up without you. Last one standing wins.",
     thumbnailUrl: null,
-    // One player is a solo run against the clock; four fill every wall.
+    // Three or more players get a true polygon; 1-2 fall back to a square with open sides.
     minPlayers: 1,
-    maxPlayers: 4,
+    maxPlayers: 8,
     screenUrl: "/games/neonpong/screen.html",
     controllerUrl: "/games/neonpong/controller.html",
   },

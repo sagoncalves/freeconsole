@@ -9,18 +9,19 @@
   html, body { height: 100%; overflow: hidden; }
   body { display: flex; flex-direction: column; }
 
-  /* A thin band of scores above the field. Each seat gets a chip in its own player colour,
-     so the wall you are defending and the colour you are is the same information. */
+  /* A thin band of players above the field. Each chip carries the player's colour and a
+     three-segment health bar in the same green/yellow/red the wall itself uses, so the HUD
+     and the arena never tell different stories. */
   #hud {
     display: flex; align-items: center; justify-content: center; gap: 10px;
     padding: 9px 16px; border-bottom: 1px solid var(--line);
     background: rgba(5,6,13,.85); flex-wrap: wrap;
   }
   .chip {
-    display: flex; align-items: baseline; gap: 8px;
+    display: flex; align-items: center; gap: 8px;
     padding: 5px 12px; border-radius: 999px;
     border: 1px solid var(--line); background: rgba(10,12,24,.6);
-    transition: opacity .2s, border-color .2s, box-shadow .2s;
+    transition: opacity .2s, border-color .2s;
   }
   .chip .seat {
     font-family: var(--font-mono); font-size: 9px; letter-spacing: .14em;
@@ -28,16 +29,15 @@
   }
   .chip .nick {
     font-weight: 700; font-size: clamp(12px, 1.2vw, 16px);
-    max-width: 16vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    max-width: 14vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
-  /* Lives are pips rather than a number: at TV distance a shape you can count at a glance
-     beats a digit you have to read. */
-  .chip .pips { display: flex; gap: 3px; }
-  .chip .pip {
-    width: 7px; height: 7px; border-radius: 50%;
-    background: currentColor; box-shadow: 0 0 8px currentColor;
+  /* Health as segments rather than a number: at TV distance a shape you can count beats a
+     digit you have to read, and the colour carries the urgency on its own. */
+  .chip .hp { display: flex; gap: 3px; }
+  .chip .seg {
+    width: 14px; height: 6px; border-radius: 2px;
+    background: rgba(120,160,220,.18);
   }
-  .chip .pip.spent { background: rgba(120,160,220,.18); box-shadow: none; }
   .chip.out { opacity: .32; }
   .chip.out .nick { text-decoration: line-through; }
 
@@ -79,18 +79,21 @@
 <script type="module">
 import {
   createMatch, addPlayer, removePlayer, setInput, clearInput,
-  step, restart, assignSeats, queueServe, paddleBox,
-  FIELD, BALL_R, PADDLE_LEN, PADDLE_THICK, WALLS, SEAT_ORDER, LIVES_START,
-} from "/games/neonpong/sim.js?v=1";
+  step, restart, assignSeats, queueServe,
+  paddleAt, paddleQuad, sideGeometry, verticesFor, defenderOf, damageColor, sideLabel,
+  FIELD, CENTER, RADIUS, BALL_R, PADDLE_THICK, WALL_HP, MAX_PLAYERS,
+} from "/games/neonpong/sim.js?v=2";
 
 const freeconsole = new FreeConsole();
 
 /* ------------------------------------------------------------ test harness */
 
-// ?test=1 runs the whole game with no shell behind it: four keyboard paddles, so the sim can
-// be reloaded on every edit without re-joining a room. Anything touching the shell goes
+// ?test=N runs the whole game with no shell behind it: N local keyboard paddles, so the sim
+// can be reloaded on every edit without re-joining a room. Anything touching the shell goes
 // through safeCall, so a missing one is a no-op rather than a crash.
-const TEST = new URLSearchParams(location.search).has("test");
+const params = new URLSearchParams(location.search);
+const TEST = params.has("test");
+const TEST_N = Math.max(1, Math.min(MAX_PLAYERS, Number(params.get("test")) || 4));
 
 function safeCall(fn, fallback) {
   try { return fn(); } catch (err) { return fallback; }
@@ -122,10 +125,10 @@ function resize() {
   canvas.height = Math.round(cssH * dpr);
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-  // The field is square and the display is not, so it is letterboxed with a small margin.
-  // The margin matters: paddles sit inside the wall, and a field flush with the canvas edge
-  // puts the bottom paddle under the bezel of a badly-overscanned TV.
-  const margin = 0.94;
+  // The arena is a circle's worth of square and the display is not, so it is letterboxed with
+  // a small margin. The margin matters: the polygon's vertices touch the circumcircle, and a
+  // field flush with the canvas edge loses them to a badly-overscanned TV.
+  const margin = 0.92;
   scale = (Math.min(cssW, cssH) / FIELD) * margin;
   offX = (cssW - FIELD * scale) / 2;
   offY = (cssH - FIELD * scale) / 2;
@@ -145,10 +148,9 @@ function joinPlayer(deviceId) {
     clearInput(match, deviceId);
     return;
   }
-  if (match.players.size >= SEAT_ORDER.length) return;   // four walls, four seats
+  if (match.players.size >= MAX_PLAYERS) return;
 
   addPlayer(match, deviceId);
-  assignSeats(match);
   renderHud();
   maybeStart();
   broadcastState();
@@ -157,14 +159,13 @@ function joinPlayer(deviceId) {
 function leavePlayer(deviceId) {
   if (!match.players.has(deviceId)) return;
   removePlayer(match, deviceId);
-  assignSeats(match);
 
   if (match.players.size === 0) {
     match.phase = "waiting";
     showOverlay("Waiting for players…", null);
   } else if (match.phase === "rally" || match.phase === "serve") {
-    // The wall they were defending is now open, so the ball would sail through a gap that
-    // nobody owns. Re-serving is the only honest way to continue.
+    // The polygon just changed shape under the ball, so it is very likely outside the new
+    // arena or inside a wall. Re-serving is the only honest way to continue.
     queueServe(match);
   }
   renderHud();
@@ -177,7 +178,7 @@ function maybeStart() {
     return;
   }
   if (match.phase === "rally" || match.phase === "serve") return;
-  safeCall(() => freeconsole.setActivePlayers(SEAT_ORDER.length));
+  safeCall(() => freeconsole.setActivePlayers(MAX_PLAYERS));
   restart(match);
   showOverlay(null);
   broadcastState();
@@ -186,7 +187,7 @@ function maybeStart() {
 /* ---------------------------------------------------------------- shell wiring */
 
 freeconsole.onReady = function () {
-  safeCall(() => freeconsole.setActivePlayers(SEAT_ORDER.length));
+  safeCall(() => freeconsole.setActivePlayers(MAX_PLAYERS));
   for (const id of safeCall(() => freeconsole.getControllerDeviceIds(), []) || []) joinPlayer(id);
   renderHud();
 };
@@ -196,7 +197,7 @@ freeconsole.onDisconnect = leavePlayer;
 
 /**
  * Controllers send paddle intent only. Nothing here trusts a phone with a paddle position,
- * a bounce, or a point.
+ * a bounce, or a hit.
  */
 freeconsole.onMessage = function (deviceId, data) {
   if (!data || !match.players.has(deviceId)) return;
@@ -211,26 +212,27 @@ freeconsole.onMessage = function (deviceId, data) {
 };
 
 /**
- * Phase, seats and lives go out on change, not per frame (never stream). A controller only
- * needs to know which wall it is defending, which way its paddle slides, and whether the
- * round is live.
+ * Phase, seats and health go out on change, not per frame (never stream). A controller needs
+ * to know which side it defends, how many sides the arena has right now — that decides which
+ * way its paddle slides on screen — and how much wall it has left.
  */
 let lastStateKey = "";
 function broadcastState() {
-  const walls = {};
-  const lives = {};
+  const sides = {};
+  const hp = {};
   const out = {};
-  for (const [id, p] of match.players) { walls[id] = p.wall; lives[id] = p.lives; out[id] = p.out; }
+  for (const [id, p] of match.players) { sides[id] = p.side; hp[id] = p.hp; out[id] = p.out; }
 
-  const key = JSON.stringify([match.phase, match.winner, walls, lives, out]);
+  const key = JSON.stringify([match.phase, match.winner, match.sides, sides, hp, out]);
   if (key === lastStateKey) return;
   lastStateKey = key;
 
   safeCall(() => freeconsole.broadcast({
     phase: match.phase,
     winner: match.winner,
-    walls,
-    lives,
+    sideCount: match.sides,
+    sides,
+    hp,
     out,
   }));
 }
@@ -252,27 +254,33 @@ function renderHud() {
 
     const chip = document.createElement("div");
     chip.className = "chip" + (p.out ? " out" : "");
-    chip.style.color = color;
     chip.style.borderColor = p.out ? "var(--line)" : color;
 
     const seat = document.createElement("span");
     seat.className = "seat";
-    seat.textContent = WALLS[p.wall].label;
+    seat.textContent = p.out ? "Out" : sideLabel(match.sides, p.side);
 
     const nick = document.createElement("span");
     nick.className = "nick";
     nick.textContent = nameOf(id);
     nick.style.color = color;
 
-    const pips = document.createElement("span");
-    pips.className = "pips";
-    for (let i = 0; i < LIVES_START; i++) {
-      const pip = document.createElement("span");
-      pip.className = "pip" + (i < p.lives ? "" : " spent");
-      pips.appendChild(pip);
+    // Segments drain right to left and take the wall's own damage colour, so a player's HUD
+    // entry and their wall on the field always agree.
+    const bar = document.createElement("span");
+    bar.className = "hp";
+    const dmg = damageColor(p.hp);
+    for (let i = 0; i < WALL_HP; i++) {
+      const seg = document.createElement("span");
+      seg.className = "seg";
+      if (i < p.hp && dmg) {
+        seg.style.background = dmg;
+        seg.style.boxShadow = "0 0 8px " + dmg;
+      }
+      bar.appendChild(seg);
     }
 
-    chip.append(seat, nick, pips);
+    chip.append(seat, nick, bar);
     hud.appendChild(chip);
   }
 }
@@ -287,11 +295,11 @@ function showOverlay(big, sub) {
 
 /* ------------------------------------------------------------------- effects */
 
-// Short-lived rings and flashes, drawn in world space and aged out by the frame loop. Purely
+// Short-lived rings and shards, drawn in world space and aged out by the frame loop. Purely
 // cosmetic — the sim never reads them back.
 const fx = [];
-/** Per-wall flash, 0..1, so a conceded goal lights up the wall it went through. */
-const wallFlash = { 0: 0, 1: 0, 2: 0, 3: 0 };
+/** Per-side flash keyed by side index, so a hit lights up the wall that took it. */
+let sideFlash = {};
 
 /** The ball's recent positions, for a motion trail. Cosmetic, capped, oldest first. */
 const trail = [];
@@ -300,14 +308,32 @@ const TRAIL_MAX = 14;
 function drainEvents() {
   for (const e of match.events) {
     if (e.type === "paddle") {
-      fx.push({ x: e.x, y: e.y, life: 1, color: colorOf(e.id), r: 26 });
-    } else if (e.type === "goal") {
-      wallFlash[e.wall] = 1;
-      fx.push({ x: e.x, y: e.y, life: 1, color: "#ff2e88", r: 60 });
+      fx.push({ kind: "ring", x: e.x, y: e.y, life: 1, color: colorOf(e.id), r: 26 });
+    } else if (e.type === "hit") {
+      sideFlash[e.side] = 1;
+      const c = damageColor(e.hp) || "#ff2e88";
+      fx.push({ kind: "ring", x: e.x, y: e.y, life: 1, color: c, r: 54 });
       renderHud();
-    } else if (e.type === "eliminated") {
+    } else if (e.type === "destroyed") {
+      // A burst of shards along the dead wall, so the side visibly breaks rather than
+      // silently vanishing on the next frame.
+      const g = sideGeometry(match.sides, e.side);
+      for (let i = 0; i < 14; i++) {
+        const f = i / 13;
+        fx.push({
+          kind: "shard", life: 1,
+          x: g.a.x + g.dx * (g.len * f),
+          y: g.a.y + g.dy * (g.len * f),
+          vx: g.nx * (60 + Math.random() * 220) + g.dx * (Math.random() - 0.5) * 160,
+          vy: g.ny * (60 + Math.random() * 220) + g.dy * (Math.random() - 0.5) * 160,
+          color: "#ff2e88",
+        });
+      }
       renderHud();
-    } else if (e.type === "serve") {
+    } else if (e.type === "reshape") {
+      sideFlash = {};
+      renderHud();
+    } else if (e.type === "serve" || e.type === "escape" || e.type === "stalemate") {
       trail.length = 0;
     } else if (e.type === "win") {
       const label = e.id === null ? "Game over" : nameOf(e.id) + " wins";
@@ -326,134 +352,120 @@ function drainEvents() {
 function draw() {
   ctx.clearRect(0, 0, cssW, cssH);
 
-  drawField();
+  drawArena();
   drawWalls();
-  for (const p of match.players.values()) drawPaddle(p);
+  for (const p of match.players.values()) if (!p.out) drawPaddle(p);
   drawTrail();
-  drawBall();
+  if (match.phase === "rally") drawBall();
   drawFx();
   drawServeCountdown();
 }
 
-/** The court: a dark plate, a grid, and a centre mark. */
-function drawField() {
+/** The court interior: a dark plate clipped to the polygon, plus a centre mark. */
+function drawArena() {
+  const n = match.sides;
+  const verts = verticesFor(n);
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(tx(verts[0].x), ty(verts[0].y));
+  for (let i = 1; i < n; i++) ctx.lineTo(tx(verts[i].x), ty(verts[i].y));
+  ctx.closePath();
+  ctx.clip();
+
   const g = ctx.createRadialGradient(
-    tx(FIELD / 2), ty(FIELD / 2), 0,
-    tx(FIELD / 2), ty(FIELD / 2), FIELD * 0.62 * scale
+    tx(CENTER), ty(CENTER), 0,
+    tx(CENTER), ty(CENTER), RADIUS * scale
   );
   g.addColorStop(0, "#101425");
   g.addColorStop(1, "#070912");
   ctx.fillStyle = g;
   ctx.fillRect(tx(0), ty(0), FIELD * scale, FIELD * scale);
 
-  // A faint grid gives the ball's speed something to read against; without it a fast ball on
-  // a flat plate looks like it is barely moving.
+  // Concentric rings give the ball's speed something to read against; without them a fast
+  // ball on a flat plate looks like it is barely moving.
   ctx.strokeStyle = "rgba(120,160,220,.07)";
   ctx.lineWidth = 1;
-  ctx.beginPath();
-  for (let i = 1; i < 10; i++) {
-    const at = (FIELD / 10) * i;
-    ctx.moveTo(tx(at), ty(0)); ctx.lineTo(tx(at), ty(FIELD));
-    ctx.moveTo(tx(0), ty(at)); ctx.lineTo(tx(FIELD), ty(at));
+  for (let i = 1; i <= 4; i++) {
+    ctx.beginPath();
+    ctx.arc(tx(CENTER), ty(CENTER), (RADIUS / 5) * i * scale, 0, Math.PI * 2);
+    ctx.stroke();
   }
-  ctx.stroke();
+  ctx.restore();
 
   ctx.strokeStyle = "rgba(53,240,224,.12)";
   ctx.lineWidth = Math.max(1, 2 * scale);
   ctx.beginPath();
-  ctx.arc(tx(FIELD / 2), ty(FIELD / 2), 70 * scale, 0, Math.PI * 2);
+  ctx.arc(tx(CENTER), ty(CENTER), 60 * scale, 0, Math.PI * 2);
   ctx.stroke();
 }
 
 /**
- * The four walls.
+ * The polygon's sides.
  *
- * A defended wall is drawn in its player's colour and an open one stays dim, so it is obvious
- * at a glance which edges are live goals and which are just bouncy sides.
+ * A defended side is drawn in its damage colour — green, yellow, then red — which is the
+ * single most important read on the field: it tells every player who is nearly out. An
+ * unclaimed side stays dim, so it is obvious which edges are live targets and which are just
+ * bouncy scenery.
  */
 function drawWalls() {
-  for (const wall of SEAT_ORDER) {
-    const w = WALLS[wall];
-    const keeper = [...match.players.values()].find((p) => p.wall === wall && !p.out);
-    const flash = wallFlash[wall];
+  const n = match.sides;
+  for (let i = 0; i < n; i++) {
+    const g = sideGeometry(n, i);
+    const keeper = defenderOf(match, i);
+    const flash = sideFlash[i] || 0;
 
-    let color = "rgba(120,160,220,.22)";
-    if (keeper) color = colorOf(keeper.id);
-    else if ([...match.players.values()].some((p) => p.wall === wall)) color = "rgba(255,46,136,.35)";
+    const color = keeper ? damageColor(keeper.hp) : "rgba(120,160,220,.20)";
+    if (!color) continue;   // destroyed: a real gap, drawn as nothing at all
 
-    const thick = Math.max(2, 5 * scale);
     ctx.save();
-    ctx.fillStyle = color;
-    ctx.globalAlpha = keeper ? 0.55 : 1;
-    if (keeper) { ctx.shadowColor = color; ctx.shadowBlur = 18 * scale; }
+    ctx.strokeStyle = color;
+    ctx.lineWidth = Math.max(2, 6 * scale);
+    ctx.lineCap = "round";
+    if (keeper) { ctx.shadowColor = color; ctx.shadowBlur = (14 + flash * 26) * scale; }
+    ctx.beginPath();
+    ctx.moveTo(tx(g.a.x), ty(g.a.y));
+    ctx.lineTo(tx(g.b.x), ty(g.b.y));
+    ctx.stroke();
 
-    if (w.axis === "x") {
-      const y = w.normal > 0 ? ty(0) : ty(FIELD) - thick;
-      ctx.fillRect(tx(0), y, FIELD * scale, thick);
-    } else {
-      const x = w.normal > 0 ? tx(0) : tx(FIELD) - thick;
-      ctx.fillRect(x, ty(0), thick, FIELD * scale);
-    }
-
-    // The goal flash washes inward from the wall that was beaten, so a conceded point is
-    // impossible to miss even if you were watching the other side of the table.
+    // The hit flash washes inward from the wall that took it, so damage is impossible to miss
+    // even if you were watching the other side of the arena.
     if (flash > 0) {
-      const depth = FIELD * 0.28 * scale;
-      let gx0, gy0, gx1, gy1;
-      if (w.axis === "x") {
-        gy0 = w.normal > 0 ? ty(0) : ty(FIELD);
-        gy1 = gy0 + w.normal * depth;
-        gx0 = gx1 = tx(0);
-      } else {
-        gx0 = w.normal > 0 ? tx(0) : tx(FIELD);
-        gx1 = gx0 + w.normal * depth;
-        gy0 = gy1 = ty(0);
-      }
-      const grad = ctx.createLinearGradient(gx0, gy0, gx1, gy1);
-      grad.addColorStop(0, "rgba(255,46,136," + (flash * 0.4).toFixed(3) + ")");
+      const depth = RADIUS * 0.3;
+      const grad = ctx.createLinearGradient(
+        tx(g.mx), ty(g.my),
+        tx(g.mx + g.nx * depth), ty(g.my + g.ny * depth)
+      );
+      grad.addColorStop(0, "rgba(255,46,136," + (flash * 0.34).toFixed(3) + ")");
       grad.addColorStop(1, "rgba(255,46,136,0)");
-      ctx.globalAlpha = 1;
       ctx.shadowBlur = 0;
       ctx.fillStyle = grad;
-      if (w.axis === "x") {
-        ctx.fillRect(tx(0), Math.min(gy0, gy1), FIELD * scale, depth);
-      } else {
-        ctx.fillRect(Math.min(gx0, gx1), ty(0), depth, FIELD * scale);
-      }
+      ctx.beginPath();
+      ctx.moveTo(tx(g.a.x), ty(g.a.y));
+      ctx.lineTo(tx(g.b.x), ty(g.b.y));
+      ctx.lineTo(tx(g.b.x + g.nx * depth), ty(g.b.y + g.ny * depth));
+      ctx.lineTo(tx(g.a.x + g.nx * depth), ty(g.a.y + g.ny * depth));
+      ctx.closePath();
+      ctx.fill();
     }
     ctx.restore();
   }
 }
 
 function drawPaddle(p) {
-  const box = paddleBox(p);
+  const quad = paddleQuad(match, p);
   const color = colorOf(p.id);
 
   ctx.save();
-  if (p.out) {
-    // An eliminated player's paddle stays on the table as a dim ghost, so the seat is still
-    // legible — but it no longer stops anything, and it must not look like it does.
-    ctx.globalAlpha = 0.18;
-    ctx.fillStyle = "#56628a";
-  } else {
-    ctx.fillStyle = color;
-    ctx.shadowColor = color;
-    ctx.shadowBlur = 22 * scale;
-  }
-  roundRect(tx(box.x), ty(box.y), box.w * scale, box.h * scale, Math.min(box.w, box.h) * 0.5 * scale);
+  ctx.fillStyle = color;
+  ctx.shadowColor = color;
+  ctx.shadowBlur = 22 * scale;
+  ctx.beginPath();
+  ctx.moveTo(tx(quad[0].x), ty(quad[0].y));
+  for (let i = 1; i < quad.length; i++) ctx.lineTo(tx(quad[i].x), ty(quad[i].y));
+  ctx.closePath();
   ctx.fill();
   ctx.restore();
-}
-
-function roundRect(x, y, w, h, r) {
-  const rad = Math.max(0, Math.min(r, w / 2, h / 2));
-  ctx.beginPath();
-  ctx.moveTo(x + rad, y);
-  ctx.arcTo(x + w, y, x + w, y + h, rad);
-  ctx.arcTo(x + w, y + h, x, y + h, rad);
-  ctx.arcTo(x, y + h, x, y, rad);
-  ctx.arcTo(x, y, x + w, y, rad);
-  ctx.closePath();
 }
 
 function drawTrail() {
@@ -485,14 +497,23 @@ function drawBall() {
 function drawFx() {
   for (const f of fx) {
     ctx.save();
-    ctx.globalAlpha = f.life;
-    ctx.strokeStyle = f.color;
-    ctx.shadowColor = f.color;
-    ctx.shadowBlur = 16 * scale;
-    ctx.lineWidth = Math.max(1, 3 * scale * f.life);
-    ctx.beginPath();
-    ctx.arc(tx(f.x), ty(f.y), f.r * (1.4 - f.life) * scale, 0, Math.PI * 2);
-    ctx.stroke();
+    ctx.globalAlpha = Math.max(0, f.life);
+    if (f.kind === "shard") {
+      ctx.fillStyle = f.color;
+      ctx.shadowColor = f.color;
+      ctx.shadowBlur = 14 * scale;
+      ctx.beginPath();
+      ctx.arc(tx(f.x), ty(f.y), Math.max(1, 5 * f.life * scale), 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      ctx.strokeStyle = f.color;
+      ctx.shadowColor = f.color;
+      ctx.shadowBlur = 16 * scale;
+      ctx.lineWidth = Math.max(1, 3 * scale * f.life);
+      ctx.beginPath();
+      ctx.arc(tx(f.x), ty(f.y), f.r * (1.4 - f.life) * scale, 0, Math.PI * 2);
+      ctx.stroke();
+    }
     ctx.restore();
   }
 }
@@ -510,7 +531,7 @@ function drawServeCountdown() {
     getComputedStyle(document.body).getPropertyValue("--font-display");
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  ctx.fillText(String(n), tx(FIELD / 2), ty(FIELD / 2));
+  ctx.fillText(String(n), tx(CENTER), ty(CENTER));
   ctx.restore();
 }
 
@@ -534,9 +555,12 @@ function frame(ts) {
     if (trail.length > TRAIL_MAX) trail.shift();
   }
 
-  for (const f of fx) f.life -= dt * 2.2;
+  for (const f of fx) {
+    f.life -= dt * (f.kind === "shard" ? 1.1 : 2.2);
+    if (f.kind === "shard") { f.x += f.vx * dt; f.y += f.vy * dt; f.vy += 220 * dt; }
+  }
   for (let i = fx.length - 1; i >= 0; i--) if (fx[i].life <= 0) fx.splice(i, 1);
-  for (const k in wallFlash) if (wallFlash[k] > 0) wallFlash[k] = Math.max(0, wallFlash[k] - dt * 1.8);
+  for (const k in sideFlash) if (sideFlash[k] > 0) sideFlash[k] = Math.max(0, sideFlash[k] - dt * 1.8);
 
   draw();
   broadcastState();
@@ -549,9 +573,9 @@ renderHud();
 /* --------------------------------------------------------------- test mode */
 
 if (TEST) {
-  // Four local paddles. Bottom: A/D. Top: J/L. Left: W/S. Right: I/K. Enter restarts.
-  for (let i = 1; i <= 4; i++) addPlayer(match, i);
-  assignSeats(match);
+  // N local paddles, ?test=N (default 4, max 8). Each player gets an adjacent key pair on the
+  // keyboard's home row and the row above, in seat order.
+  for (let i = 1; i <= TEST_N; i++) addPlayer(match, i);
   renderHud();
   restart(match);
   showOverlay(null);
@@ -560,13 +584,17 @@ if (TEST) {
   // game keeps nothing on the global.
   window.__match = match;
 
-  // Seats are assigned in SEAT_ORDER, so device 1 is bottom, 2 top, 3 left, 4 right.
-  const keys = {
-    KeyA: [1, -1], KeyD: [1, 1],
-    KeyJ: [2, -1], KeyL: [2, 1],
-    KeyW: [3, -1], KeyS: [3, 1],
-    KeyI: [4, -1], KeyK: [4, 1],
-  };
+  // Seat i gets keys[i]: one pair per player, in the order seats are assigned.
+  const pairs = [
+    ["KeyA", "KeyD"], ["KeyJ", "KeyL"], ["KeyW", "KeyS"], ["KeyI", "KeyK"],
+    ["KeyF", "KeyH"], ["KeyN", "KeyM"], ["KeyT", "KeyY"], ["KeyO", "KeyP"],
+  ];
+  const keys = {};
+  for (let i = 1; i <= TEST_N; i++) {
+    const [neg, pos] = pairs[i - 1];
+    keys[neg] = [i, -1];
+    keys[pos] = [i, 1];
+  }
   const down = new Set();
 
   function applyKeys() {
@@ -575,7 +603,9 @@ if (TEST) {
       const k = keys[code];
       if (k) sum[k[0]] = (sum[k[0]] || 0) + k[1];
     }
-    for (let id = 1; id <= 4; id++) setInput(match, id, Math.max(-1, Math.min(1, sum[id] || 0)));
+    for (let id = 1; id <= TEST_N; id++) {
+      setInput(match, id, Math.max(-1, Math.min(1, sum[id] || 0)));
+    }
   }
 
   addEventListener("keydown", (e) => {

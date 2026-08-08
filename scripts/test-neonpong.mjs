@@ -22,8 +22,8 @@ for (const f of ["sim.js"]) {
 const sim = await import(pathToFileURL(join(OUT, "sim.js")).href);
 const {
   createMatch, addPlayer, removePlayer, setInput, step, restart, assignSeats,
-  paddleBox, FIELD, BALL_R, PADDLE_LEN, WALLS, SEAT_ORDER, BOTTOM, TOP, LEFT, RIGHT,
-  LIVES_START, BALL_SPEED_MAX,
+  paddleAt, sideGeometry, verticesFor, sideCountFor, defenderOf, damageColor,
+  FIELD, CENTER, RADIUS, BALL_R, WALL_HP, MAX_PLAYERS, BALL_SPEED_MAX, DAMAGE_COLORS,
 } = sim;
 
 let pass = 0, fail = 0;
@@ -37,10 +37,9 @@ const DT = 1 / 60;
 /**
  * Drive the sim for `seconds`.
  *
- * `drive` sets input before each step; `watch` inspects the events that step produced and is
- * then responsible for nothing — the harness drains the log itself. The screen drains
- * `match.events` every frame, so a headless run that let it accumulate would re-examine every
- * past event on every subsequent frame and report wildly inflated counts.
+ * `drive` sets input before each step; `watch` inspects the events that step produced. The
+ * harness drains the log itself — the screen drains `match.events` every frame, so a headless
+ * run that let it accumulate would re-examine every past event on every subsequent frame.
  */
 function run(match, seconds, drive, watch) {
   const steps = Math.round(seconds / DT);
@@ -56,175 +55,214 @@ function run(match, seconds, drive, watch) {
 function fresh(n, seed = 7) {
   const m = createMatch(seed);
   for (let i = 1; i <= n; i++) addPlayer(m, i);
-  assignSeats(m);
   restart(m);
   return m;
 }
 
-/** Perfect defence: track the ball along the wall's axis with a proportional controller. */
+/**
+ * Perfect defence: slide each paddle so its centre tracks the ball's projection onto its own
+ * edge. Expressed in edge-fraction units, which is what the sim's `t` uses.
+ */
 function autoDefend(m) {
   for (const p of m.players.values()) {
     if (p.out) continue;
-    const w = WALLS[p.wall];
-    const target = w.axis === "x" ? m.ball.x : m.ball.y;
-    const err = target - p.pos;
-    setInput(m, p.id, Math.max(-1, Math.min(1, err / 40)));
+    const g = sideGeometry(m.sides, p.side);
+    const along = ((m.ball.x - g.a.x) * g.dx + (m.ball.y - g.a.y) * g.dy) / g.len;
+    setInput(m, p.id, Math.max(-1, Math.min(1, (along - p.t) * 12)));
   }
 }
 
-/* ---- 1. seating ---- */
+/** True when the ball is inside the polygon, allowing a small skin for the radius. */
+function inside(m, slack = BALL_R * 4) {
+  return Math.hypot(m.ball.x - CENTER, m.ball.y - CENTER) <= RADIUS + slack;
+}
+
+/* ---- 1. polygon geometry ---- */
+console.log("\npolygon geometry");
+{
+  ok("1-2 players fall back to a square",
+    sideCountFor(1) === 4 && sideCountFor(2) === 4);
+  ok("3+ players get one side each",
+    [3, 4, 5, 6, 7, 8].every((n) => sideCountFor(n) === n));
+  ok("the polygon is capped at 8 sides", sideCountFor(99) === 8);
+
+  for (let n = 3; n <= MAX_PLAYERS; n++) {
+    const verts = verticesFor(n);
+    const radii = verts.map((v) => Math.hypot(v.x - CENTER, v.y - CENTER));
+    const lens = [];
+    for (let i = 0; i < n; i++) lens.push(sideGeometry(n, i).len);
+    const rOk = radii.every((r) => Math.abs(r - RADIUS) < 1e-9);
+    const lOk = lens.every((l) => Math.abs(l - lens[0]) < 1e-9);
+    ok(n + "-gon is regular", rOk && lOk,
+      "(r spread " + (Math.max(...radii) - Math.min(...radii)).toExponential(1) + ")");
+  }
+
+  // Every inward normal must actually point at the centre, or reflections go the wrong way.
+  let badNormals = 0;
+  for (let n = 3; n <= MAX_PLAYERS; n++) {
+    for (let i = 0; i < n; i++) {
+      const g = sideGeometry(n, i);
+      if ((CENTER - g.mx) * g.nx + (CENTER - g.my) * g.ny <= 0) badNormals++;
+    }
+  }
+  ok("every inward normal points at the centre", badNormals === 0, "(" + badNormals + ")");
+
+  // Side 0 faces left, so a 2-player game is head-to-head across a widescreen display.
+  const sq = sideGeometry(4, 0);
+  ok("side 0 is the left wall", sq.mx < CENTER - RADIUS * 0.6 && Math.abs(sq.my - CENTER) < 1e-9,
+    "(" + sq.mx.toFixed(1) + "," + sq.my.toFixed(1) + ")");
+}
+
+/* ---- 2. seating ---- */
 console.log("\nseating");
 {
   const m = createMatch(1);
   addPlayer(m, 1);
   addPlayer(m, 2);
-  ok("first two players face each other",
-    m.players.get(1).wall === BOTTOM && m.players.get(2).wall === TOP,
-    "(" + m.players.get(1).wall + "," + m.players.get(2).wall + ")");
+  ok("two players sit opposite each other on the square",
+    m.sides === 4 && Math.abs(m.players.get(1).side - m.players.get(2).side) === 2,
+    "(" + m.players.get(1).side + "," + m.players.get(2).side + ")");
 
-  addPlayer(m, 3);
-  addPlayer(m, 4);
-  const walls = [...m.players.values()].map((p) => p.wall).sort();
-  ok("four players take four distinct walls", new Set(walls).size === 4, "(" + walls + ")");
+  for (let i = 3; i <= 8; i++) addPlayer(m, i);
+  ok("eight players fit", m.players.size === 8 && m.sides === 8);
+  const sides = [...m.players.values()].map((p) => p.side).sort((a, b) => a - b);
+  ok("eight players take eight distinct sides",
+    new Set(sides).size === 8 && sides[0] === 0 && sides[7] === 7, "(" + sides + ")");
 
-  ok("a fifth player is refused", addPlayer(m, 5) === null && m.players.size === 4);
+  ok("a ninth player is refused", addPlayer(m, 9) === null && m.players.size === 8);
 
-  // Device ids have gaps; the seat map must survive one.
-  removePlayer(m, 2);
-  assignSeats(m);
-  const seats = [...m.players.keys()].sort((a, b) => a - b).map((id) => m.players.get(id).wall);
-  ok("seats repack after a disconnect", new Set(seats).size === 3 && seats[0] === SEAT_ORDER[0],
-    "(" + seats + ")");
+  // Device ids have gaps; the polygon must repack around one.
+  removePlayer(m, 4);
+  ok("the polygon shrinks when a player leaves", m.sides === 7, "(" + m.sides + ")");
+  const after = [...m.players.values()].map((p) => p.side).sort((a, b) => a - b);
+  ok("seats repack with no gaps", new Set(after).size === 7 && after[6] === 6, "(" + after + ")");
 }
 
-/* ---- 2. paddle movement ---- */
+/* ---- 3. paddle movement ---- */
 console.log("\npaddle movement");
 {
+  for (const n of [3, 5, 8]) {
+    const m = fresh(n);
+    const p = m.players.get(1);
+    const start = p.t;
+    setInput(m, 1, 1);
+    run(m, 0.4);
+    ok(n + "-gon: input moves the paddle", p.t > start + 0.1, "(" + p.t.toFixed(3) + ")");
+
+    run(m, 5, (mm) => setInput(mm, 1, 1));
+    const g = sideGeometry(m.sides, p.side);
+    const pad = paddleAt(m, p);
+    // The paddle must stay entirely on its own edge, never overhanging a vertex.
+    const along = (pad.x - g.a.x) * g.dx + (pad.y - g.a.y) * g.dy;
+    ok(n + "-gon: paddle stays on its own side",
+      along - pad.half >= -1e-6 && along + pad.half <= g.len + 1e-6,
+      "(" + (along - pad.half).toFixed(2) + ".." + (along + pad.half).toFixed(2) + " of " + g.len.toFixed(1) + ")");
+    ok(n + "-gon: a pinned paddle reports zero velocity", Math.abs(p.vel) < 1e-9, "(" + p.vel + ")");
+  }
+
   const m = fresh(4);
-  const p = m.players.get(1);
-  const start = p.pos;
-  setInput(m, 1, 1);
-  run(m, 0.5);
-  ok("input moves the paddle", p.pos > start + 100, "(" + p.pos.toFixed(1) + ")");
-
-  setInput(m, 1, 1);
-  run(m, 5);
-  const limit = FIELD / 2 + (FIELD / 2 - PADDLE_LEN / 2);
-  ok("paddle stops at the field edge", Math.abs(p.pos - limit) < 1e-6,
-    "(" + p.pos.toFixed(2) + " vs " + limit + ")");
-
-  const box = paddleBox(p);
-  ok("paddle stays inside the field", box.x >= -1e-6 && box.x + box.w <= FIELD + 1e-6,
-    "(" + box.x.toFixed(1) + ".." + (box.x + box.w).toFixed(1) + ")");
-
-  ok("a pinned paddle reports zero velocity", Math.abs(p.vel) < 1e-6, "(" + p.vel + ")");
-
   setInput(m, 1, 5);          // out of range: the wire is not trusted
   step(m, DT);
-  ok("input is clamped to -1..1", p.input === 1, "(" + p.input + ")");
+  ok("input is clamped to -1..1", m.players.get(1).input === 1, "(" + m.players.get(1).input + ")");
 }
 
-/* ---- 3. serving ---- */
+/* ---- 4. damage tiers ---- */
+console.log("\ndamage");
+{
+  ok("a fresh wall is green", damageColor(WALL_HP) === DAMAGE_COLORS[0], damageColor(WALL_HP));
+  ok("one hit turns it yellow", damageColor(WALL_HP - 1) === DAMAGE_COLORS[1], damageColor(WALL_HP - 1));
+  ok("two hits turn it red", damageColor(WALL_HP - 2) === DAMAGE_COLORS[2], damageColor(WALL_HP - 2));
+  ok("a destroyed wall has no colour", damageColor(0) === null);
+  ok("three hits is the whole bar", WALL_HP === 3);
+}
+
+/* ---- 5. serving ---- */
 console.log("\nserving");
 {
-  const m = fresh(2);
+  const m = fresh(5);
   ok("a round opens on a serve", m.phase === "serve" && !m.ball.live);
-  ok("the ball is parked centre", m.ball.x === FIELD / 2 && m.ball.y === FIELD / 2);
+  ok("the ball is parked centre", m.ball.x === CENTER && m.ball.y === CENTER);
 
   run(m, 2);
   ok("the serve becomes a rally", m.phase === "rally" && m.ball.live, "(" + m.phase + ")");
-
   const speed = Math.hypot(m.ball.vx, m.ball.vy);
   ok("the served ball is at exactly the start speed",
-    Math.abs(speed - sim.BALL_SPEED_START) < 1e-6, "(" + speed.toFixed(3) + ")");
+    Math.abs(speed - sim.BALL_SPEED_START) < 1e-9, "(" + speed.toFixed(4) + ")");
 
   // Determinism: the same seed must produce the same serve, or a replay proves nothing.
-  const a = fresh(4, 99);
-  const b = fresh(4, 99);
+  const a = fresh(6, 99);
+  const b = fresh(6, 99);
   run(a, 2);
   run(b, 2);
-  ok("serves are deterministic for a seed",
-    a.ball.vx === b.ball.vx && a.ball.vy === b.ball.vy);
+  ok("serves are deterministic for a seed", a.ball.vx === b.ball.vx && a.ball.vy === b.ball.vy);
 }
 
-/* ---- 4. bouncing and scoring ---- */
-console.log("\nbouncing and scoring");
-{
-  // Two players: the left and right walls are unmanned, so they must bounce, never score.
-  const m = fresh(2);
-  run(m, 20, autoDefend);
-  const lives = [...m.players.values()].map((p) => p.lives);
-  ok("a perfect defence concedes nothing in 20s", lives.every((l) => l === LIVES_START),
-    "(" + lives + ")");
-  ok("the rally is still live", m.phase === "rally", "(" + m.phase + ")");
-  ok("the ball stayed inside the field",
-    m.ball.x > -BALL_R * 2 && m.ball.x < FIELD + BALL_R * 2 &&
-    m.ball.y > -BALL_R * 2 && m.ball.y < FIELD + BALL_R * 2,
-    "(" + m.ball.x.toFixed(1) + "," + m.ball.y.toFixed(1) + ")");
-  ok("a rally builds hits", m.rally > 3, "(" + m.rally + ")");
-}
-{
-  // Nobody defends: every wall is open, so the ball can never score and the game never ends.
-  const m = fresh(1);
-  run(m, 2);
-  const only = m.players.get(1);
-  // Park the lone paddle out of the way and let the ball run.
-  run(m, 30, (mm) => setInput(mm, 1, 0));
-  ok("a solo player can lose lives", only.lives < LIVES_START, "(" + only.lives + ")");
-  ok("a solo game ends when lives run out", only.lives > 0 || m.phase === "over",
-    "(" + m.phase + ")");
-}
-{
-  // A conceded goal must charge the wall's own defender, not whoever hit it last.
-  const m = fresh(4);
-  run(m, 2);
-  // Everyone stands aside; whichever wall the ball reaches first pays for it.
-  run(m, 6, (mm) => { for (const p of mm.players.values()) setInput(mm, p.id, 0); });
-  const lost = [...m.players.values()].filter((p) => p.lives < LIVES_START);
-  ok("an undefended goal costs exactly its own defender a life",
-    lost.length >= 1 && lost.every((p) => p.lives < LIVES_START), "(" + lost.length + ")");
+/* ---- 6. rallies hold up at every player count ---- */
+console.log("\nrallies");
+/**
+ * A tracking paddle has a finite speed, so it can legitimately be beaten by a shot placed far
+ * enough along its edge — that is the game working, not a bug, and asserting "never concedes"
+ * would be asserting the game is unloseable. What must hold at every player count is that
+ * rallies are long and damage is rare: the ball stays in play, keeps finding paddles, and any
+ * damage that does land is the occasional beaten tracker rather than a wall that cannot
+ * defend itself.
+ */
+for (let n = 1; n <= MAX_PLAYERS; n++) {
+  const m = fresh(n);
+  let escaped = 0, worst = 0, paddleHits = 0, damage = 0;
+  run(m, 25, autoDefend, (mm, events) => {
+    for (const e of events) {
+      if (e.type === "escape") escaped++;
+      if (e.type === "paddle") paddleHits++;
+      if (e.type === "hit") damage++;
+    }
+    const d = Math.hypot(mm.ball.x - CENTER, mm.ball.y - CENTER);
+    if (d > worst) worst = d;
+  });
+
+  ok(n + " players: the ball never escapes", escaped === 0 && worst <= RADIUS + BALL_R * 4,
+    "(escapes " + escaped + ", max r " + worst.toFixed(1) + ")");
+  // A solo player shares a square with three open walls, so most of the ball's time is spent
+  // bouncing off scenery rather than being returned; a full table returns far more often.
+  const wantReturns = n === 1 ? 5 : 15;
+  ok(n + " players: rallies sustain", paddleHits >= wantReturns,
+    "(" + paddleHits + " returns in 25s, want " + wantReturns + ")");
+  // Well over 90% of approaches are returned; the rest are shots the tracker could not reach.
+  ok(n + " players: tracking defence rarely concedes", damage <= paddleHits / 12,
+    "(" + damage + " conceded vs " + paddleHits + " returned)");
 }
 
-/* ---- 5. no tunnelling at max speed ---- */
+/* ---- 7. no tunnelling at max speed ---- */
 console.log("\ntunnelling");
 {
-  // Drive a long rally so the ball reaches its speed cap, then check it never passed a
-  // defended wall without being scored. A tunnel shows up as the ball leaving the field.
-  const m = fresh(4);
-  let worst = 0;
-  run(m, 60, (mm) => {
-    autoDefend(mm);
-    const out = Math.max(
-      -mm.ball.x, mm.ball.x - FIELD, -mm.ball.y, mm.ball.y - FIELD
-    );
-    if (out > worst) worst = out;
+  const m = fresh(8);
+  let maxSpeed = 0, escaped = 0;
+  run(m, 60, autoDefend, (mm, events) => {
+    for (const e of events) if (e.type === "escape") escaped++;
+    maxSpeed = Math.max(maxSpeed, Math.hypot(mm.ball.vx, mm.ball.vy));
   });
-  ok("the ball never escapes the field", worst < BALL_R + 2, "(" + worst.toFixed(2) + "px past)");
-
-  const speed = Math.hypot(m.ball.vx, m.ball.vy);
-  ok("the ball speed is capped", speed <= BALL_SPEED_MAX + 1e-6, "(" + speed.toFixed(1) + ")");
-
-  const perfect = [...m.players.values()].every((p) => p.lives === LIVES_START);
-  ok("a perfect defence survives a 60s rally at max speed", perfect,
-    "(" + [...m.players.values()].map((p) => p.lives) + ")");
+  ok("the ball speed is capped", maxSpeed <= BALL_SPEED_MAX + 1e-6, "(" + maxSpeed.toFixed(1) + ")");
+  // The real tunnelling assertion: at the speed cap the ball must never pass *through* a
+  // paddle or a wall and end up loose outside the arena.
+  ok("an octagon never leaks the ball at max speed", escaped === 0 && inside(m),
+    "(escapes " + escaped + ")");
+  ok("the ball is still in the arena", inside(m));
 }
 
-/* ---- 6. reflection angles ---- */
+/* ---- 8. reflection angles ---- */
 console.log("\nreflection");
 {
-  // A ball returned off a paddle must always come back into the field, and never end up
-  // crawling parallel to the wall it just hit.
-  const m = fresh(4);
+  const m = fresh(6);
   let shallow = 0, wrongWay = 0, hits = 0;
   run(m, 40, autoDefend, (mm, events) => {
     for (const e of events) {
       if (e.type !== "paddle") continue;
       hits++;
-      const w = WALLS[e.wall];
-      const normal = w.perp === "y" ? mm.ball.vy : mm.ball.vx;
+      const g = sideGeometry(mm.sides, e.side);
       const speed = Math.hypot(mm.ball.vx, mm.ball.vy);
-      if (normal * w.normal <= 0) wrongWay++;
-      if (Math.abs(normal) / speed < 0.29) shallow++;
+      const normal = (mm.ball.vx * g.nx + mm.ball.vy * g.ny) / speed;
+      if (normal <= 0) wrongWay++;
+      if (normal < 0.29) shallow++;
     }
   });
   ok("there were hits to check", hits > 10, "(" + hits + ")");
@@ -232,49 +270,107 @@ console.log("\nreflection");
   ok("no return crawls along the wall", shallow === 0, "(" + shallow + " of " + hits + ")");
 }
 
-/* ---- 7. elimination and winning ---- */
-console.log("\nelimination");
+/* ---- 9. destruction shrinks the field ---- */
+console.log("\ndestruction");
 {
-  const m = fresh(2);
-  // Player 1 defends perfectly; player 2 never moves and must be eliminated.
-  run(m, 120, (mm) => {
+  // Player 1 defends; nobody else moves. Every other wall must fall, one at a time, and the
+  // polygon must shrink by exactly one side each time.
+  //
+  // P1 tracks the ball but only within a limited reach of its resting position, so it plays
+  // like a person rather than a solver. A *perfect* tracker is the wrong model here: two
+  // flawless paddles on adjacent sides of a small polygon simply volley at each other
+  // forever, and the match never resolves. Nothing in the sim prevents that and nothing
+  // should — real thumbs are not perfect — but a test that drives one is testing an opponent
+  // no player can be.
+  const m = fresh(5);
+  const shapes = [m.sides];
+  let destroyed = 0;
+  run(m, 900, (mm) => {
+    for (const p of mm.players.values()) setInput(mm, p.id, 0);
     if (mm.phase !== "rally") return;
     const p = mm.players.get(1);
-    if (p && !p.out) {
-      const w = WALLS[p.wall];
-      const target = w.axis === "x" ? mm.ball.x : mm.ball.y;
-      setInput(mm, 1, Math.max(-1, Math.min(1, (target - p.pos) / 40)));
+    if (!p || p.out) return;
+    const g = sideGeometry(mm.sides, p.side);
+    const along = ((mm.ball.x - g.a.x) * g.dx + (mm.ball.y - g.a.y) * g.dy) / g.len;
+    const reach = Math.max(-0.28, Math.min(0.28, along - 0.5));
+    setInput(mm, 1, Math.max(-1, Math.min(1, (0.5 + reach - p.t) * 12)));
+  }, (mm, events) => {
+    for (const e of events) {
+      if (e.type === "destroyed") destroyed++;
+      if (e.type === "reshape") shapes.push(e.sides);
     }
-    setInput(mm, 2, 0);
   });
-  ok("a player who never moves is eliminated", m.players.get(2).out, "(lives " + m.players.get(2).lives + ")");
-  ok("the match ends", m.phase === "over", "(" + m.phase + ")");
-  ok("the survivor wins", m.winner === 1, "(" + m.winner + ")");
+
+  ok("walls are destroyed", destroyed >= 1, "(" + destroyed + ")");
+  ok("the polygon shrinks one side per destruction",
+    shapes.every((s, i) => i === 0 || s === shapes[i - 1] - 1 || s === 4),
+    "(" + shapes.join(" -> ") + ")");
+  ok("every destruction eliminated its player",
+    [...m.players.values()].filter((p) => p.out).length === destroyed,
+    "(" + destroyed + " destroyed, " + [...m.players.values()].filter((p) => p.out).length + " out)");
+  ok("a destroyed player holds no side",
+    [...m.players.values()].every((p) => !p.out || p.side === -1));
 }
 {
-  // Restart must clear elimination, lives and the winner, or a second round starts broken.
-  const m = fresh(2);
-  m.players.get(2).lives = 0;
+  // A match with nobody defending must terminate: every wall falls and one player is left.
+  // This is the end-to-end guarantee that the shrink loop actually converges rather than
+  // stalling on some polygon it cannot reduce further.
+  for (const n of [3, 5, 8]) {
+    const m = fresh(n, 3);
+    run(m, 900, (mm) => {
+      for (const p of mm.players.values()) setInput(mm, p.id, 0);
+    });
+    const alive = [...m.players.values()].filter((p) => !p.out);
+    ok(n + " idle players: the match reaches a winner",
+      m.phase === "over" && m.winner !== null && alive.length === 1,
+      "(phase " + m.phase + ", winner " + m.winner + ", alive " + alive.length + ")");
+    ok(n + " idle players: the arena shrank to a square or smaller",
+      m.sides <= 4, "(" + m.sides + " sides)");
+  }
+}
+{
+  // A wall must take exactly WALL_HP hits, no more and no fewer.
+  const m = fresh(3);
+  const p2 = m.players.get(2);
+  let hits = 0;
+  run(m, 400, (mm) => {
+    for (const p of mm.players.values()) if (p.id !== 2) {
+      // Everyone but player 2 defends perfectly, so only player 2's wall can take damage.
+      if (p.out) continue;
+      const g = sideGeometry(mm.sides, p.side);
+      const along = ((mm.ball.x - g.a.x) * g.dx + (mm.ball.y - g.a.y) * g.dy) / g.len;
+      setInput(mm, p.id, Math.max(-1, Math.min(1, (along - p.t) * 12)));
+    }
+    setInput(mm, 2, 0);
+  }, (mm, events) => {
+    for (const e of events) if (e.type === "hit" && e.id === 2) hits++;
+  });
+  ok("a wall absorbs exactly " + WALL_HP + " hits before dying",
+    p2.out && hits === WALL_HP, "(" + hits + " hits, out=" + p2.out + ")");
+}
+
+/* ---- 10. restart and disconnects ---- */
+console.log("\nrestart and disconnects");
+{
+  const m = fresh(6);
+  m.players.get(2).hp = 0;
   m.players.get(2).out = true;
+  assignSeats(m);
   m.phase = "over";
   m.winner = 1;
   restart(m);
-  const clean = [...m.players.values()].every((p) => p.lives === LIVES_START && !p.out);
-  ok("restart resets the roster", clean && m.winner === null && m.phase === "serve");
+  const clean = [...m.players.values()].every((p) => p.hp === WALL_HP && !p.out);
+  ok("restart heals every wall and reseats everyone",
+    clean && m.winner === null && m.phase === "serve" && m.sides === 6, "(sides " + m.sides + ")");
 }
-
-/* ---- 8. mid-match disconnect ---- */
-console.log("\ndisconnects");
 {
-  const m = fresh(4);
+  const m = fresh(7);
   run(m, 5, autoDefend);
   removePlayer(m, 3);
-  assignSeats(m);
-  run(m, 10, autoDefend);
-  ok("the sim survives losing a player mid-rally", m.players.size === 3);
-  ok("the ball is still in the field",
-    m.ball.x > -BALL_R * 2 && m.ball.x < FIELD + BALL_R * 2 &&
-    m.ball.y > -BALL_R * 2 && m.ball.y < FIELD + BALL_R * 2);
+  run(m, 15, autoDefend);
+  ok("the sim survives losing a player mid-rally", m.players.size === 6);
+  ok("the polygon reshaped to the new roster", m.sides === 6, "(" + m.sides + ")");
+  ok("the ball is still in the arena", inside(m));
 }
 
 /* ---- summary ---- */

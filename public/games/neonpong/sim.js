@@ -1,55 +1,125 @@
 /**
  * Neon Pong — deterministic 2D sim.
  *
- * Pong for up to four players on the four walls of a square. Everything here is a pure
- * function of (state, input, dt): the screen owns the only copy and drives it from its own
- * frame loop, controllers send paddle intent and nothing else. No rigidbody physics — a ball
- * with a velocity, axis-aligned paddles, and hand-resolved reflections.
+ * Pong in the round, for up to eight players. Every player owns one side of a regular polygon
+ * and defends it with a paddle that slides along that edge. Each side takes three hits —
+ * green, yellow, red — and the fourth destroys it: the player is out and the polygon re-forms
+ * with one fewer side, so the field literally shrinks as the match goes on. Last player
+ * standing wins.
  *
- * Play space is a fixed FIELD x FIELD square in world units. The screen letterboxes it; the
- * sim never knows the pixel size.
+ * Everything here is a pure function of (state, input, dt): the screen owns the only copy and
+ * drives it from its own frame loop, controllers send paddle intent and nothing else. No
+ * rigidbody physics — a ball with a velocity, oriented paddle segments, and hand-resolved
+ * reflections against edge normals.
  *
- * Scoring is subtractive: everyone starts with the same number of lives and loses one when
- * the ball passes their own wall. The last player alive wins. That is the whole damage model
- * — there is no health and nothing else can eliminate you.
+ * The polygon is inscribed in a circle of radius FIELD/2 centred on (FIELD/2, FIELD/2). The
+ * screen letterboxes that square; the sim never knows the pixel size.
+ *
+ * Geometry note: with fewer than three players there is no polygon to build, so 1- and
+ * 2-player games run on a square with the unclaimed sides left open as plain bouncing walls.
+ * That keeps two-player Neon Pong the classic head-to-head game it should be.
  */
 
 /* ------------------------------------------------------------------- geometry */
 
-/** The playfield is a square; every wall is the same length, so no seat has an easier job. */
+/** The square the polygon is inscribed in. Also the circumscribed circle's diameter. */
 export const FIELD = 1000;
+export const CENTER = FIELD / 2;
+/** Circumradius. Every vertex of every polygon sits exactly this far from the centre. */
+export const RADIUS = FIELD / 2;
 
-/** Wall indices. Order matters: it is also the seating order as players join. */
-export const BOTTOM = 0;
-export const TOP = 1;
-export const LEFT = 2;
-export const RIGHT = 3;
+export const MIN_PLAYERS = 1;
+export const MAX_PLAYERS = 8;
 
 /**
- * Which axis a wall's paddle slides along, and which way its inward normal points.
+ * How many sides the arena has for a given number of live players.
  *
- * `axis` is "x" for the horizontal walls and "y" for the vertical ones — the coordinate the
- * paddle moves in. `normal` is +1 when the wall is at the low end of the perpendicular axis
- * and the field lies in the positive direction, -1 otherwise. Every reflection, every goal
- * test, and every paddle box is derived from this table rather than from four copies of
- * nearly-identical code, so a wall can never disagree with itself.
+ * Three is the smallest real polygon, so 1 and 2 players fall back to a square with open
+ * sides. From three up the side count tracks the player count exactly, which is the whole
+ * point: your side is yours, and when it dies the arena gets smaller.
  */
-export const WALLS = {
-  [BOTTOM]: { axis: "x", perp: "y", at: FIELD, normal: -1, label: "Bottom" },
-  [TOP]:    { axis: "x", perp: "y", at: 0,     normal: 1,  label: "Top" },
-  [LEFT]:   { axis: "y", perp: "x", at: 0,     normal: 1,  label: "Left" },
-  [RIGHT]:  { axis: "y", perp: "x", at: FIELD, normal: -1, label: "Right" },
-};
+export function sideCountFor(livePlayers) {
+  return livePlayers >= 3 ? Math.min(MAX_PLAYERS, livePlayers) : 4;
+}
 
-/** Seats fill in this order, so two players always face each other across the field. */
-export const SEAT_ORDER = [BOTTOM, TOP, LEFT, RIGHT];
+/**
+ * Vertices of a regular `n`-gon inscribed in the circle, in world space.
+ *
+ * The polygon is rotated so that side 0 faces left — with two players that puts the pair on
+ * the left and right of a widescreen display, which is the orientation a TV actually has.
+ * Every side, normal, and paddle position is derived from this one function, so the shape can
+ * never disagree with itself.
+ */
+export function verticesFor(n) {
+  const out = [];
+  // Side i spans vertex i to vertex i+1. Offsetting by half a step puts the *centre* of side
+  // 0 on the -x axis rather than a vertex, which is what makes side 0 a flat left wall.
+  const base = Math.PI - Math.PI / n;
+  for (let i = 0; i < n; i++) {
+    const a = base + (i * 2 * Math.PI) / n;
+    out.push({ x: CENTER + Math.cos(a) * RADIUS, y: CENTER + Math.sin(a) * RADIUS });
+  }
+  return out;
+}
+
+/**
+ * The geometry of one side of an `n`-gon: endpoints, midpoint, unit direction along the edge,
+ * inward unit normal, and length.
+ *
+ * `dir` runs from vertex i to vertex i+1 and is the axis a paddle slides along; `normal`
+ * points at the centre. Reflections, goal tests and paddle boxes all read this, so a side is
+ * described in exactly one place.
+ */
+export function sideGeometry(n, index) {
+  const verts = verticesFor(n);
+  const a = verts[index % n];
+  const b = verts[(index + 1) % n];
+  const ex = b.x - a.x;
+  const ey = b.y - a.y;
+  const len = Math.hypot(ex, ey);
+  const dx = ex / len;
+  const dy = ey / len;
+  // Both perpendiculars are candidates; pick the one pointing at the centre.
+  let nx = -dy;
+  let ny = dx;
+  const mx = (a.x + b.x) / 2;
+  const my = (a.y + b.y) / 2;
+  if ((CENTER - mx) * nx + (CENTER - my) * ny < 0) { nx = -nx; ny = -ny; }
+  return { a, b, mx, my, dx, dy, nx, ny, len };
+}
+
+/** Human-readable name for a side, used by the HUD and the controller. */
+export function sideLabel(n, index) {
+  if (n === 4) return ["Left", "Top", "Right", "Bottom"][index] || "Side " + (index + 1);
+  return "Side " + (index + 1);
+}
 
 /* --------------------------------------------------------------------- tuning */
 
-export const PADDLE_LEN = 190;      // along the wall
-export const PADDLE_THICK = 18;     // into the field
-export const PADDLE_INSET = 26;     // gap between the wall and the paddle's outer face
-const PADDLE_SPEED = 900;           // px/s at full stick deflection
+/**
+ * Paddle length as a fraction of the side it sits on.
+ *
+ * Proportional rather than absolute: an octagon's sides are much shorter than a triangle's,
+ * and a fixed length would either cover a whole octagon side or leave a triangle wide open.
+ * This way every player defends the same share of their own edge no matter how many are
+ * playing.
+ */
+const PADDLE_SPAN = 0.42;
+export const PADDLE_THICK = 18;
+/**
+ * Gap between the wall and the paddle's outer face, measured inward.
+ *
+ * Deliberately small. On a polygon every paddle sits on a ring inside the wall, and the
+ * deeper that ring is the further each paddle's ends poke across the approach path of the
+ * *neighbouring* sides. Tuned for a square this was 24, which on a pentagon or an octagon put
+ * the paddles so far in that a ball aimed at any gap was intercepted by a neighbour's tip
+ * before it could reach a wall — rallies became endless corner ricochets and no side could
+ * ever actually be hit. Keeping the paddle near its own wall keeps each player's reach on
+ * their own edge, which is the whole premise of the shape.
+ */
+export const PADDLE_INSET = 6;
+/** Paddle travel in edge-lengths per second, so every polygon plays at the same pace. */
+const PADDLE_SPEED_FRAC = 0.95;
 
 export const BALL_R = 13;
 
@@ -73,13 +143,42 @@ const SPIN_FROM_OFFSET = 0.85;
  */
 const MIN_NORMAL_SHARE = 0.30;
 
-const LIVES_START = 3;
+/**
+ * Hits a side absorbs before it is destroyed.
+ *
+ * Three survivable mistakes, each with its own colour: green when fresh, yellow after one,
+ * red after two. The fourth hit takes the side out entirely.
+ */
+export const WALL_HP = 3;
+
+/** Damage tiers, worst-first lookup. The screen reads this so the colours cannot drift. */
+export const DAMAGE_COLORS = ["#9dff4f", "#ffc247", "#ff2e88"];
+
+/**
+ * Colour for a side with `hp` remaining: green fresh, yellow at 2, red at 1.
+ * Returns null for a destroyed side, which is drawn as a gap rather than a wall.
+ */
+export function damageColor(hp) {
+  if (hp <= 0) return null;
+  return DAMAGE_COLORS[Math.max(0, Math.min(DAMAGE_COLORS.length - 1, WALL_HP - hp))];
+}
 
 /** Seconds between a goal and the next serve, so the point is legible before play resumes. */
 const T_SERVE = 1.15;
 
 /** Seconds after a rally starts before the ball may score, so a serve is never instant death. */
 const T_GRACE = 0.35;
+
+/**
+ * Longest a single rally may run before the ball is re-served.
+ *
+ * A polygon with paddles on every side can trap the ball in a closed orbit that never reaches
+ * a wall: each paddle returns it perfectly into the next, and the cycle repeats forever. It
+ * needs symmetric, near-static paddles, so live players rarely produce it — but "rarely" is
+ * not "never", and a rally that cannot end is a match that cannot end. Re-serving breaks the
+ * cycle without touching anyone's wall, so nobody is punished for the geometry.
+ */
+const T_RALLY_MAX = 30;
 
 /* ---------------------------------------------------------------------- state */
 
@@ -94,6 +193,8 @@ export function createMatch(seed) {
     ball: makeBall(),
     phase: "waiting",     // waiting | serve | rally | over
     winner: null,
+    /** Current polygon side count. Recomputed whenever the live roster changes. */
+    sides: 4,
     /** Countdown to the next serve, in seconds. Only meaningful in the "serve" phase. */
     serveIn: 0,
     /** Seconds the current rally has been live; the ball cannot score below T_GRACE. */
@@ -109,7 +210,7 @@ export function createMatch(seed) {
 }
 
 function makeBall() {
-  return { x: FIELD / 2, y: FIELD / 2, vx: 0, vy: 0, speed: BALL_SPEED_START, live: false };
+  return { x: CENTER, y: CENTER, vx: 0, vy: 0, speed: BALL_SPEED_START, live: false };
 }
 
 /**
@@ -125,37 +226,38 @@ function rand(match) {
 }
 
 /**
- * Seat a player at the next free wall.
+ * Seat a player. Returns the player, or null when the table is full.
  *
- * Seats are handed out in SEAT_ORDER rather than by join order alone, so the second player
- * always lands opposite the first and a two-player game is classic head-to-head Pong. Returns
- * the player, or null when the table is full.
+ * The seat index is assigned by `assignSeats`, which runs whenever the roster changes — a new
+ * arrival changes the polygon for everyone, so seats can never be handed out independently.
  */
 export function addPlayer(match, deviceId) {
   if (match.players.has(deviceId)) return match.players.get(deviceId);
-  const taken = new Set([...match.players.values()].map((p) => p.wall));
-  const wall = SEAT_ORDER.find((w) => !taken.has(w));
-  if (wall === undefined) return null;
+  if (match.players.size >= MAX_PLAYERS) return null;
 
   const p = {
     id: deviceId,
-    wall,
-    /** Paddle centre along the wall's axis, in world units. */
-    pos: FIELD / 2,
-    /** Velocity along the wall, carried into the ball as spin. */
+    /** Which side of the polygon this player defends, 0..sides-1. */
+    side: 0,
+    /** Paddle centre along its side, 0..1 from vertex a to vertex b. */
+    t: 0.5,
+    /** Rate of change of `t`, carried into the ball as spin. */
     vel: 0,
     /** Stick deflection, -1..1, mirrored from the controller. */
     input: 0,
-    lives: LIVES_START,
+    /** Hits the side can still absorb. At zero the side is destroyed and the player is out. */
+    hp: WALL_HP,
     out: false,
     hits: 0,
   };
   match.players.set(deviceId, p);
+  assignSeats(match);
   return p;
 }
 
 export function removePlayer(match, deviceId) {
   match.players.delete(deviceId);
+  assignSeats(match);
 }
 
 /**
@@ -175,34 +277,73 @@ export function clearInput(match, deviceId) {
   if (p) p.input = 0;
 }
 
+/**
+ * Re-seat everyone and resize the polygon to the live roster.
+ *
+ * This is the one place the arena's shape is decided. Seats go to live players in device-id
+ * order so the seating is stable and predictable, and eliminated players are parked off the
+ * polygon entirely — their side is gone, which is exactly what shrinks the field.
+ */
+export function assignSeats(match) {
+  const live = [...match.players.values()].filter((p) => !p.out).sort((a, b) => a.id - b.id);
+  match.sides = sideCountFor(live.length);
+  live.forEach((p, i) => {
+    // With 1-2 players on the fallback square, seat them on opposite sides so they face each
+    // other rather than sharing a corner.
+    p.side = live.length <= 2 ? i * 2 : i;
+  });
+  for (const p of match.players.values()) if (p.out) p.side = -1;
+}
+
+/** The live player defending side `index`, or undefined when that side is unclaimed. */
+export function defenderOf(match, index) {
+  for (const p of match.players.values()) {
+    if (!p.out && p.side === index) return p;
+  }
+  return undefined;
+}
+
 /* ---------------------------------------------------------------- paddle geometry */
 
-/**
- * Half the travel available to a paddle centre. The paddle stays fully inside the field, so
- * the corners are always covered by whichever paddle owns that stretch of wall.
- */
-function halfTravel() {
-  return FIELD / 2 - PADDLE_LEN / 2;
+/** Half the paddle's length, in world units, on the current polygon. */
+function paddleHalf(match) {
+  return (sideGeometry(match.sides, 0).len * PADDLE_SPAN) / 2;
 }
 
 /**
- * The paddle's box in world space: { x, y, w, h }.
+ * The paddle's centre point and orientation on its side.
  *
- * Derived from the wall table, so the horizontal and vertical walls cannot drift apart. The
- * box is the collision surface and the thing the screen draws, which is what keeps the
- * drawing honest about what will actually be hit.
+ * Returns the centre in world space plus the side's own direction and inward normal, which is
+ * everything both the collision test and the renderer need. `t` is clamped so the paddle
+ * always stays fully on its own edge and never overhangs a vertex into a neighbour's side.
  */
-export function paddleBox(p) {
-  const w = WALLS[p.wall];
-  const half = PADDLE_LEN / 2;
-  // Distance from the wall plane to the paddle's inner face, measured into the field.
-  const near = PADDLE_INSET;
-  if (w.axis === "x") {
-    const y = w.normal > 0 ? w.at + near : w.at - near - PADDLE_THICK;
-    return { x: p.pos - half, y, w: PADDLE_LEN, h: PADDLE_THICK };
-  }
-  const x = w.normal > 0 ? w.at + near : w.at - near - PADDLE_THICK;
-  return { x, y: p.pos - half, w: PADDLE_THICK, h: PADDLE_LEN };
+export function paddleAt(match, p) {
+  const g = sideGeometry(match.sides, p.side);
+  const half = paddleHalf(match);
+  // Fraction of the edge the paddle's half-length occupies, so clamping is in `t` units.
+  const margin = half / g.len;
+  const t = Math.max(margin, Math.min(1 - margin, p.t));
+  // Sit the paddle inward from the wall by its inset plus half its thickness.
+  const off = PADDLE_INSET + PADDLE_THICK / 2;
+  const x = g.a.x + g.dx * (g.len * t) + g.nx * off;
+  const y = g.a.y + g.dy * (g.len * t) + g.ny * off;
+  return { x, y, half, g, t };
+}
+
+/** Backwards-compatible corner list for a paddle, for renderers that want a quad. */
+export function paddleQuad(match, p) {
+  const pad = paddleAt(match, p);
+  const { g, half } = pad;
+  const hx = g.dx * half;
+  const hy = g.dy * half;
+  const tx = g.nx * (PADDLE_THICK / 2);
+  const ty = g.ny * (PADDLE_THICK / 2);
+  return [
+    { x: pad.x - hx - tx, y: pad.y - hy - ty },
+    { x: pad.x + hx - tx, y: pad.y + hy - ty },
+    { x: pad.x + hx + tx, y: pad.y + hy + ty },
+    { x: pad.x - hx + tx, y: pad.y - hy + ty },
+  ];
 }
 
 /* ----------------------------------------------------------------------- step */
@@ -216,7 +357,7 @@ export function paddleBox(p) {
 export function step(match, dt) {
   match.time += dt;
 
-  for (const p of match.players.values()) stepPaddle(p, dt);
+  for (const p of match.players.values()) stepPaddle(match, p, dt);
 
   if (match.phase === "serve") {
     match.serveIn -= dt;
@@ -227,16 +368,43 @@ export function step(match, dt) {
 
   match.rallyTime += dt;
   stepBall(match, dt);
+  checkEscape(match);
+
+  // Break a rally that has become a closed orbit. Harmless when play is normal: 30 seconds is
+  // far longer than any real exchange.
+  if (match.phase === "rally" && match.rallyTime >= T_RALLY_MAX) {
+    match.events.push({ type: "stalemate" });
+    queueServe(match);
+  }
 }
 
-function stepPaddle(p, dt) {
+/**
+ * Recover a ball that has left the arena.
+ *
+ * The polygon re-forms the instant a side is destroyed, and the ball is very often outside
+ * the new, smaller shape when that happens — it was on its way to a wall that no longer
+ * exists. Rather than let it sail away forever, anything found beyond the circumradius is
+ * re-served. Without this the match silently stops: the ball is gone, no side can ever be
+ * hit, and the round never ends.
+ */
+function checkEscape(match) {
+  const b = match.ball;
+  if (Math.hypot(b.x - CENTER, b.y - CENTER) <= RADIUS + BALL_R * 4) return;
+  match.events.push({ type: "escape", x: b.x, y: b.y });
+  queueServe(match);
+}
+
+function stepPaddle(match, p, dt) {
   if (p.out) return;
-  const limit = halfTravel();
-  const prev = p.pos;
-  p.pos = Math.max(FIELD / 2 - limit, Math.min(FIELD / 2 + limit, p.pos + p.input * PADDLE_SPEED * dt));
+  const g = sideGeometry(match.sides, p.side);
+  const margin = paddleHalf(match) / g.len;
+  const prev = p.t;
+  // Speed is in edge-fractions per second, so a short octagon side is crossed as quickly as a
+  // long triangle one and no seat feels sluggish.
+  p.t = Math.max(margin, Math.min(1 - margin, p.t + p.input * PADDLE_SPEED_FRAC * dt));
   // Measured rather than assumed: a paddle pinned against its travel limit has zero velocity
   // and must not keep imparting spin as though it were still moving.
-  p.vel = dt > 0 ? (p.pos - prev) / dt : 0;
+  p.vel = dt > 0 ? (p.t - prev) / dt : 0;
 }
 
 /**
@@ -264,137 +432,148 @@ function subStepBall(match, dt) {
     tryPaddle(match, p);
   }
 
-  resolveWalls(match);
+  resolveSides(match);
 }
 
 /**
  * Reflect the ball off one paddle, if it is touching and heading into it.
  *
- * The direction test matters as much as the overlap: without it a ball that clips the end of
- * a paddle gets reflected on two consecutive frames and ends up travelling back through the
- * paddle it just bounced off.
+ * Worked in the paddle's own frame: distance along the edge and distance along the inward
+ * normal. That reduces an arbitrarily-rotated paddle to the same box test the square version
+ * used, so the maths stays simple no matter how many sides the arena has.
  */
 function tryPaddle(match, p) {
   const b = match.ball;
-  const w = WALLS[p.wall];
-  const box = paddleBox(p);
+  const pad = paddleAt(match, p);
+  const g = pad.g;
 
-  // Circle vs axis-aligned box, done as a distance to the nearest point on the box.
-  const nx = Math.max(box.x, Math.min(b.x, box.x + box.w));
-  const ny = Math.max(box.y, Math.min(b.y, box.y + box.h));
-  const dx = b.x - nx;
-  const dy = b.y - ny;
-  if (dx * dx + dy * dy > BALL_R * BALL_R) return;
+  const rx = b.x - pad.x;
+  const ry = b.y - pad.y;
+  const along = rx * g.dx + ry * g.dy;        // along the edge, 0 at the paddle's centre
+  const into = rx * g.nx + ry * g.ny;         // toward the field centre
 
-  // Velocity component along the wall's inward normal. Positive means it is still moving
-  // deeper into the paddle, which is the only case worth reflecting.
-  const inward = w.perp === "y" ? b.vy : b.vx;
-  if (inward * -w.normal <= 0) return;
+  const halfT = PADDLE_THICK / 2;
+  // Nearest point on the paddle rectangle, in the same local frame.
+  const ca = Math.max(-pad.half, Math.min(along, pad.half));
+  const ct = Math.max(-halfT, Math.min(into, halfT));
+  const da = along - ca;
+  const dt2 = into - ct;
+  if (da * da + dt2 * dt2 > BALL_R * BALL_R) return;
 
-  // Where on the paddle it landed, -1 at one end and 1 at the other. This is the placement
-  // control: hitting with the end of the paddle throws the ball out at an angle.
-  const along = w.axis === "x" ? b.x : b.y;
-  const offset = Math.max(-1, Math.min(1, (along - p.pos) / (PADDLE_LEN / 2)));
+  // Only reflect a ball still travelling into the paddle. Without this a ball that clips the
+  // end gets reflected on two consecutive frames and ends up going back through the paddle.
+  const vn = b.vx * g.nx + b.vy * g.ny;       // positive = moving toward the centre
+  if (vn >= 0) return;
 
-  reflect(match, p, offset);
+  // Where along the paddle it landed, -1..1. This is the placement control: hitting with the
+  // end of the paddle throws the ball out at an angle.
+  const offset = Math.max(-1, Math.min(1, along / pad.half));
+
+  reflect(match, p, pad, offset);
   p.hits++;
   match.rally++;
-  match.events.push({ type: "paddle", id: p.id, x: b.x, y: b.y, wall: p.wall, offset });
+  match.events.push({ type: "paddle", id: p.id, x: b.x, y: b.y, side: p.side, offset });
 }
 
 /**
  * Turn a contact into an outgoing velocity.
  *
- * The normal component is simply flipped; the tangential component is rebuilt from the
- * contact offset and the paddle's own motion. Rebuilding rather than adjusting is what keeps
+ * The normal component is rebuilt pointing into the field and the tangential component comes
+ * from the contact offset and the paddle's own motion. Rebuilding rather than adjusting keeps
  * the shot predictable — the same contact always produces the same return, regardless of how
  * the ball happened to arrive.
  */
-function reflect(match, p, offset) {
+function reflect(match, p, pad, offset) {
   const b = match.ball;
-  const w = WALLS[p.wall];
+  const g = pad.g;
   const speed = Math.min(BALL_SPEED_MAX, b.speed * BALL_SPEEDUP);
   b.speed = speed;
 
-  // Tangential share, then whatever is left goes into the normal.
-  let tangent = offset * SPIN_FROM_OFFSET + (p.vel / PADDLE_SPEED) * SPIN_FROM_PADDLE;
+  let tangent = offset * SPIN_FROM_OFFSET + (p.vel / PADDLE_SPEED_FRAC) * SPIN_FROM_PADDLE;
   const maxTangent = Math.sqrt(1 - MIN_NORMAL_SHARE * MIN_NORMAL_SHARE);
   tangent = Math.max(-maxTangent, Math.min(maxTangent, tangent));
-  const normal = Math.sqrt(Math.max(0, 1 - tangent * tangent)) * w.normal;
+  const normal = Math.sqrt(Math.max(0, 1 - tangent * tangent));
 
-  if (w.axis === "x") { b.vx = tangent * speed; b.vy = normal * speed; }
-  else { b.vy = tangent * speed; b.vx = normal * speed; }
+  // Recompose in world space: `normal` along the inward normal, `tangent` along the edge.
+  b.vx = (g.nx * normal + g.dx * tangent) * speed;
+  b.vy = (g.ny * normal + g.dy * tangent) * speed;
 
   // Push clear of the paddle so the next frame cannot re-trigger the same contact.
-  const box = paddleBox(p);
-  if (w.perp === "y") b.y = w.normal > 0 ? box.y + box.h + BALL_R + 0.5 : box.y - BALL_R - 0.5;
-  else b.x = w.normal > 0 ? box.x + box.w + BALL_R + 0.5 : box.x - BALL_R - 0.5;
+  const clear = PADDLE_THICK / 2 + BALL_R + 0.5;
+  b.x = pad.x + g.dx * (offset * pad.half) + g.nx * clear;
+  b.y = pad.y + g.dy * (offset * pad.half) + g.ny * clear;
 }
 
 /**
- * Handle the ball reaching a wall: a goal against whoever is defending it, or a plain bounce
- * where the wall is unmanned.
+ * Handle the ball reaching the polygon's boundary.
  *
- * An empty wall bouncing is what makes 2- and 3-player games work at all — with two players
- * the left and right walls are simply the sides of a classic Pong table.
+ * A defended side takes damage; an unclaimed one just bounces. A destroyed side is a genuine
+ * gap — the ball passes straight through it and out of the arena, which is caught by the
+ * escape test below rather than here.
  */
-function resolveWalls(match) {
+function resolveSides(match) {
   const b = match.ball;
-  for (const wall of SEAT_ORDER) {
-    const w = WALLS[wall];
-    const coord = w.perp === "y" ? b.y : b.x;
-    // Past the wall plane, measured inward-negative: >0 means it has crossed.
-    const past = w.normal > 0 ? -(coord - w.at) : coord - w.at;
-    if (past < -BALL_R) continue;
+  const n = match.sides;
 
-    const keeper = defenderOf(match, wall);
+  for (let i = 0; i < n; i++) {
+    const g = sideGeometry(n, i);
+    // Signed distance from the wall plane, positive on the inside.
+    const depth = (b.x - g.mx) * g.nx + (b.y - g.my) * g.ny;
+    if (depth > BALL_R) continue;
+
+    // Only the stretch of wall this side actually spans; beyond a vertex is a neighbour's
+    // problem, and testing the infinite plane would bounce the ball off walls it is nowhere
+    // near on a polygon with many sides.
+    const along = (b.x - g.a.x) * g.dx + (b.y - g.a.y) * g.dy;
+    if (along < -BALL_R || along > g.len + BALL_R) continue;
+
+    const keeper = defenderOf(match, i);
+
     if (keeper && match.rallyTime >= T_GRACE) {
-      concede(match, keeper);
+      damageSide(match, keeper, b.x, b.y);
       return;
     }
-    if (keeper && match.rallyTime < T_GRACE) {
-      // Serve grace: a ball that somehow reaches a wall in the first moments is bounced
-      // rather than scored, so nobody loses a life to the serve itself.
-      bounceOffWall(b, w);
-      continue;
-    }
-    bounceOffWall(b, w);
+    // Serve grace, or an unclaimed side: bounce rather than score, so nobody loses a wall to
+    // the serve itself and an open side stays a plain bouncy edge.
+    bounceOffSide(b, g);
   }
 }
 
-function bounceOffWall(b, w) {
-  if (w.perp === "y") {
-    b.y = w.at + w.normal * (BALL_R + 0.5);
-    b.vy = Math.abs(b.vy) * w.normal;
-  } else {
-    b.x = w.at + w.normal * (BALL_R + 0.5);
-    b.vx = Math.abs(b.vx) * w.normal;
+function bounceOffSide(b, g) {
+  const vn = b.vx * g.nx + b.vy * g.ny;
+  if (vn < 0) {
+    // Reflect the normal component back into the field.
+    b.vx -= 2 * vn * g.nx;
+    b.vy -= 2 * vn * g.ny;
   }
-}
-
-/** The live player defending a wall, or undefined when that wall is open. */
-function defenderOf(match, wall) {
-  for (const p of match.players.values()) {
-    if (p.wall === wall && !p.out) return p;
-  }
-  return undefined;
+  // Lift clear of the wall so the next frame cannot re-trigger the same contact.
+  const depth = (b.x - g.mx) * g.nx + (b.y - g.my) * g.ny;
+  const push = BALL_R + 0.5 - depth;
+  if (push > 0) { b.x += g.nx * push; b.y += g.ny * push; }
 }
 
 /* ---------------------------------------------------------------------- scoring */
 
-function concede(match, p) {
-  p.lives = Math.max(0, p.lives - 1);
+/**
+ * A hit on a defended side. Three of them turn it green -> yellow -> red; the fourth destroys
+ * the side, eliminates the player, and shrinks the arena.
+ */
+function damageSide(match, p, x, y) {
+  p.hp = Math.max(0, p.hp - 1);
   match.ball.live = false;
-  match.events.push({ type: "goal", id: p.id, wall: p.wall, x: match.ball.x, y: match.ball.y });
+  match.events.push({ type: "hit", id: p.id, side: p.side, hp: p.hp, x, y });
 
-  if (p.lives === 0) {
+  if (p.hp === 0) {
     p.out = true;
-    match.events.push({ type: "eliminated", id: p.id, wall: p.wall });
+    match.events.push({ type: "destroyed", id: p.id, side: p.side, x, y });
+    // Re-form the polygon around whoever is left. This is the moment the field shrinks.
+    assignSeats(match);
+    match.events.push({ type: "reshape", sides: match.sides });
   }
 
   const alive = [...match.players.values()].filter((q) => !q.out);
   // One player left standing ends it. With a single player at the table there is nobody to
-  // outlast, so running out of lives is simply the end of the run.
+  // outlast, so running out of wall is simply the end of the run.
   if (alive.length <= 1 && match.players.size > 1) {
     finish(match, alive[0] ? alive[0].id : null);
     return;
@@ -421,8 +600,8 @@ export function queueServe(match) {
   match.serveIn = T_SERVE;
   match.rally = 0;
   const b = match.ball;
-  b.x = FIELD / 2;
-  b.y = FIELD / 2;
+  b.x = CENTER;
+  b.y = CENTER;
   b.vx = 0;
   b.vy = 0;
   b.live = false;
@@ -434,27 +613,26 @@ export function queueServe(match) {
  * Launch the ball toward a random live player.
  *
  * Aiming at a player rather than in a random direction means every serve immediately belongs
- * to someone: nobody watches the ball drift into an empty wall and wonder whose point it was.
+ * to someone: nobody watches the ball drift into an open side and wonder whose point it was.
  */
 function beginRally(match) {
   const alive = [...match.players.values()].filter((p) => !p.out);
   if (alive.length === 0) return;
 
   const target = alive[Math.floor(rand(match) * alive.length) % alive.length];
-  const w = WALLS[target.wall];
+  const g = sideGeometry(match.sides, target.side);
 
-  // Aim at the target's wall, offset along it so the serve is not always dead centre.
-  const spread = (rand(match) - 0.5) * 0.7;
+  // Aim at a point on the target's side, offset along it so the serve is not always dead
+  // centre. Kept well inside the vertices so the opening shot is always genuinely theirs.
+  const spread = (rand(match) - 0.5) * 0.5;
+  const aimX = g.mx + g.dx * (g.len * spread);
+  const aimY = g.my + g.dy * (g.len * spread);
+
   const b = match.ball;
+  const mag = Math.hypot(aimX - CENTER, aimY - CENTER) || 1;
   b.speed = BALL_SPEED_START;
-  if (w.axis === "x") { b.vx = spread * b.speed; b.vy = -w.normal * b.speed; }
-  else { b.vy = spread * b.speed; b.vx = -w.normal * b.speed; }
-
-  // Renormalise: the spread above lengthens the vector, and the ball's speed is the one thing
-  // the rest of the sim assumes is exactly `speed`.
-  const mag = Math.hypot(b.vx, b.vy) || 1;
-  b.vx = (b.vx / mag) * b.speed;
-  b.vy = (b.vy / mag) * b.speed;
+  b.vx = ((aimX - CENTER) / mag) * b.speed;
+  b.vy = ((aimY - CENTER) / mag) * b.speed;
 
   b.live = true;
   match.phase = "rally";
@@ -469,29 +647,18 @@ export function restart(match) {
   match.winner = null;
   match.rally = 0;
   for (const p of match.players.values()) {
-    p.lives = LIVES_START;
+    p.hp = WALL_HP;
     p.out = false;
-    p.pos = FIELD / 2;
+    p.t = 0.5;
     p.vel = 0;
     p.input = 0;
     p.hits = 0;
   }
+  assignSeats(match);
   match.events.push({ type: "start" });
   queueServe(match);
 }
 
-/**
- * Re-seat everyone so seats stay packed after a disconnect.
- *
- * Called whenever the roster changes. Lower device ids take earlier seats, which makes the
- * seating stable and predictable: the same room always sits down the same way.
- */
-export function assignSeats(match) {
-  const ids = [...match.players.keys()].sort((a, b) => a - b);
-  ids.forEach((id, i) => {
-    const p = match.players.get(id);
-    if (p) p.wall = SEAT_ORDER[i % SEAT_ORDER.length];
-  });
-}
-
-export { LIVES_START, T_SERVE, BALL_SPEED_START, BALL_SPEED_MAX, PADDLE_SPEED };
+export {
+  T_SERVE, T_GRACE, BALL_SPEED_START, BALL_SPEED_MAX, PADDLE_SPAN, PADDLE_SPEED_FRAC,
+};
